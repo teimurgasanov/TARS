@@ -1,6 +1,6 @@
 # TARS development rules
 
-Baseline: version 0.9.344 on branch main.
+Baseline: version 0.9.344 on branch master.
 Development work: branch develop.
 
 For every task:
@@ -20,4 +20,4 @@ For every task:
    - calculations/payroll
    - Rocket.Chat integration
 9. Prefer small targeted patches over rewrites.
-10. main / version 0.9.344 is the rollback baseline and must not be modified.
+10. master / version 0.9.344 is the rollback baseline and must not be modified.
