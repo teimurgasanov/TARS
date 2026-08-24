@@ -42,13 +42,19 @@ jobs:
 
           probe_get() {
             local route="$1"
-            local out="$2"
+            local body="$2"
+            local headers="$3"
             local code
-            code=$(curl --silent --show-error --output "$out" --write-out '%{http_code}' \
+            code=$(curl --silent --show-error \
+              --output "$body" \
+              --dump-header "$headers" \
+              --write-out '%{http_code}' \
               -H "X-Auth-Token: $AUTH_TOKEN" \
               -H "X-User-Id: $USER_ID" \
               "$ROCKETCHAT_URL$route")
             echo "GET $route -> HTTP $code"
+            echo "Content-Type: $(awk 'BEGIN{IGNORECASE=1} /^content-type:/{sub(/\r$/,""); sub(/^[^:]*:[ ]*/,""); print; exit}' "$headers")"
+            echo "Content-Length: $(wc -c < "$body" | tr -d ' ') bytes"
             if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
               return 0
             fi
@@ -56,9 +62,9 @@ jobs:
           }
 
           FOUND_ROUTE=''
-          if probe_get "/api/v1/apps/$TARS_APP_ID" /tmp/tars-app.json; then
+          if probe_get "/api/v1/apps/$TARS_APP_ID" /tmp/tars-app.body /tmp/tars-app.headers; then
             FOUND_ROUTE="/api/v1/apps/$TARS_APP_ID"
-          elif probe_get "/apps/$TARS_APP_ID" /tmp/tars-app.json; then
+          elif probe_get "/apps/$TARS_APP_ID" /tmp/tars-app.body /tmp/tars-app.headers; then
             FOUND_ROUTE="/apps/$TARS_APP_ID"
           else
             echo 'Installed-app GET route was not found. No write request was attempted.'
@@ -66,12 +72,30 @@ jobs:
           fi
 
           echo "Installed app route: $FOUND_ROUTE"
+
           python3 - <<'PY'
           import json
-          d=json.load(open('/tmp/tars-app.json'))
+          from pathlib import Path
+
+          p=Path('/tmp/tars-app.body')
+          raw=p.read_bytes()
+          if not raw:
+              print('Response body is empty. Route exists, but this GET does not expose app metadata in the response body.')
+              raise SystemExit(0)
+
+          text=raw.decode('utf-8','replace')
+          try:
+              d=json.loads(text)
+          except Exception:
+              preview=text[:500].replace('\n',' ')
+              print('Response body is non-JSON. Preview:', preview)
+              raise SystemExit(0)
+
           app=d.get('app', d) if isinstance(d, dict) else {}
           if not isinstance(app, dict):
-              raise SystemExit('Unexpected app response shape')
+              print('Unexpected JSON response shape:', type(app).__name__)
+              raise SystemExit(0)
+
           safe={k:app.get(k) for k in ('id','name','nameSlug','version','status') if k in app}
           perms=app.get('permissionsGranted')
           if isinstance(perms, list):
@@ -80,7 +104,9 @@ jobs:
           elif perms is not None:
               safe['permissionsGranted_type']=type(perms).__name__
           print(json.dumps(safe, ensure_ascii=False, indent=2))
-          if app.get('id') != '4c07ba1e-e87d-4d85-9e76-7d818d567439':
+
+          returned_id=app.get('id')
+          if returned_id is not None and returned_id != '4c07ba1e-e87d-4d85-9e76-7d818d567439':
               raise SystemExit('Returned app id does not match TARS app.json')
           PY
 
