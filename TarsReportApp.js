@@ -3594,6 +3594,34 @@ var require_upload_duplicate_guard = __commonJS({
       const text = String(reason || "");
       return Boolean(text && text.indexOf("⚠️") !== 0);
     }
+    function localCalendarParts(timestamp, config) {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: config && config.timeZone || "Europe/Astrakhan",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }).formatToParts(new Date(Number(timestamp || Date.now())));
+      const values = {};
+      for (const part of parts) values[part.type] = part.value;
+      return {
+        date: `${values.year}-${values.month}-${values.day}`,
+        hour: Number(values.hour || 0) % 24,
+        minute: Number(values.minute || 0)
+      };
+    }
+    function personalChatCleanupReady(now, config) {
+      const local = localCalendarParts(now, config);
+      return local.hour >= 12;
+    }
+    function personalChatMessageIsExpired(createdAt, now, config) {
+      if (!createdAt || !personalChatCleanupReady(now, config)) return false;
+      const messageWorkday = workdayForTimestamp(createdAt, config);
+      const currentWorkday = workdayForTimestamp(now, config);
+      return Boolean(messageWorkday && currentWorkday && messageWorkday < currentWorkday);
+    }
     function workdayForTimestamp(timestamp, config) {
       const cutoffHour = Math.min(12, Math.max(0, Number(config.cutoffHour) || 4));
       const shifted = new Date(Number(timestamp || Date.now()) - cutoffHour * 60 * 60 * 1e3);
@@ -3780,14 +3808,152 @@ var require_upload_duplicate_guard = __commonJS({
       // amount and bad status are never confirmed or copied to the archive.
       return validateReceiptDate(file, content, http, config, logger, 0);
     }
+    function personalArchiveMessageAssociation(messageId) {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `personal-chat-archive:${String(messageId || "")}`);
+    }
+    async function archiveTextMessageOnce(oldMessage, room, read, persistence, modify, config, logger) {
+      if (!oldMessage || !oldMessage.id || !oldMessage.text || !String(oldMessage.text).trim()) return true;
+      if (!persistence) return false;
+      const association = personalArchiveMessageAssociation(oldMessage.id);
+      const previous = await read.getPersistenceReader().readByAssociation(association);
+      if ((previous || []).some((entry) => entry && entry.archiveStatus === "stored" && entry.messageId === oldMessage.id)) return true;
+      const archived = await archiveTextMessage(oldMessage, room, read, modify, config, logger);
+      if (!archived) return false;
+      await persistence.createWithAssociation({
+        messageId: oldMessage.id,
+        roomId: room && room.id || "",
+        archiveStatus: "stored",
+        archivedAt: Date.now()
+      }, association);
+      return true;
+    }
+    function personalReportPhotoWasForwarded(entry) {
+      if (!entry) return false;
+      if (entry.reportUploadId) return true;
+      const reportMessageId = String(entry.reportMessageId || "");
+      if (reportMessageId === "duplicate") return true;
+      if (!reportMessageId || reportMessageId === "publishing") return false;
+      if (/^(?:blocked|failed)/i.test(reportMessageId)) return false;
+      return true;
+    }
+    function acceptedReceiptEntry(entry) {
+      if (!entry) return false;
+      return entry.source !== "pre" && entry.source !== "invalid" && entry.source !== "rejected" && entry.source !== "archive_failed" && entry.source !== "duplicate" && Boolean(entry.receiptDate || entry.receiptIdentity);
+    }
+    async function archiveAndCleanupPersonalRoomAtNoon(room, read, persistence, modify, config, logger, now = Date.now()) {
+      if (!room || !isPersonalTarsRoom(room) || !read || !persistence || !modify || !config || !config.archiveEnabled) return 0;
+      if (!personalChatCleanupReady(now, config)) return 0;
+      const receiptIndex = await readIndex(read, PROTECTED_ROOMS.kassa.index);
+      const photoIndex = await readIndex(read, PROTECTED_ROOMS.otchet.index);
+      let deleted = 0;
+      let receiptIndexChanged = false;
+      for (let page = 0; page < 20; page += 1) {
+        const messages = await read.getRoomReader().getMessages(room.id, {
+          limit: 100,
+          skip: 0,
+          sort: { createdAt: "asc" },
+          showThreadMessages: true
+        });
+        if (!messages || !messages.length) break;
+        let foundExpired = false;
+        let deletedThisPage = 0;
+        for (const oldMessage of messages) {
+          const createdAt = oldMessage && oldMessage.createdAt ? new Date(oldMessage.createdAt).getTime() : 0;
+          if (!personalChatMessageIsExpired(createdAt, now, config)) continue;
+          foundExpired = true;
+          if (!oldMessage.id || !oldMessage.sender) continue;
+          const files = messageImageFiles(oldMessage);
+          let imagesSafe = true;
+          const receiptEntriesForMessage = [];
+          for (const messageFile of files) {
+            const uploadId = String(messageFile && (messageFile._id || messageFile.id) || "");
+            if (!uploadId) {
+              imagesSafe = false;
+              break;
+            }
+            let receiptEntry = (receiptIndex.photos || []).find((entry) => entry && (String(entry.messageId || "") === String(oldMessage.id) || String(entry.uploadId || "") === uploadId) && acceptedReceiptEntry(entry));
+            let upload;
+            let content;
+            let exact = receiptEntry && receiptEntry.exact || "";
+            if (!receiptEntry) {
+              try {
+                content = await read.getUploadReader().getBufferById(uploadId);
+                exact = exactHash(content);
+                const exactEntry = findExactDuplicate(receiptIndex, exact);
+                if (acceptedReceiptEntry(exactEntry)) receiptEntry = exactEntry;
+              } catch (_8) {
+              }
+            }
+            if (receiptEntry) {
+              try {
+                if (!content) content = await read.getUploadReader().getBufferById(uploadId);
+                if (!upload) upload = await read.getUploadReader().getById(uploadId);
+                exact = exact || receiptEntry.exact || exactHash(content);
+                if (!receiptEntry.archiveKey || receiptEntry.archiveStatus !== "stored" || !await archiveUploadExists(receiptEntry, read)) {
+                  const archived = await archiveReceipt({
+                    ...messageFile,
+                    name: messageFile.name || upload && upload.name || "receipt.jpg",
+                    type: messageFile.type || upload && upload.type || "image/jpeg",
+                    userId: receiptEntry.userId || oldMessage.sender && oldMessage.sender.id || ""
+                  }, content, {
+                    receiptDate: receiptEntry.receiptDate || dateFromEntry(receiptEntry, config),
+                    receiptAmount: amountFromEntry(receiptEntry),
+                    receiptIdentity: receiptEntry.receiptIdentity
+                  }, exact, read, persistence, modify, config, logger);
+                  if (!archived || archived.archiveStatus !== "stored" || !archived.archiveKey) throw new Error("Rocket.Chat receipt archive did not confirm storage");
+                  Object.assign(receiptEntry, archived);
+                  receiptEntry.source = "confirmed";
+                  receiptEntry.invalidReason = "";
+                  receiptIndexChanged = true;
+                }
+                if (!receiptEntry.archiveKey || receiptEntry.archiveStatus !== "stored" || !await archiveUploadExists(receiptEntry, read)) {
+                  imagesSafe = false;
+                  break;
+                }
+                receiptEntriesForMessage.push(receiptEntry);
+                continue;
+              } catch (error) {
+                imagesSafe = false;
+                if (logger) logger.warn(`Could not archive personal receipt before noon cleanup ${oldMessage.id}: ${error && error.message || error}`);
+                break;
+              }
+            }
+            const photoEntry = (photoIndex.photos || []).find((entry) => entry && (String(entry.messageId || entry.sourceMessageId || "") === String(oldMessage.id) || String(entry.uploadId || "") === uploadId));
+            if (!personalReportPhotoWasForwarded(photoEntry)) {
+              imagesSafe = false;
+              if (logger) logger.warn(`Personal image ${uploadId} was not archived as a receipt or confirmed in Otchet; keeping source message ${oldMessage.id}`);
+              break;
+            }
+          }
+          if (!imagesSafe) continue;
+          if (!await archiveTextMessageOnce(oldMessage, room, read, persistence, modify, config, logger)) continue;
+          if (!oldMessage.room || !oldMessage.room.id || String(oldMessage.room.id) !== String(room.id)) continue;
+          try {
+            await modify.getDeleter().deleteMessage(oldMessage, oldMessage.sender);
+            const deletedAt = Date.now();
+            for (const receiptEntry of receiptEntriesForMessage) {
+              receiptEntry.chatDeletedAt = deletedAt;
+              receiptIndexChanged = true;
+            }
+            deleted += 1;
+            deletedThisPage += 1;
+          } catch (error) {
+            if (logger) logger.warn(`Could not delete archived personal message ${oldMessage.id}: ${error && error.message || error}`);
+          }
+        }
+        if (!foundExpired || !deletedThisPage || messages.length < 100) break;
+      }
+      if (receiptIndexChanged) await writeIndex(persistence, PROTECTED_ROOMS.kassa.index, receiptIndex);
+      if (deleted && logger) logger.info(`Archived and deleted ${deleted} prior-day personal messages from ${room.id} after 12:00`);
+      return deleted;
+    }
     async function cleanupExpiredMasterRoom(room, currentUser, read, modify, config, logger) {
       if (!room || !isPersonalTarsRoom(room)) return 0;
-      // Messages are cleared once they belong to an earlier workday than
-      // today's, using the same cutoff-hour boundary as receipt/report
-      // workday calculations (see workdayForTimestamp). This makes the chat
-      // reset exactly at the configured cutoff hour every day instead of on
-      // a rolling 24-hour window.
-      const currentWorkday = expectedWorkday(config);
+      // Legacy callers may still request cleanup after message events. Keep
+      // them aligned with the dedicated noon job: nothing is removed before
+      // 12:00 local time, and only messages from an earlier workday qualify.
+      const cleanupNow = Date.now();
+      if (!personalChatCleanupReady(cleanupNow, config)) return 0;
       const archiveIndex = config && config.archiveEnabled ? await readIndex(read, PROTECTED_ROOMS.kassa.index) : null;
       let deleted = 0;
       for (let page = 0; page < 10; page += 1) {
@@ -3801,8 +3967,7 @@ var require_upload_duplicate_guard = __commonJS({
         let foundExpired = false;
         for (const oldMessage of messages) {
           const createdAt = oldMessage && oldMessage.createdAt ? new Date(oldMessage.createdAt).getTime() : 0;
-          const messageWorkday = createdAt ? workdayForTimestamp(createdAt, config) : "";
-          if (!createdAt || !messageWorkday || messageWorkday >= currentWorkday) continue;
+          if (!personalChatMessageIsExpired(createdAt, cleanupNow, config)) continue;
           foundExpired = true;
           if (!oldMessage.id || !oldMessage.sender) continue;
           const oldFiles = [];
@@ -5256,6 +5421,10 @@ var require_upload_duplicate_guard = __commonJS({
       directFileIntent,
       isArchiveRoom,
       isKnownArchiveRoom,
+      localCalendarParts,
+      personalChatCleanupReady,
+      personalChatMessageIsExpired,
+      archiveAndCleanupPersonalRoomAtNoon,
       cleanupExpiredMasterRoom,
       cleanupArchivedReceiptMessages,
       cleanupExpiredReceiptArchive,
@@ -5468,6 +5637,14 @@ var C = class extends j.App {
       i18nDescription: "receipt_archive_secret_key_description"
     });
     e.scheduler.registerProcessors([{
+      id: "archive-personal-rooms-noon",
+      processor: async (jobContext, read, modify, http, persistence) => this.archivePersonalRoomsAtNoonJob(jobContext, read, modify, http, persistence),
+      startupSetting: {
+        type: J.StartupType.RECURRING,
+        interval: "5 minutes",
+        skipImmediate: true
+      }
+    }, {
       id: "cleanup-private-cash-rooms",
       processor: async (jobContext, read, modify, http, persistence) => this.cleanupPrivateCashRoomsJob(jobContext, read, modify, http, persistence),
       startupSetting: {
@@ -7395,6 +7572,28 @@ var C = class extends j.App {
       for (const c of o) await n.createWithAssociation(c, r);
     }
     await n.createWithAssociation({ roomId: s.id, masterUserId: t.id, username: t.username || "", updatedAt: Date.now() }, r);
+  }
+  async archivePersonalRoomsAtNoonJob(e, n, t, s, r) {
+    if (!r) return 0;
+    const config = await this.receiptOcrConfig(n);
+    if (!G.personalChatCleanupReady(Date.now(), config)) return 0;
+    const association = this.privateCashRoomsAssociation();
+    const records = await n.getPersistenceReader().readByAssociation(association);
+    let archivedAndDeleted = 0;
+    const seenRooms = {};
+    for (const record of records || []) {
+      if (!record || !record.roomId || seenRooms[record.roomId]) continue;
+      seenRooms[record.roomId] = true;
+      try {
+        const room = await n.getRoomReader().getById(record.roomId);
+        if (!room) continue;
+        archivedAndDeleted += await G.archiveAndCleanupPersonalRoomAtNoon(room, n, r, t, config, this.getLogger());
+      } catch (error) {
+        this.getLogger().warn(`Could not archive/clear personal room ${record.roomId} at noon: ${error && error.message || error}`);
+      }
+    }
+    if (archivedAndDeleted) this.getLogger().info(`Noon personal cleanup archived and deleted ${archivedAndDeleted} message(s)`);
+    return archivedAndDeleted;
   }
   async cleanupPrivateCashRoomsJob(e, n, t, s, r) {
     let association = new y.RocketChatAssociationRecord(
