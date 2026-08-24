@@ -11,6 +11,11 @@ on:
         description: "Type DEPLOY to confirm installation"
         required: true
         type: string
+  push:
+    branches:
+      - main
+    paths:
+      - .github/deploy-target.txt
 
 permissions:
   contents: read
@@ -26,34 +31,70 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Require explicit confirmation
+      - name: Checkout deployment controller
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve approved target commit
+        id: target
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ inputs.confirm }}" != "DEPLOY" ]; then
-            echo "Deployment blocked: confirmation must be exactly DEPLOY."
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.confirm }}" != "DEPLOY" ]; then
+              echo "Deployment blocked: confirmation must be exactly DEPLOY."
+              exit 1
+            fi
+            TARGET_SHA="${{ inputs.commit_sha }}"
+            SOURCE="manual"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            test -f .github/deploy-target.txt || { echo "Deployment trigger file missing"; exit 1; }
+            TARGET_SHA="$(tr -d '[:space:]' < .github/deploy-target.txt)"
+            SOURCE="approved-trigger"
+          else
+            echo "Unsupported event: ${{ github.event_name }}"
             exit 1
           fi
+
+          case "$TARGET_SHA" in
+            ''|*[!0-9a-fA-F]* ) echo "Deployment blocked: target must be a commit SHA"; exit 1 ;;
+          esac
+          if [ "${#TARGET_SHA}" -lt 7 ] || [ "${#TARGET_SHA}" -gt 40 ]; then
+            echo "Deployment blocked: invalid SHA length"
+            exit 1
+          fi
+
+          git fetch origin develop main --no-tags
+          RESOLVED_SHA="$(git rev-parse "${TARGET_SHA}^{commit}")"
+          if ! git merge-base --is-ancestor "$RESOLVED_SHA" origin/develop; then
+            echo "Deployment blocked: requested commit is not contained in origin/develop."
+            exit 1
+          fi
+
+          echo "sha=$RESOLVED_SHA" >> "$GITHUB_OUTPUT"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          echo "Approved target: $RESOLVED_SHA ($SOURCE)"
 
       - name: Checkout reviewed commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ steps.target.outputs.sha }}
           fetch-depth: 0
 
-      - name: Verify commit belongs to develop
+      - name: Verify exact reviewed commit
         shell: bash
         run: |
           set -euo pipefail
           git fetch origin develop main --no-tags
           TARGET_SHA="$(git rev-parse HEAD)"
-          REQUESTED_SHA="$(git rev-parse '${{ inputs.commit_sha }}^{commit}')"
-          if [ "$TARGET_SHA" != "$REQUESTED_SHA" ]; then
-            echo "Deployment blocked: checked-out SHA does not match requested SHA."
+          if [ "$TARGET_SHA" != "${{ steps.target.outputs.sha }}" ]; then
+            echo "Deployment blocked: checked-out SHA does not match approved SHA."
             exit 1
           fi
           if ! git merge-base --is-ancestor "$TARGET_SHA" origin/develop; then
-            echo "Deployment blocked: requested commit is not contained in origin/develop."
+            echo "Deployment blocked: approved commit is not contained in origin/develop."
             exit 1
           fi
           echo "Reviewed commit verified: $TARGET_SHA"
@@ -213,5 +254,6 @@ jobs:
         run: |
           echo "Rocket.Chat private-app update completed."
           echo "Commit: $(git rev-parse HEAD)"
+          echo "Approval source: ${{ steps.target.outputs.source }}"
           python3 -c 'import json; print("Version:", json.load(open("app.json"))["version"])'
           echo "ZIP SHA-256: $ZIP_SHA256"
