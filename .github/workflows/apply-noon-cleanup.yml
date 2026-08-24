@@ -1,0 +1,40 @@
+name: Apply noon cleanup patch
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - "patches/noon-personal-cleanup.patch"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'chore: stage noon cleanup patch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - name: Apply checked patch
+        run: |
+          git apply --check patches/noon-personal-cleanup.patch
+          git apply patches/noon-personal-cleanup.patch
+      - name: Run targeted regression tests
+        run: |
+          node --check TarsReportApp.js
+          node tests/receipt-date.test.js
+          node tests/receipt-amount.test.js
+          node tests/receipt-identity.test.js
+          node tests/noon-personal-cleanup.test.js
+          node tests/noon-archive-safety.test.js
+          node tests/noon-financial-safety.test.js
+      - name: Commit source change to develop
+        run: |
+          git config user.name "TARS Regression Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add TarsReportApp.js
+          git commit -m "feat: archive and clear personal chats at noon"
+          git push origin HEAD:develop
