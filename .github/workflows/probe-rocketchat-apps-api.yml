@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Probe Rocket.Chat auth and Apps API
+      - name: Probe Rocket.Chat auth and private app routes
         shell: bash
         env:
           ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
@@ -38,45 +38,33 @@ jobs:
           test -n "$USER_ID" || { echo 'Login succeeded without userId; probe blocked'; exit 1; }
           echo "Rocket.Chat login: OK"
 
-          echo '--- GET /api/apps ---'
-          HTTP_CODE=$(curl --silent --show-error --output /tmp/apps.out --write-out '%{http_code}' \
-            -H "X-Auth-Token: $AUTH_TOKEN" \
-            -H "X-User-Id: $USER_ID" \
-            "$ROCKETCHAT_URL/api/apps")
-          echo "HTTP $HTTP_CODE"
-          python3 - <<'PY'
-          import json
-          p='/tmp/apps.out'
-          raw=open(p,'rb').read()
-          try:
-              text=raw.decode('utf-8','replace')
-              d=json.loads(text)
-              if isinstance(d, dict):
-                  safe={k:d.get(k) for k in ('success','error','status','message') if k in d}
-                  apps=d.get('apps')
-                  if isinstance(apps,list):
-                      safe['apps_count']=len(apps)
-                      safe['apps']=[{'id':a.get('id'),'name':a.get('name'),'status':a.get('status'),'version':a.get('version')} for a in apps[:20] if isinstance(a,dict)]
-                  print(json.dumps(safe, ensure_ascii=False))
-              else:
-                  print(type(d).__name__)
-          except Exception:
-              preview=raw[:300].decode('utf-8','replace').replace('\n',' ')
-              print('Non-JSON response preview:', preview)
-          PY
+          probe_route() {
+            local route="$1"
+            local out
+            out="/tmp/$(echo "$route" | tr '/.' '__').headers"
+            local code
+            code=$(curl --silent --show-error --output /dev/null --dump-header "$out" --write-out '%{http_code}' \
+              -X OPTIONS \
+              -H "X-Auth-Token: $AUTH_TOKEN" \
+              -H "X-User-Id: $USER_ID" \
+              -H 'Origin: https://github.com' \
+              "$ROCKETCHAT_URL$route")
+            echo "OPTIONS $route -> HTTP $code"
+            grep -iE '^(allow|access-control-allow-methods|location):' "$out" || true
+            if [ "$code" = "404" ]; then
+              return 1
+            fi
+            return 0
+          }
 
-          if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
-            echo 'Apps API exists but access is denied with current account/permissions.'
-            exit 1
-          fi
-          if [ "$HTTP_CODE" = "404" ]; then
-            echo 'Apps API route /api/apps is not available on this Rocket.Chat installation.'
-            exit 1
-          fi
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo 'Apps API probe returned an unexpected HTTP status.'
+          echo 'Frontend source identified private-app routes /apps and /apps/update.'
+          FOUND=0
+          if probe_route '/apps'; then FOUND=1; fi
+          if probe_route '/apps/update'; then FOUND=1; fi
+
+          if [ "$FOUND" -ne 1 ]; then
+            echo 'Neither frontend private-app route was visible to a safe OPTIONS probe.'
             exit 1
           fi
 
-          echo 'Apps API probe: OK'
-          echo 'Probe complete. No app upload, install, enable, disable, update, or delete request was sent.'
+          echo 'Safe route probe complete. No POST request, ZIP upload, install, update, enable, disable, or delete action was sent.'
