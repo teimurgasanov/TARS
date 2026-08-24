@@ -1,0 +1,42 @@
+--- a/TarsReportApp.js
++++ b/TarsReportApp.js
+@@ -5745,6 +5745,8 @@
+     const uploadEventKey = uploadIds.sort().join(",");
+     const invocationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+     let personalButtonAlreadyRefreshed = false;
++    let postMessageClaimToken = "";
++    let postMessageClaimFailed = false;
+     const localSeen = Boolean(messageId && recentPostMessageIds.has(messageId));
+     const localUploadSeen = Boolean(uploadEventKey && recentPostUploadIds.has(uploadEventKey));
+     this.getLogger().info(`POST_PROBE invocation=${invocationId} message=${messageId || "none"} room=${String(e && e.room && (e.room.slugifiedName || e.room.id) || "none")} uploads=${uploadEventKey || "none"} localSeen=${localSeen} localUploadSeen=${localUploadSeen}`);
+@@ -5755,6 +5757,13 @@
+       if (messageId) recentPostMessageIds.add(messageId);
+       if (uploadEventKey) recentPostUploadIds.add(uploadEventKey);
+       try {
++        if (uploadEventKey) {
++          postMessageClaimToken = await G.claimPostMessage(e, n, r, this.getLogger());
++          if (!postMessageClaimToken) {
++            this.getLogger().info(`POST_PROBE_SKIP_CLAIM invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
++            return;
++          }
++        }
+         const i = await this.receiptOcrConfig(n);
+         if (await this.handleMonthlyScheduleMessage(e, n, s, r)) return;
+         if (await this.handleMasterChatTextMessage(e, n, r, s)) return;
+@@ -5792,8 +5801,16 @@
+       if (G.isMasterTransferSumRequest(e) && await G.sendMasterTransferSummaryRequest(e, n, s, r, this.getLogger(), t, i)) return;
+       if (G.isTodayTransferSumRequest(e)) await G.sendTodayTransferSummary(e, n, s, r, this.getLogger(), t, i);
+     } catch (a) {
++      postMessageClaimFailed = true;
+       this.getLogger().warn(`Could not handle post-message event: ${a && a.message || a}`);
+     } finally {
++      if (postMessageClaimToken && !postMessageClaimFailed) {
++        try {
++          await G.completePostMessageClaim(e, postMessageClaimToken, r, this.getLogger());
++        } catch (claimError) {
++          this.getLogger().warn(`Could not complete post-message claim: ${claimError && claimError.message || claimError}`);
++        }
++      }
+       if (!personalButtonAlreadyRefreshed && this.isPersonalReportRoom(e && e.room) && e && e.sender) {
+         await this.refreshPersonalReportButton(n, r, s, e.room, e.sender);
+       }
