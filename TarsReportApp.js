@@ -4518,7 +4518,19 @@ var require_upload_duplicate_guard = __commonJS({
           seenFileIds[messageFileId] = true;
           const content = await read.getUploadReader().getBufferById(messageFileId);
           if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;
-          protectedRoom = await protectedRoomForPersonalFile(message, messageFile, content, intent, fallbackProtectedRoom, http, ocrConfig, logger);
+          let preclassifiedRoom;
+          if (personalRoom) {
+            for (const candidateRoom of [PROTECTED_ROOMS.kassa, PROTECTED_ROOMS.otchet]) {
+              const candidateIndex = await getScopedIndex(candidateRoom);
+              const preEntry = candidateIndex && candidateIndex.photos.find((entry) => entry && entry.source === "pre" && (String(entry.uploadAttemptKey || "") === messageFileId || String(entry.uploadId || "") === messageFileId));
+              if (preEntry) {
+                preclassifiedRoom = candidateRoom;
+                if (logger) logger.info(`Reused pre-upload ${candidateRoom.kind} classification for upload ${messageFileId}`);
+                break;
+              }
+            }
+          }
+          protectedRoom = preclassifiedRoom || await protectedRoomForPersonalFile(message, messageFile, content, intent, fallbackProtectedRoom, http, ocrConfig, logger);
           if (!protectedRoom) continue;
           const index = await getScopedIndex(protectedRoom);
           if (!index) continue;
