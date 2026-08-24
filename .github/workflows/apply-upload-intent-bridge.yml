@@ -1,0 +1,75 @@
+name: Apply upload intent bridge
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-upload-intent-bridge.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - name: Apply tested upload intent bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js')
+          s=p.read_text()
+          anchor='''    function uploadAttemptKey(file) {\n      if (!file) return "";\n      const value = file.uploadId || file._id || file.id;\n      return value === void 0 || value === null ? "" : String(value).trim();\n    }'''
+          insert=anchor+'''\n    function uploadIntentAssociation(uploadId) {\n      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `upload-intent:${String(uploadId || "")}`);\n    }\n    async function rememberUploadIntent(persistence, uploadId, intent) {\n      if (!persistence || !uploadId || !["receipt", "photo", "mailing"].includes(intent)) return;\n      await persistence.updateByAssociation(uploadIntentAssociation(uploadId), { uploadId: String(uploadId), intent, decidedAt: Date.now() }, true);\n    }\n    async function recalledUploadIntent(read, uploadId) {\n      if (!read || !uploadId) return void 0;\n      const rows = await read.getPersistenceReader().readByAssociation(uploadIntentAssociation(uploadId));\n      const row = rows && rows.length ? rows[rows.length - 1] : void 0;\n      return row && ["receipt", "photo", "mailing"].includes(row.intent) ? row.intent : void 0;\n    }'''
+          if s.count(anchor)!=1: raise SystemExit('uploadAttemptKey anchor mismatch')
+          s=s.replace(anchor,insert,1)
+          old='''  async executePreFileUpload(e, n, t, s, r) {\n    const config = await this.receiptOcrConfig(n);\n    await G.guardUpload(e, n, s, r, this.getLogger(), t, config);\n  }'''
+          new='''  async executePreFileUpload(e, n, t, s, r) {\n    const config = await this.receiptOcrConfig(n);\n    await G.guardUpload(e, n, s, r, this.getLogger(), t, config);\n    if (e && G.isPersonalTarsRoom(e.room)) {\n      const file = e.file || (Array.isArray(e.files) && e.files[0]);\n      const uploadId = G.uploadAttemptKey(file);\n      if (file && uploadId && file.content) {\n        const intent = await G.personalImageKindForPreUpload(file, file.content, t, config, this.getLogger());\n        if (intent) await G.rememberUploadIntent(s, uploadId, intent);\n      }\n    }\n  }'''
+          if s.count(old)!=1: raise SystemExit('pre upload anchor mismatch')
+          s=s.replace(old,new,1)
+          # Export helpers in module return object by extending existing export markers.
+          marker='''      uploadAttemptKey,'''
+          if marker not in s: raise SystemExit('export marker missing')
+          s=s.replace(marker, marker+'''\n      rememberUploadIntent,\n      recalledUploadIntent,\n      personalImageKindForPreUpload,''',1)
+          # In post-message, prefer persisted intent when available; direct caption remains fallback.
+          marker2='''      const directIntent = directFileIntent(e);'''
+          repl2='''      let directIntent = directFileIntent(e);\n      if (G.isPersonalTarsRoom(e && e.room) && uploadIds.length) {\n        const persistedIntent = await G.recalledUploadIntent(n, uploadIds[0]);\n        if (persistedIntent) directIntent = persistedIntent;\n      }'''
+          if s.count(marker2)!=1: raise SystemExit('post intent anchor mismatch')
+          s=s.replace(marker2,repl2,1)
+          p.write_text(s)
+          PY
+          node --check TarsReportApp.js
+      - name: Add bridge regression test
+        shell: bash
+        run: |
+          cat > tests/upload-intent-bridge.test.js <<'EOF'
+          const fs=require('fs'); const assert=require('assert');
+          const s=fs.readFileSync('TarsReportApp.js','utf8');
+          assert(s.includes('upload-intent:${String(uploadId || "")}'));
+          assert(s.includes('await G.rememberUploadIntent(s, uploadId, intent)'));
+          assert(s.includes('await G.recalledUploadIntent(n, uploadIds[0])'));
+          assert(s.indexOf('if (ocrReceipt) return "receipt"') < s.indexOf('if (aiPhoto) return "photo"', s.indexOf('async function personalImageKindForPreUpload')));
+          console.log('PASS: pre-upload intent persists into post-message routing');
+          EOF
+      - name: Run all tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in tests/*.test.js; do echo "==> $f"; node "$f"; done
+      - name: Commit only after all tests pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'TARS Automation'
+          git config user.email 'tars-automation@users.noreply.github.com'
+          git add TarsReportApp.js tests/upload-intent-bridge.test.js
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: persist personal upload intent across message stages'
+          git push origin HEAD:develop
