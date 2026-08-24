@@ -52,3 +52,5 @@ jobs:
           fi
           git commit -m 'fix: prefer OCR receipt over generic photo classification'
           git push origin HEAD:develop
+
+# trigger: receipt-routing-priority-v1
