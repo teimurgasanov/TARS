@@ -2676,8 +2676,8 @@ var require_upload_duplicate_guard = __commonJS({
       if (ocrMailing) return "mailing";
       if (aiMailing) return "mailing";
       if (aiReceipt) return "receipt";
-      if (aiPhoto) return "photo";
       if (ocrReceipt) return "receipt";
+      if (aiPhoto) return "photo";
       return void 0;
     }
     async function personalImageIsReceiptForPreUpload(file, content, http, config, logger) {
