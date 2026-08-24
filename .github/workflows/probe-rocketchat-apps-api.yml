@@ -38,25 +38,21 @@ jobs:
           test -n "$USER_ID" || { echo 'Login succeeded without userId; probe blocked'; exit 1; }
           echo "Rocket.Chat login: OK"
 
-          echo '--- /api/v1/info ---'
-          curl --fail-with-body --silent --show-error \
-            -H "X-Auth-Token: $AUTH_TOKEN" \
-            -H "X-User-Id: $USER_ID" \
-            "$ROCKETCHAT_URL/api/v1/info" \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"version": d.get("version"), "success": d.get("success")}, ensure_ascii=False))'
-
           echo '--- GET /api/apps ---'
-          HTTP_CODE=$(curl --silent --show-error --output /tmp/apps.json --write-out '%{http_code}' \
+          HTTP_CODE=$(curl --silent --show-error --output /tmp/apps.out --write-out '%{http_code}' \
             -H "X-Auth-Token: $AUTH_TOKEN" \
             -H "X-User-Id: $USER_ID" \
             "$ROCKETCHAT_URL/api/apps")
           echo "HTTP $HTTP_CODE"
           python3 - <<'PY'
           import json
+          p='/tmp/apps.out'
+          raw=open(p,'rb').read()
           try:
-              d=json.load(open('/tmp/apps.json'))
+              text=raw.decode('utf-8','replace')
+              d=json.loads(text)
               if isinstance(d, dict):
-                  safe={k:d.get(k) for k in ('success','error','status') if k in d}
+                  safe={k:d.get(k) for k in ('success','error','status','message') if k in d}
                   apps=d.get('apps')
                   if isinstance(apps,list):
                       safe['apps_count']=len(apps)
@@ -64,12 +60,23 @@ jobs:
                   print(json.dumps(safe, ensure_ascii=False))
               else:
                   print(type(d).__name__)
-          except Exception as e:
-              print('Non-JSON response:', str(e))
+          except Exception:
+              preview=raw[:300].decode('utf-8','replace').replace('\n',' ')
+              print('Non-JSON response preview:', preview)
           PY
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 500 ]; then
-            echo 'Apps API probe failed'
+
+          if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
+            echo 'Apps API exists but access is denied with current account/permissions.'
+            exit 1
+          fi
+          if [ "$HTTP_CODE" = "404" ]; then
+            echo 'Apps API route /api/apps is not available on this Rocket.Chat installation.'
+            exit 1
+          fi
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo 'Apps API probe returned an unexpected HTTP status.'
             exit 1
           fi
 
+          echo 'Apps API probe: OK'
           echo 'Probe complete. No app upload, install, enable, disable, update, or delete request was sent.'
