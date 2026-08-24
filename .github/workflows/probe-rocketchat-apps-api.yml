@@ -1,0 +1,75 @@
+name: Probe Rocket.Chat Apps API
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe Rocket.Chat auth and Apps API
+        shell: bash
+        env:
+          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
+          ROCKETCHAT_USER: ${{ secrets.ROCKETCHAT_USER }}
+          ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$ROCKETCHAT_URL"
+          test -n "$ROCKETCHAT_USER"
+          test -n "$ROCKETCHAT_PASSWORD"
+
+          LOGIN_JSON=$(curl --fail-with-body --silent --show-error \
+            -H 'Content-Type: application/json' \
+            --data "$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({'user': os.environ['ROCKETCHAT_USER'], 'password': os.environ['ROCKETCHAT_PASSWORD']}))
+          PY
+          )" \
+            "$ROCKETCHAT_URL/api/v1/login")
+
+          AUTH_TOKEN=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("data",{}).get("authToken", ""))' <<<"$LOGIN_JSON")
+          USER_ID=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("data",{}).get("userId", ""))' <<<"$LOGIN_JSON")
+          test -n "$AUTH_TOKEN" || { echo 'Login succeeded without authToken; probe blocked'; exit 1; }
+          test -n "$USER_ID" || { echo 'Login succeeded without userId; probe blocked'; exit 1; }
+          echo "Rocket.Chat login: OK"
+
+          echo '--- /api/v1/info ---'
+          curl --fail-with-body --silent --show-error \
+            -H "X-Auth-Token: $AUTH_TOKEN" \
+            -H "X-User-Id: $USER_ID" \
+            "$ROCKETCHAT_URL/api/v1/info" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps({"version": d.get("version"), "success": d.get("success")}, ensure_ascii=False))'
+
+          echo '--- GET /api/apps ---'
+          HTTP_CODE=$(curl --silent --show-error --output /tmp/apps.json --write-out '%{http_code}' \
+            -H "X-Auth-Token: $AUTH_TOKEN" \
+            -H "X-User-Id: $USER_ID" \
+            "$ROCKETCHAT_URL/api/apps")
+          echo "HTTP $HTTP_CODE"
+          python3 - <<'PY'
+          import json
+          try:
+              d=json.load(open('/tmp/apps.json'))
+              if isinstance(d, dict):
+                  safe={k:d.get(k) for k in ('success','error','status') if k in d}
+                  apps=d.get('apps')
+                  if isinstance(apps,list):
+                      safe['apps_count']=len(apps)
+                      safe['apps']=[{'id':a.get('id'),'name':a.get('name'),'status':a.get('status'),'version':a.get('version')} for a in apps[:20] if isinstance(a,dict)]
+                  print(json.dumps(safe, ensure_ascii=False))
+              else:
+                  print(type(d).__name__)
+          except Exception as e:
+              print('Non-JSON response:', str(e))
+          PY
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 500 ]; then
+            echo 'Apps API probe failed'
+            exit 1
+          fi
+
+          echo 'Probe complete. No app upload, install, enable, disable, update, or delete request was sent.'
