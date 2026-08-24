@@ -1,0 +1,62 @@
+name: Apply TARS post-message claim fix
+
+on:
+  push:
+    paths:
+      - '.github/tars-apply-trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tars-develop-source-fix
+  cancel-in-progress: false
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Verify expected develop state
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED='80408db73b310e9b0ebf6b3ce8e987d17c854571'
+          ACTUAL="$(git rev-parse HEAD)"
+          test "$ACTUAL" = "$EXPECTED" || { echo "Develop moved: $ACTUAL"; exit 1; }
+          test -f patches/post-message-claim-race.patch
+          test -f tests/post-message-claim-race.test.js
+
+      - name: Apply source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check patches/post-message-claim-race.patch
+          git apply patches/post-message-claim-race.patch
+          git diff --check
+
+      - name: Run syntax and regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check TarsReportApp.js
+          for test_file in tests/*.test.js; do
+            echo "==> $test_file"
+            node "$test_file"
+          done
+
+      - name: Commit tested source fix to develop
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'TARS Automation'
+          git config user.email 'tars-automation@users.noreply.github.com'
+          git add TarsReportApp.js
+          git commit -m 'fix: serialize duplicate image post events'
+          git push origin HEAD:develop
