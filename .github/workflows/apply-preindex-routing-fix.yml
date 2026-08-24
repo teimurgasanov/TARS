@@ -1,0 +1,58 @@
+name: Apply pre-index routing fix
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-preindex-routing-fix.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - name: Apply narrow pre-index routing reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js'); s=p.read_text()
+          old='''          if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;\n          protectedRoom = await protectedRoomForPersonalFile(message, messageFile, content, intent, fallbackProtectedRoom, http, ocrConfig, logger);\n          if (!protectedRoom) continue;'''
+          new='''          if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;\n          let preclassifiedRoom;\n          if (personalRoom) {\n            for (const candidateRoom of [PROTECTED_ROOMS.kassa, PROTECTED_ROOMS.otchet]) {\n              const candidateIndex = await getScopedIndex(candidateRoom);\n              const preEntry = candidateIndex && candidateIndex.photos.find((entry) => entry && entry.source === "pre" && (String(entry.uploadAttemptKey || "") === messageFileId || String(entry.uploadId || "") === messageFileId));\n              if (preEntry) {\n                preclassifiedRoom = candidateRoom;\n                if (logger) logger.info(`Reused pre-upload ${candidateRoom.kind} classification for upload ${messageFileId}`);\n                break;\n              }\n            }\n          }\n          protectedRoom = preclassifiedRoom || await protectedRoomForPersonalFile(message, messageFile, content, intent, fallbackProtectedRoom, http, ocrConfig, logger);\n          if (!protectedRoom) continue;'''
+          if s.count(old)!=1: raise SystemExit(f'anchor mismatch: {s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
+          node --check TarsReportApp.js
+      - name: Add regression test
+        shell: bash
+        run: |
+          cat > tests/preindex-routing.test.js <<'EOF'
+          const fs=require('fs'); const assert=require('assert');
+          const s=fs.readFileSync('TarsReportApp.js','utf8');
+          const a=s.indexOf('let preclassifiedRoom;');
+          const b=s.indexOf('protectedRoom = preclassifiedRoom || await protectedRoomForPersonalFile',a);
+          assert(a>=0 && b>a,'pre-upload classification must be checked before reclassification');
+          assert(s.slice(a,b).includes('PROTECTED_ROOMS.kassa'));
+          assert(s.slice(a,b).includes('PROTECTED_ROOMS.otchet'));
+          assert(s.slice(a,b).includes('entry.source === "pre"'));
+          console.log('PASS: post-message reuses pre-upload receipt/photo classification');
+          EOF
+      - name: Run all regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in tests/*.test.js; do echo "==> $f"; node "$f"; done
+      - name: Commit only after PASS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'TARS Automation'
+          git config user.email 'tars-automation@users.noreply.github.com'
+          git add TarsReportApp.js tests/preindex-routing.test.js
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: reuse pre-upload receipt routing in post-message'
+          git push origin HEAD:develop
