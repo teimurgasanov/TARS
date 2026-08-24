@@ -1,0 +1,54 @@
+name: Apply receipt routing priority fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-receipt-routing-priority-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - name: Apply narrow routing priority fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js')
+          s=p.read_text()
+          old='''      if (ocrMailing) return "mailing";\n      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      if (ocrReceipt) return "receipt";\n      return void 0;'''
+          new='''      if (ocrMailing) return "mailing";\n      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      if (ocrReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      return void 0;'''
+          if s.count(old) != 1:
+              raise SystemExit(f'Expected exactly one routing block, found {s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
+          node --check TarsReportApp.js
+      - name: Run all tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in tests/*.test.js; do echo "==> $f"; node "$f"; done
+      - name: Commit tested fix to develop
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'TARS Automation'
+          git config user.email 'tars-automation@users.noreply.github.com'
+          git add TarsReportApp.js tests/personal-receipt-routing-priority.test.js
+          if git diff --cached --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git commit -m 'fix: prefer OCR receipt over generic photo classification'
+          git push origin HEAD:develop
