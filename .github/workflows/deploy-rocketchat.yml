@@ -1,0 +1,131 @@
+name: Deploy TARS to Rocket.Chat
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Exact reviewed develop commit SHA to deploy"
+        required: true
+        type: string
+      confirm:
+        description: "Type DEPLOY to confirm installation"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tars-rocketchat-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Validate and deploy reviewed develop commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Require explicit confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.confirm }}" != "DEPLOY" ]; then
+            echo "Deployment blocked: confirmation must be exactly DEPLOY."
+            exit 1
+          fi
+
+      - name: Checkout reviewed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Verify commit belongs to develop
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin develop --no-tags
+          TARGET_SHA="$(git rev-parse HEAD)"
+          REQUESTED_SHA="$(git rev-parse '${{ inputs.commit_sha }}^{commit}')"
+          if [ "$TARGET_SHA" != "$REQUESTED_SHA" ]; then
+            echo "Deployment blocked: checked-out SHA does not match requested SHA."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TARGET_SHA" origin/develop; then
+            echo "Deployment blocked: requested commit is not contained in origin/develop."
+            exit 1
+          fi
+          echo "Reviewed commit verified: $TARGET_SHA"
+
+      - name: Verify repository is unchanged
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          node --check TarsReportApp.js
+          python3 - <<'PY'
+          import json
+          with open('app.json', encoding='utf-8') as f:
+              app = json.load(f)
+          required = ['id', 'version', 'nameSlug', 'classFile']
+          missing = [k for k in required if not app.get(k)]
+          if missing:
+              raise SystemExit(f"app.json missing required fields: {missing}")
+          if app['classFile'] != 'TarsReportApp.js':
+              raise SystemExit('Unexpected classFile; deployment blocked')
+          print(f"App: {app['nameSlug']} version {app['version']} id {app['id']}")
+          PY
+
+      - name: Run full regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test_file in tests/*.test.js; do
+            echo "==> $test_file"
+            node "$test_file"
+          done
+
+      - name: Install pinned Rocket.Chat Apps CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @rocket.chat/apps-cli@1.14.0
+          rc-apps --version
+
+      - name: Validate Rocket.Chat deployment secrets
+        shell: bash
+        env:
+          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
+          ROCKETCHAT_USER: ${{ secrets.ROCKETCHAT_USER }}
+          ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$ROCKETCHAT_URL" || { echo "ROCKETCHAT_URL is missing"; exit 1; }
+          test -n "$ROCKETCHAT_USER" || { echo "ROCKETCHAT_USER is missing"; exit 1; }
+          test -n "$ROCKETCHAT_PASSWORD" || { echo "ROCKETCHAT_PASSWORD is missing"; exit 1; }
+          case "$ROCKETCHAT_URL" in
+            https://*) ;;
+            *) echo "Deployment blocked: ROCKETCHAT_URL must use https://"; exit 1 ;;
+          esac
+
+      - name: Deploy to Rocket.Chat
+        shell: bash
+        env:
+          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
+          ROCKETCHAT_USER: ${{ secrets.ROCKETCHAT_USER }}
+          ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          rc-apps deploy \
+            --url "$ROCKETCHAT_URL" \
+            -u "$ROCKETCHAT_USER" \
+            -p "$ROCKETCHAT_PASSWORD"
+
+      - name: Deployment summary
+        if: success()
+        shell: bash
+        run: |
+          echo "Rocket.Chat deployment completed."
+          echo "Commit: $(git rev-parse HEAD)"
+          python3 -c 'import json; print("Version:", json.load(open("app.json"))["version"])'
