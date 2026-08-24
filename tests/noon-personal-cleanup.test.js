@@ -18,6 +18,7 @@ assert.strictEqual(personalChatCleanupReady(at('2026-08-24T07:59:00Z'), config),
 assert.strictEqual(personalChatCleanupReady(at('2026-08-24T08:00:00Z'), config), true);
 assert.strictEqual(personalChatMessageIsExpired(at('2026-08-23T16:00:00Z'), at('2026-08-24T08:00:00Z'), config), true);
 assert.strictEqual(personalChatMessageIsExpired(at('2026-08-24T06:00:00Z'), at('2026-08-24T08:00:00Z'), config), false);
+assert.strictEqual(personalChatMessageIsExpired(at('2026-08-23T21:30:00Z'), at('2026-08-24T08:00:00Z'), config), true);
 assert.strictEqual(personalChatMessageIsExpired(at('2026-08-23T16:00:00Z'), at('2026-08-24T07:59:00Z'), config), false);
 
 console.log('PASS: noon personal cleanup boundary');
