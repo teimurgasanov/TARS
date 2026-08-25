@@ -4493,6 +4493,18 @@ var require_upload_duplicate_guard = __commonJS({
       const ttlMs = 30 * 60 * 1e3;
       return uploadedAt > 0 && uploadedAt >= now - ttlMs && uploadedAt <= now + 60 * 1e3;
     }
+    function preUploadEntryMatchesPostedContent(entry, exact, message, now = Date.now()) {
+      if (!entry || entry.source !== "pre") return false;
+      const postedExact = String(exact || "");
+      if (!postedExact || String(entry.exact || "") !== postedExact) return false;
+      const userId = String(message && message.sender && message.sender.id || "");
+      const roomId = String(message && message.room && message.room.id || "");
+      if (!userId || !roomId) return false;
+      if (String(entry.userId || "") !== userId || String(entry.roomId || "") !== roomId) return false;
+      const uploadedAt = Number(entry.uploadedAt || 0);
+      const ttlMs = 30 * 60 * 1e3;
+      return uploadedAt > 0 && uploadedAt >= now - ttlMs && uploadedAt <= now + 60 * 1e3;
+    }
     async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig) {
       if (await isKnownArchiveRoom(message && message.room, read)) return false;
       const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
@@ -4546,11 +4558,12 @@ var require_upload_duplicate_guard = __commonJS({
           seenFileIds[messageFileId] = true;
           const content = await read.getUploadReader().getBufferById(messageFileId);
           if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;
+          const postedExact = exactHash(content);
           let preclassifiedRoom;
           if (personalRoom && intent !== "mailing") {
             for (const candidateRoom of [PROTECTED_ROOMS.kassa, PROTECTED_ROOMS.otchet]) {
               const candidateIndex = await getScopedIndex(candidateRoom);
-              const preEntry = candidateIndex && candidateIndex.photos.find((entry) => preUploadEntryMatchesMessage(entry, messageFileId, message));
+              const preEntry = candidateIndex && candidateIndex.photos.find((entry) => preUploadEntryMatchesMessage(entry, messageFileId, message) || preUploadEntryMatchesPostedContent(entry, postedExact, message));
               if (preEntry) {
                 preclassifiedRoom = candidateRoom;
                 if (logger) logger.info(`Reused scoped pre-upload ${candidateRoom.kind} classification for upload ${messageFileId}`);
@@ -6494,6 +6507,7 @@ var C = class extends j.App {
         const M = `⏰ Напоминание об отчёте\nСегодняшний отчёт нужно отправить до 21:00 по Астрахани.\nКонтрольная точка: ${o}. Нажмите нижнюю кнопку и заполните таблицу.`;
         const N = t.getCreator().startMessage().setSender(f).setRoom(C).setText(M);
         await t.getCreator().finish(N);
+        u[v] = true;
         h.push({ userId: x.masterUserId, username: x.username || A.username || "", roomId: x.roomId, workday: c, slot: o, createdAt: a });
       } catch (C) {
         this.getLogger().warn(`Could not send scheduled report reminder to ${x.roomId}: ${C && C.message || C}`);
