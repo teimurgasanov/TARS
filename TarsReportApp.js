@@ -4465,6 +4465,20 @@ var require_upload_duplicate_guard = __commonJS({
       if (!reusableEntry) index.photos.push(entry);
       await writeIndex(persistence, protectedRoom.index, index);
     }
+    function preUploadEntryMatchesMessage(entry, messageFileId, message, now = Date.now()) {
+      if (!entry || entry.source !== "pre") return false;
+      const uploadId = String(messageFileId || "");
+      if (!uploadId) return false;
+      const uploadMatches = String(entry.uploadAttemptKey || "") === uploadId || String(entry.uploadId || "") === uploadId;
+      if (!uploadMatches) return false;
+      const userId = String(message && message.sender && message.sender.id || "");
+      const roomId = String(message && message.room && message.room.id || "");
+      if (!userId || !roomId) return false;
+      if (String(entry.userId || "") !== userId || String(entry.roomId || "") !== roomId) return false;
+      const uploadedAt = Number(entry.uploadedAt || 0);
+      const ttlMs = 30 * 60 * 1e3;
+      return uploadedAt > 0 && uploadedAt >= now - ttlMs && uploadedAt <= now + 60 * 1e3;
+    }
     async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig) {
       if (await isKnownArchiveRoom(message && message.room, read)) return false;
       const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
@@ -4519,13 +4533,13 @@ var require_upload_duplicate_guard = __commonJS({
           const content = await read.getUploadReader().getBufferById(messageFileId);
           if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;
           let preclassifiedRoom;
-          if (personalRoom) {
+          if (personalRoom && intent !== "mailing") {
             for (const candidateRoom of [PROTECTED_ROOMS.kassa, PROTECTED_ROOMS.otchet]) {
               const candidateIndex = await getScopedIndex(candidateRoom);
-              const preEntry = candidateIndex && candidateIndex.photos.find((entry) => entry && entry.source === "pre" && (String(entry.uploadAttemptKey || "") === messageFileId || String(entry.uploadId || "") === messageFileId));
+              const preEntry = candidateIndex && candidateIndex.photos.find((entry) => preUploadEntryMatchesMessage(entry, messageFileId, message));
               if (preEntry) {
                 preclassifiedRoom = candidateRoom;
-                if (logger) logger.info(`Reused pre-upload ${candidateRoom.kind} classification for upload ${messageFileId}`);
+                if (logger) logger.info(`Reused scoped pre-upload ${candidateRoom.kind} classification for upload ${messageFileId}`);
                 break;
               }
             }
