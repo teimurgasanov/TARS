@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Apply explicitly requested PR fix
         uses: anthropics/claude-code-action@v1
         with:
