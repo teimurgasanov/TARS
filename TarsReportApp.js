@@ -2641,6 +2641,7 @@ var require_upload_duplicate_guard = __commonJS({
       let checked = false;
       let ocrReceipt = false;
       let ocrMailing = false;
+      let ocrHasText = false;
       if (config.apiKey && config.folderId) {
         const models = ["page", "page-column-sort"];
         for (const model of models) {
@@ -2648,6 +2649,7 @@ var require_upload_duplicate_guard = __commonJS({
             const payload = await requestReceiptOcr(file, content, http, config, model);
             const text = receiptOcrText(payload);
             checked = true;
+            if (String(text || "").trim()) ocrHasText = true;
             if (looksLikeMailingProofText(text)) ocrMailing = true;
             if (looksLikeBankReceiptText(text)) ocrReceipt = true;
           } catch (error) {
@@ -2676,8 +2678,16 @@ var require_upload_duplicate_guard = __commonJS({
       if (ocrMailing) return "mailing";
       if (aiMailing) return "mailing";
       if (aiReceipt) return "receipt";
+      // Keep the protected baseline rule: strong OCR evidence of a bank receipt
+      // beats an incorrect generic AI photo classification.
       if (ocrReceipt) return "receipt";
       if (aiPhoto) return "photo";
+      // If OpenAI Vision inspected the image but could not map it to a known class,
+      // route it to validateReceiptStrict instead of silently treating it as a work photo.
+      if (aiChecked) return "receipt";
+      // OCR text is the last fallback. It only routes to strict receipt validation;
+      // it does not accept the receipt by itself.
+      if (ocrHasText) return "receipt";
       return void 0;
     }
     async function personalImageIsReceiptForPreUpload(file, content, http, config, logger) {
