@@ -1,0 +1,58 @@
+name: Apply Vision Routing Fix
+on:
+  push:
+    branches: [fix/text-first-receipt-routing]
+    paths:
+      - tests/vision-receipt-routing-contract.test.js
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/text-first-receipt-routing
+          fetch-depth: 0
+      - name: Apply exact guarded patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js')
+          s=p.read_text()
+          old='''      let checked = false;\n      let ocrReceipt = false;\n      let ocrMailing = false;'''
+          new='''      let checked = false;\n      let ocrReceipt = false;\n      let ocrMailing = false;\n      let ocrHasText = false;'''
+          assert s.count(old)==1, f'guard 1 expected once, got {s.count(old)}'
+          s=s.replace(old,new,1)
+          old2='''            const text = receiptOcrText(payload);\n            checked = true;\n            if (looksLikeMailingProofText(text)) ocrMailing = true;'''
+          new2='''            const text = receiptOcrText(payload);\n            checked = true;\n            if (String(text || "").trim()) ocrHasText = true;\n            if (looksLikeMailingProofText(text)) ocrMailing = true;'''
+          # This sequence also exists in another helper. Patch only inside personalImageKindForPreUpload.
+          start=s.index('async function personalImageKindForPreUpload')
+          end=s.index('async function personalImageIsReceiptForPreUpload', start)
+          block=s[start:end]
+          assert block.count(old2)==1, f'guard 2 expected once in classifier, got {block.count(old2)}'
+          block=block.replace(old2,new2,1)
+          old3='''      if (aiReceipt) return "receipt";\n      if (ocrReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      return void 0;'''
+          new3='''      if (aiReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      if (ocrReceipt) return "receipt";\n      if (ocrHasText) return "receipt";\n      return void 0;'''
+          assert block.count(old3)==1, f'guard 3 expected once, got {block.count(old3)}'
+          block=block.replace(old3,new3,1)
+          s=s[:start]+block+s[end:]
+          p.write_text(s)
+          PY
+      - name: Verify syntax and tests
+        run: |
+          set -euo pipefail
+          node --check TarsReportApp.js
+          for f in tests/*.test.js; do node "$f"; done
+      - name: Commit patch
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add TarsReportApp.js
+          git commit -m 'fix: route vision and OCR receipt candidates safely'
+          git push origin HEAD:fix/text-first-receipt-routing
