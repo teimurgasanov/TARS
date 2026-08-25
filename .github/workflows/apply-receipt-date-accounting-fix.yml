@@ -1,0 +1,68 @@
+name: Apply receipt date accounting fix
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-receipt-date-accounting-fix.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - name: Align receipt accounting to receipt date
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js')
+          s=p.read_text()
+          # Receipt aggregation/repair must use the receipt's calendar date, while reports/cleanup retain workday semantics.
+          old='const messageDate = workdayForTimestamp(createdAt, config);'
+          new='const messageDate = receiptCalendarDateForTimestamp(createdAt, config);'
+          if s.count(old) < 1:
+              raise SystemExit('repair messageDate anchor missing')
+          s=s.replace(old,new)
+          p.write_text(s)
+          PY
+          node --check TarsReportApp.js
+      - name: Add receipt accounting regression test
+        shell: bash
+        run: |
+          cat > tests/receipt-date-accounting.test.js <<'EOF'
+          const fs=require('fs'), assert=require('assert');
+          const s=fs.readFileSync('TarsReportApp.js','utf8');
+          const repair=s.indexOf('async function repairTodayReceiptIndex');
+          assert(repair>=0,'repairTodayReceiptIndex missing');
+          const tail=s.slice(repair, repair+9000);
+          assert(tail.includes('receiptCalendarDateForTimestamp(createdAt, config)'), 'receipt repair must scan by calendar date');
+          assert(!tail.includes('const messageDate = workdayForTimestamp(createdAt, config);'), 'receipt repair must not bucket messages by workday');
+          const summary=s.indexOf('async function confirmedTransferSummaryForUser');
+          assert(summary>=0,'confirmedTransferSummaryForUser missing');
+          const sumBlock=s.slice(summary, summary+8000);
+          assert(sumBlock.includes('dateFromEntry'), 'summary must derive date from receipt entry');
+          console.log('PASS: receipt repair and aggregation use receipt calendar date');
+          EOF
+      - name: Run all regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in tests/*.test.js; do echo "==> $f"; node "$f"; done
+      - name: Commit only after PASS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'TARS Automation'
+          git config user.email 'tars-automation@users.noreply.github.com'
+          git add TarsReportApp.js tests/receipt-date-accounting.test.js
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: align receipt accounting with calendar date'
+          git push origin HEAD:develop
