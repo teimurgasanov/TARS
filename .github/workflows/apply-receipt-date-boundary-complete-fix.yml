@@ -1,0 +1,128 @@
+name: Apply complete receipt date boundary fix
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-receipt-date-boundary-complete-fix.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - name: Apply complete receipt calendar boundary fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js')
+          s=p.read_text()
+
+          # 1) Add a class-level calendar-date helper for slash commands.
+          anchor='''  async handleReceiptArchiveCommand(e, n, t, s, r, a = []) {'''
+          helper='''  receiptCalendarDate(config, timestamp = Date.now()) {\n    const parts = new Intl.DateTimeFormat("en-CA", {\n      timeZone: config && config.timeZone || "Europe/Astrakhan",\n      year: "numeric", month: "2-digit", day: "2-digit"\n    }).formatToParts(new Date(timestamp));\n    const out = {};\n    for (const part of parts) if (part.type !== "literal") out[part.type] = part.value;\n    return `${out.year}-${out.month}-${out.day}`;\n  }\n'''
+          if 'receiptCalendarDate(config, timestamp = Date.now())' not in s:
+              if s.count(anchor)!=1: raise SystemExit('archive command anchor mismatch')
+              s=s.replace(anchor, helper+anchor, 1)
+
+          replacements = [
+            # post-accept summary refresh fallback
+            ('String(entry && entry.receiptDate || expectedWorkday(ocrConfig))', 'String(entry && entry.receiptDate || expectedReceiptDate(ocrConfig))'),
+            # slash commands default to receipt calendar date, not report workday
+            ('let date = this.reportWorkday(), username = "";', 'let date = this.receiptCalendarDate(config), username = "";'),
+            ('let targetDate = this.reportWorkday();', 'let targetDate = this.receiptCalendarDate(config);'),
+            # archive fallback must remain on receipt calendar semantics
+            ('receiptDate: entry.receiptDate || workdayForTimestamp(createdAt, config || {})', 'receiptDate: entry.receiptDate || receiptCalendarDateForTimestamp(createdAt, config || {})')
+          ]
+          for old,new in replacements:
+              if old not in s: raise SystemExit('missing replacement anchor: '+old)
+              s=s.replace(old,new)
+
+          p.write_text(s)
+          PY
+          node --check TarsReportApp.js
+
+      - name: Add behavioral boundary regression tests
+        shell: bash
+        run: |
+          cat > tests/receipt-date-full-boundary.test.js <<'EOF'
+          const fs=require('fs'), assert=require('assert');
+          const s=fs.readFileSync('TarsReportApp.js','utf8');
+
+          // Receipt pipeline must not fall back to report workday.
+          assert(!s.includes('String(entry && entry.receiptDate || expectedWorkday(ocrConfig))'));
+          assert(s.includes('String(entry && entry.receiptDate || expectedReceiptDate(ocrConfig))'));
+          assert(s.includes('let date = this.receiptCalendarDate(config), username = "";'));
+          assert(s.includes('let targetDate = this.receiptCalendarDate(config);'));
+          assert(s.includes('receiptDate: entry.receiptDate || receiptCalendarDateForTimestamp(createdAt, config || {})'));
+
+          // Report semantics must remain independently workday-based.
+          assert(s.includes('const workday = this.reportWorkday()'));
+          assert(s.includes('workdayForTimestamp'));
+
+          // Execute the class helper's calendar math in isolation across the risky midnight window.
+          function receiptCalendarDate(config, timestamp = Date.now()) {
+            const parts = new Intl.DateTimeFormat('en-CA', {
+              timeZone: config && config.timeZone || 'Europe/Astrakhan',
+              year:'numeric', month:'2-digit', day:'2-digit'
+            }).formatToParts(new Date(timestamp));
+            const out={}; for (const part of parts) if (part.type!=='literal') out[part.type]=part.value;
+            return `${out.year}-${out.month}-${out.day}`;
+          }
+          const cfg={timeZone:'Europe/Astrakhan',cutoffHour:4};
+          assert.strictEqual(receiptCalendarDate(cfg, Date.parse('2026-08-24T19:59:00Z')), '2026-08-24'); // 23:59 local
+          assert.strictEqual(receiptCalendarDate(cfg, Date.parse('2026-08-24T20:00:00Z')), '2026-08-25'); // 00:00 local
+          assert.strictEqual(receiptCalendarDate(cfg, Date.parse('2026-08-24T23:59:00Z')), '2026-08-25'); // 03:59 local
+          assert.strictEqual(receiptCalendarDate(cfg, Date.parse('2026-08-25T00:00:00Z')), '2026-08-25'); // 04:00 local
+
+          // Ensure critical receipt consumers all reference calendar semantics.
+          const required = [
+            'expectedReceiptDate(config)',
+            'receiptCalendarDateForTimestamp(createdAt, config)',
+            'dateFromEntry(entry, config)',
+            'this.receiptCalendarDate(config)'
+          ];
+          for (const token of required) assert(s.includes(token), `missing receipt calendar token: ${token}`);
+          console.log('PASS: complete receipt date boundary semantics');
+          EOF
+
+      - name: Guard against remaining receipt workday fallbacks
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'), assert=require('assert');
+          const s=fs.readFileSync('TarsReportApp.js','utf8');
+          const suspicious=[
+            /entry\.receiptDate\s*\|\|\s*expectedWorkday/g,
+            /entry\.receiptDate\s*\|\|\s*workdayForTimestamp/g,
+            /let date = this\.reportWorkday\(\), username/g,
+            /let targetDate = this\.reportWorkday\(\);/g
+          ];
+          for (const rx of suspicious) assert.strictEqual((s.match(rx)||[]).length,0,`remaining receipt workday fallback: ${rx}`);
+          console.log('PASS: no known receipt workday fallbacks remain');
+          NODE
+
+      - name: Run all regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in tests/*.test.js; do echo "==> $f"; node "$f"; done
+
+      - name: Commit only after PASS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'TARS Automation'
+          git config user.email 'tars-automation@users.noreply.github.com'
+          git add TarsReportApp.js tests/receipt-date-full-boundary.test.js
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: complete receipt calendar date boundary semantics'
+          git push origin HEAD:develop
