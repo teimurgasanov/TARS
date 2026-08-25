@@ -2618,7 +2618,7 @@ var require_upload_duplicate_guard = __commonJS({
       let aiPhoto = false;
       if (config.openaiApiKey) {
         try {
-          const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedWorkday(config), logger);
+          const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger);
           if (aiCandidate) {
             aiChecked = true;
             aiReceipt = aiCandidateMarksReceipt(aiCandidate);
@@ -2661,7 +2661,7 @@ var require_upload_duplicate_guard = __commonJS({
       let aiPhoto = false;
       if (config.openaiApiKey) {
         try {
-          const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedWorkday(config), logger);
+          const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger);
           if (aiCandidate) {
             checked = true;
             aiChecked = true;
@@ -3638,6 +3638,20 @@ var require_upload_duplicate_guard = __commonJS({
     function expectedWorkday(config) {
       return workdayForTimestamp(Date.now(), config);
     }
+    function receiptCalendarDateForTimestamp(timestamp, config) {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: config && config.timeZone || "Europe/Astrakhan",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).formatToParts(new Date(Number(timestamp || Date.now())));
+      const values = {};
+      for (const part of parts) values[part.type] = part.value;
+      return `${values.year}-${values.month}-${values.day}`;
+    }
+    function expectedReceiptDate(config) {
+      return receiptCalendarDateForTimestamp(Date.now(), config);
+    }
     function displayDate(value) {
       const parts = String(value || "").split("-");
       return parts.length === 3 ? `${parts[2]}.${parts[1]}.${parts[0]}` : String(value || "");
@@ -3650,7 +3664,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (!config) {
         return { ok: false, reason: "🚫 ПРОВЕРКА ДАТЫ ЧЕКА НЕ НАСТРОЕНА" };
       }
-      const requiredDate = expectedWorkday(config);
+      const requiredDate = expectedReceiptDate(config);
       const hasYandex = Boolean(config.apiKey && config.folderId);
       const hasOpenAi = Boolean(config.openaiApiKey);
       if (!hasYandex && !hasOpenAi) {

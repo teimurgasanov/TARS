@@ -1,0 +1,12 @@
+const fs = require('fs');
+const assert = require('assert');
+const source = fs.readFileSync('TarsReportApp.js', 'utf8');
+const start = source.indexOf('function receiptCalendarDateForTimestamp');
+const end = source.indexOf('function displayDate', start);
+if (start < 0 || end < 0 || end <= start) throw new Error('calendar date block not found');
+eval(source.slice(start, end));
+const cfg = { timeZone: 'Europe/Astrakhan', cutoffHour: 12 };
+assert.strictEqual(receiptCalendarDateForTimestamp(Date.parse('2026-08-24T20:01:00Z'), cfg), '2026-08-25');
+assert.strictEqual(receiptCalendarDateForTimestamp(Date.parse('2026-08-25T00:30:00Z'), cfg), '2026-08-25');
+assert.strictEqual(receiptCalendarDateForTimestamp(Date.parse('2026-08-25T20:01:00Z'), cfg), '2026-08-26');
+console.log('PASS: receipt date uses local calendar day, independent of workday cutoff');
