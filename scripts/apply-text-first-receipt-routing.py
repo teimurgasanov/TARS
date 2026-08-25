@@ -19,7 +19,7 @@ if block.count(old_ocr) != 1:
 block = block.replace(old_ocr, new_ocr, 1)
 
 old_tail = '''      if (ocrMailing) return "mailing";\n      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      if (ocrReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      return void 0;\n'''
-new_tail = '''      if (ocrMailing) return "mailing";\n      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      if (ocrReceipt) return "receipt";\n      // OpenAI Vision is the primary image classifier. If it inspected the image\n      // and did not explicitly classify it as a work photo or mailing proof,\n      // send it to strict receipt validation rather than silently treating it as a photo.\n      if (aiChecked) return "receipt";\n      // OCR text is a safe fallback: work photos in the locked workflow contain no text.\n      // This only routes to validateReceiptStrict; it does not accept the receipt by itself.\n      if (ocrHasText) return "receipt";\n      return void 0;\n'''
+new_tail = '''      if (ocrMailing) return "mailing";\n      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      // Keep the protected baseline rule: strong OCR evidence of a bank receipt\n      // beats an incorrect generic AI photo classification.\n      if (ocrReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      // If OpenAI Vision inspected the image but could not map it to a known class,\n      // route it to validateReceiptStrict instead of silently treating it as a work photo.\n      if (aiChecked) return "receipt";\n      // OCR text is the last fallback. It only routes to strict receipt validation;\n      // it does not accept the receipt by itself.\n      if (ocrHasText) return "receipt";\n      return void 0;\n'''
 if block.count(old_tail) != 1:
     raise SystemExit(f'expected exactly one classifier tail, found {block.count(old_tail)}')
 block = block.replace(old_tail, new_tail, 1)
@@ -41,18 +41,18 @@ assert(block.includes('let ocrHasText = false;'), 'OCR text fallback state missi
 assert(block.includes('if (String(text || "").trim()) ocrHasText = true;'), 'OCR text fallback is not populated');
 
 const aiReceipt = block.indexOf('if (aiReceipt) return "receipt"');
-const aiPhoto = block.indexOf('if (aiPhoto) return "photo"');
 const ocrReceipt = block.indexOf('if (ocrReceipt) return "receipt"');
+const aiPhoto = block.indexOf('if (aiPhoto) return "photo"');
 const aiFallback = block.indexOf('if (aiChecked) return "receipt"');
 const ocrTextFallback = block.indexOf('if (ocrHasText) return "receipt"');
 
-for (const [name, value] of Object.entries({aiReceipt, aiPhoto, ocrReceipt, aiFallback, ocrTextFallback})) {
+for (const [name, value] of Object.entries({aiReceipt, ocrReceipt, aiPhoto, aiFallback, ocrTextFallback})) {
   assert(value >= 0, `${name} branch not found`);
 }
-assert(aiReceipt < aiPhoto, 'explicit OpenAI receipt must beat OpenAI photo');
-assert(aiPhoto < ocrReceipt, 'explicit OpenAI work-photo classification must beat generic OCR receipt heuristics');
-assert(ocrReceipt < aiFallback, 'strong OCR receipt detection should run before ambiguous AI fallback');
-assert(aiFallback < ocrTextFallback, 'OpenAI inspected-but-ambiguous images should route to strict receipt validation before OCR text fallback');
+assert(aiReceipt < ocrReceipt, 'explicit OpenAI receipt should route immediately');
+assert(ocrReceipt < aiPhoto, 'strong OCR receipt must keep priority over generic AI photo');
+assert(aiPhoto < aiFallback, 'explicit OpenAI work-photo classification must still route as photo');
+assert(aiFallback < ocrTextFallback, 'ambiguous Vision result should reach strict receipt validation before generic OCR-text fallback');
 
-console.log('PASS: OpenAI Vision is primary and ambiguous/text images route to strict receipt validation');
+console.log('PASS: Vision ambiguity and OCR text fall back to strict receipt validation without weakening protected OCR priority');
 ''', encoding='utf-8')
