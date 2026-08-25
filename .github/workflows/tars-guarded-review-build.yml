@@ -57,27 +57,31 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            TARS ECONOMY REVIEW. Read CLAUDE.md first. Review ONLY this PR diff against develop and only minimal surrounding context. Do not edit, write, commit, push, deploy, or create files. Baseline 0.9.344 behavior is protected. Check regressions in receipts, duplicate protection, OCR, reports, photos, calculations, and Rocket.Chat. For receipt-date changes require one Europe/Astrakhan calendar-date semantic across acceptance, index, duplicate identity, sums, summaries, /cheki, /prinyat, repair and archive, while report/workday behavior remains unchanged. Return PASS only with no blocking regression; otherwise BLOCK with concise reason.
+            TARS ECONOMY REVIEW. Read CLAUDE.md first. Review ONLY this PR diff against develop and only minimal surrounding context. Do not edit, write, commit, push, deploy, or create files. Baseline 0.9.344 behavior is protected. Check regressions in receipts, duplicate protection, OCR, reports, photos, calculations, and Rocket.Chat. For receipt-date changes require one Europe/Astrakhan calendar-date semantic across acceptance, index, duplicate identity, sums, summaries, /cheki, /prinyat, repair and archive, while report/workday behavior remains unchanged. Your final line MUST be exactly FINAL_VERDICT: PASS if there is no blocking regression, or FINAL_VERDICT: BLOCK if there is one. Put any concise reason before that final line.
           claude_args: >-
             --max-turns 8
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
-            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["PASS","BLOCK"]},"summary":{"type":"string"}},"required":["verdict","summary"],"additionalProperties":false}'
           display_report: 'false'
           show_full_output: 'false'
       - name: Enforce Claude verdict
         shell: bash
         env:
-          CLAUDE_RESULT: ${{ steps.claude.outputs.structured_output }}
+          CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, os, sys
-          raw=os.environ.get('CLAUDE_RESULT','').strip()
-          if not raw: raise SystemExit('Claude review returned no structured verdict')
-          result=json.loads(raw)
-          print('Claude verdict:', result.get('verdict'))
-          print(result.get('summary',''))
-          if result.get('verdict') != 'PASS': sys.exit(1)
+          import os, pathlib, re, sys
+          path = pathlib.Path(os.environ.get('CLAUDE_EXECUTION_FILE',''))
+          if not path.is_file():
+              raise SystemExit('Claude review output file missing')
+          text = path.read_text(encoding='utf-8', errors='replace')
+          verdicts = re.findall(r'FINAL_VERDICT:\s*(PASS|BLOCK)\b', text)
+          if not verdicts:
+              raise SystemExit('Claude review returned no FINAL_VERDICT')
+          verdict = verdicts[-1]
+          print('Claude verdict:', verdict)
+          if verdict != 'PASS':
+              sys.exit(1)
           PY
 
   build:
