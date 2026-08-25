@@ -5220,7 +5220,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (!messages || !messages.length) break;
         for (const roomMessage of messages) {
           const createdAt = roomMessage.createdAt ? new Date(roomMessage.createdAt).getTime() : Date.now();
-          const messageDate = workdayForTimestamp(createdAt, config);
+          const messageDate = receiptCalendarDateForTimestamp(createdAt, config);
           if (messageDate < targetDate) {
             reachedOlderDay = true;
             break;

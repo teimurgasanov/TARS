@@ -1,0 +1,12 @@
+const fs=require('fs'), assert=require('assert');
+const s=fs.readFileSync('TarsReportApp.js','utf8');
+const repair=s.indexOf('async function repairTodayReceiptIndex');
+assert(repair>=0,'repairTodayReceiptIndex missing');
+const tail=s.slice(repair, repair+9000);
+assert(tail.includes('receiptCalendarDateForTimestamp(createdAt, config)'), 'receipt repair must scan by calendar date');
+assert(!tail.includes('const messageDate = workdayForTimestamp(createdAt, config);'), 'receipt repair must not bucket messages by workday');
+const summary=s.indexOf('async function confirmedTransferSummaryForUser');
+assert(summary>=0,'confirmedTransferSummaryForUser missing');
+const sumBlock=s.slice(summary, summary+8000);
+assert(sumBlock.includes('dateFromEntry'), 'summary must derive date from receipt entry');
+console.log('PASS: receipt repair and aggregation use receipt calendar date');
