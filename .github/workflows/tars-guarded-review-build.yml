@@ -59,7 +59,8 @@ jobs:
           prompt: |
             TARS ECONOMY REVIEW. Read CLAUDE.md first. Review ONLY this PR diff against develop and only minimal surrounding context. Do not edit, write, commit, push, deploy, or create files. Baseline 0.9.344 behavior is protected. Check regressions in receipts, duplicate protection, OCR, reports, photos, calculations, and Rocket.Chat. For receipt-date changes require one Europe/Astrakhan calendar-date semantic across acceptance, index, duplicate identity, sums, summaries, /cheki, /prinyat, repair and archive, while report/workday behavior remains unchanged. Your final line MUST be exactly FINAL_VERDICT: PASS if there is no blocking regression, or FINAL_VERDICT: BLOCK if there is one. Put any concise reason before that final line.
           claude_args: >-
-            --max-turns 8
+            --model claude-sonnet-5
+            --max-turns 20
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
           display_report: 'false'
           show_full_output: 'false'
