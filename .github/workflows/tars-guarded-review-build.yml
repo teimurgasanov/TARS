@@ -47,15 +47,15 @@ jobs:
       - name: Verify Claude credential exists
         shell: bash
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
-          test -n "$CLAUDE_CODE_OAUTH_TOKEN" || { echo 'Claude review blocked: CLAUDE_CODE_OAUTH_TOKEN missing'; exit 1; }
+          test -n "$ANTHROPIC_API_KEY" || { echo 'Claude review blocked: ANTHROPIC_API_KEY missing'; exit 1; }
       - name: Review PR diff
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
             TARS ECONOMY REVIEW. Read CLAUDE.md first. Review ONLY this PR diff against develop and only minimal surrounding context. Do not edit, write, commit, push, deploy, or create files. Baseline 0.9.344 behavior is protected. Check regressions in receipts, duplicate protection, OCR, reports, photos, calculations, and Rocket.Chat. For receipt-date changes require one Europe/Astrakhan calendar-date semantic across acceptance, index, duplicate identity, sums, summaries, /cheki, /prinyat, repair and archive, while report/workday behavior remains unchanged. Your final line MUST be exactly FINAL_VERDICT: PASS if there is no blocking regression, or FINAL_VERDICT: BLOCK if there is one. Put any concise reason before that final line.
           claude_args: >-
