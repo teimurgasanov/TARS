@@ -1,2 +1,3 @@
 Claude guarded pipeline probe. No TARS runtime change.
 Retry after enabling OIDC id-token permission.
+Retry after simplifying Claude PASS/BLOCK verdict parsing.
