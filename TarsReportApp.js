@@ -5205,7 +5205,7 @@ var require_upload_duplicate_guard = __commonJS({
     async function repairTodayReceiptIndex(message, read, persistence, modify, http, config, logger) {
       const index = await readIndex(read, PROTECTED_ROOMS.kassa.index);
       if (!message.room) return index;
-      const targetDate = expectedWorkday(config);
+      const targetDate = expectedReceiptDate(config);
       const seenFileIds = {};
       let skip = 0;
       let changed = false;
