@@ -22,10 +22,14 @@ assert(block('repairTodayReceiptIndex').includes('receiptCalendarDateForTimestam
 assert(block('sendTodayTransferSummary').includes('const targetDate = expectedReceiptDate(config);'));
 assert(s.includes('receiptDate: entry.receiptDate || receiptCalendarDateForTimestamp(createdAt, config || {})'));
 
+// Receipt-only command/fallback paths must never fall back to report workday semantics.
+assert(!s.includes('const targetDate = String(entry && entry.receiptDate || expectedWorkday(ocrConfig));'), 'receipt summary refresh still falls back to workday');
+assert(!s.includes('let date = this.reportWorkday(), username = "";'), '/cheki still defaults to report workday');
+assert(!s.includes('let targetDate = this.reportWorkday();'), '/prinyat still defaults to report workday');
+
 // Workday semantics must remain present elsewhere for reports/cleanup.
 assert(s.includes('workdayForTimestamp('), 'report/cleanup workday helper unexpectedly removed');
 
-// Explicit cutoff boundary: local 00:30 on Aug 25 is receipt date Aug 25, while workday may still be Aug 24.
 const calStart=s.indexOf('function receiptCalendarDateForTimestamp');
 const calEnd=s.indexOf('function expectedReceiptDate',calStart);
 const wdStart=s.indexOf('function workdayForTimestamp');
@@ -34,7 +38,15 @@ assert(calStart>=0&&calEnd>calStart&&wdStart>=0&&wdEnd>wdStart);
 eval(s.slice(wdStart,wdEnd));
 eval(s.slice(calStart,calEnd));
 const cfg={timeZone:'Europe/Astrakhan',cutoffHour:4};
-const ts=Date.parse('2026-08-24T20:30:00Z'); // 00:30 Aug 25 Astrakhan
-assert.strictEqual(receiptCalendarDateForTimestamp(ts,cfg),'2026-08-25');
-assert.strictEqual(workdayForTimestamp(ts,cfg),'2026-08-24');
-console.log('PASS: receipt accounting is calendar-day based across cutoff; report workday remains separate');
+const cases=[
+  ['2026-08-24T19:59:00Z','2026-08-24','2026-08-24'], // 23:59 Aug 24
+  ['2026-08-24T20:00:00Z','2026-08-25','2026-08-24'], // 00:00 Aug 25
+  ['2026-08-24T23:59:00Z','2026-08-25','2026-08-24'], // 03:59 Aug 25
+  ['2026-08-25T00:00:00Z','2026-08-25','2026-08-25']  // 04:00 Aug 25
+];
+for(const [iso,receiptDay,workday] of cases){
+  const ts=Date.parse(iso);
+  assert.strictEqual(receiptCalendarDateForTimestamp(ts,cfg),receiptDay,`receipt day ${iso}`);
+  assert.strictEqual(workdayForTimestamp(ts,cfg),workday,`workday ${iso}`);
+}
+console.log('PASS: receipt calendar date is consistent at 23:59/00:00/03:59/04:00 while report workday remains separate');

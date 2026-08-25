@@ -4944,7 +4944,7 @@ var require_upload_duplicate_guard = __commonJS({
           const refreshed = {};
           for (const entry of receiptEntries) {
             const userId = String(entry && entry.userId || message.sender && message.sender.id || "");
-            const targetDate = String(entry && entry.receiptDate || expectedWorkday(ocrConfig));
+            const targetDate = String(entry && entry.receiptDate || expectedReceiptDate(ocrConfig));
             const key = `${userId}:${targetDate}`;
             if (!userId || refreshed[key]) continue;
             refreshed[key] = true;
@@ -5430,6 +5430,7 @@ var require_upload_duplicate_guard = __commonJS({
     }
     module2.exports = {
       exactHash,
+      expectedReceiptDate,
       visualHash,
       hammingDistance,
       guardUpload,
@@ -5898,7 +5899,7 @@ var C = class extends j.App {
       await notify("⚠️ Архив чеков выключен. Включите архив в настройках Тарса.");
       return;
     }
-    let date = this.reportWorkday(), username = "";
+    let date = G.expectedReceiptDate(config), username = "";
     for (const rawArgument of a || []) {
       const argument = String(rawArgument || "").trim();
       let match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(argument);
@@ -5951,7 +5952,7 @@ var C = class extends j.App {
     }
     let targetUsername = "";
     let targetAmount;
-    let targetDate = this.reportWorkday();
+    let targetDate = G.expectedReceiptDate(config);
     for (const rawArgument of a || []) {
       const argument = String(rawArgument || "").trim();
       if (!argument) continue;
