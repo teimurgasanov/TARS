@@ -1,0 +1,93 @@
+name: Apply receipt calendar date fix
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-receipt-calendar-date-fix.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - name: Apply narrow receipt-date fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js')
+          s=p.read_text()
+          anchor='''    function expectedWorkday(config) {\n      return workdayForTimestamp(Date.now(), config);\n    }'''
+          insert=anchor+'''\n    function receiptCalendarDateForTimestamp(timestamp, config) {\n      const parts = localCalendarParts(Number(timestamp || Date.now()), config || {});\n      return `${parts.year}-${parts.month}-${parts.day}`;\n    }\n    function expectedReceiptDate(config) {\n      return receiptCalendarDateForTimestamp(Date.now(), config);\n    }'''
+          if s.count(anchor)!=1:
+              raise SystemExit(f'expectedWorkday anchor mismatch: {s.count(anchor)}')
+          s=s.replace(anchor, insert, 1)
+          old='requestOpenAiReceiptCheck(file, content, http, config, expectedWorkday(config), logger)'
+          count=s.count(old)
+          if count < 1:
+              raise SystemExit('OpenAI receipt date call anchor missing')
+          s=s.replace(old, 'requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger)')
+          old2='const requiredDate = expectedWorkday(config);'
+          if s.count(old2)!=1:
+              raise SystemExit(f'validateReceiptDate requiredDate anchor mismatch: {s.count(old2)}')
+          s=s.replace(old2, 'const requiredDate = expectedReceiptDate(config);', 1)
+          p.write_text(s)
+          print('replaced OpenAI date calls:', count)
+          PY
+          node --check TarsReportApp.js
+      - name: Add calendar-date regression test
+        shell: bash
+        run: |
+          cat > tests/receipt-calendar-date.test.js <<'EOF'
+          const fs = require('fs');
+          const assert = require('assert');
+          const source = fs.readFileSync('TarsReportApp.js', 'utf8');
+          const start = source.indexOf('function localCalendarParts');
+          const end = source.indexOf('function displayDate', start);
+          if (start < 0 || end < 0 || end <= start) throw new Error('calendar date block not found');
+          eval(source.slice(start, end));
+          const cfg = { timeZone: 'Europe/Astrakhan', cutoffHour: 12 };
+          assert.strictEqual(receiptCalendarDateForTimestamp(Date.parse('2026-08-24T20:01:00Z'), cfg), '2026-08-25');
+          assert.strictEqual(receiptCalendarDateForTimestamp(Date.parse('2026-08-25T00:30:00Z'), cfg), '2026-08-25');
+          assert.strictEqual(receiptCalendarDateForTimestamp(Date.parse('2026-08-25T20:01:00Z'), cfg), '2026-08-26');
+          assert.notStrictEqual(workdayForTimestamp(Date.parse('2026-08-25T00:30:00Z'), cfg), receiptCalendarDateForTimestamp(Date.parse('2026-08-25T00:30:00Z'), cfg));
+          console.log('PASS: receipt date uses local calendar day, independent of workday cutoff');
+          EOF
+      - name: Assert receipt validation uses calendar date
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'), assert=require('assert');
+          const s=fs.readFileSync('TarsReportApp.js','utf8');
+          const v=s.indexOf('async function validateReceiptDate');
+          const next=s.indexOf('async function', v+20);
+          const block=s.slice(v, next>v?next:undefined);
+          assert(block.includes('const requiredDate = expectedReceiptDate(config);'));
+          assert(!block.includes('const requiredDate = expectedWorkday(config);'));
+          const ai=(s.match(/requestOpenAiReceiptCheck\(file, content, http, config, expectedReceiptDate\(config\), logger\)/g)||[]).length;
+          assert(ai>=1, 'OpenAI receipt check must use calendar date');
+          console.log('PASS: receipt validation and AI use expectedReceiptDate');
+          NODE
+      - name: Run all regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in tests/*.test.js; do echo "==> $f"; node "$f"; done
+      - name: Commit only after PASS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'TARS Automation'
+          git config user.email 'tars-automation@users.noreply.github.com'
+          git add TarsReportApp.js tests/receipt-calendar-date.test.js
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: validate receipts against local calendar date'
+          git push origin HEAD:develop
