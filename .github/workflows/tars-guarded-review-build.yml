@@ -1,0 +1,131 @@
+name: TARS Guarded Review Build
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'TarsReportApp.js'
+      - 'tests/**'
+      - 'app.json'
+      - 'en.json'
+      - 'ru.json'
+      - 'icon.png'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tars-guarded-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Syntax check
+        run: node --check TarsReportApp.js
+      - name: Run all regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test_file in tests/*.test.js; do
+            echo "==> $test_file"
+            node "$test_file"
+          done
+
+  claude-review:
+    name: Claude ECONOMY REVIEW
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Verify Claude credential exists
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ANTHROPIC_API_KEY" ] && [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo 'Claude review blocked: add ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in Settings > Secrets and variables > Actions.'
+            exit 1
+          fi
+      - name: Review exact commit diff
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            TARS ECONOMY REVIEW. Read CLAUDE.md first. Review ONLY the current HEAD commit against HEAD^ and only the minimal surrounding context required to judge it. Do not edit, write, commit, push, deploy, or create files. Baseline 0.9.344 behavior is protected. Check for regressions in receipts, duplicate protection, OCR, reports, photos, calculations, and Rocket.Chat integration. If the diff changes receipt-date logic, verify one consistent Europe/Astrakhan calendar-date semantic across receipt acceptance, index, duplicate identity, sums, summaries, manual receipt commands, repair, and archive while report/workday behavior remains unchanged. Return verdict PASS only when no blocking regression is found; otherwise return BLOCK with a concise reason.
+          claude_args: >-
+            --max-turns 8
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["PASS","BLOCK"]},"summary":{"type":"string"}},"required":["verdict","summary"],"additionalProperties":false}'
+          display_report: 'false'
+          show_full_output: 'false'
+      - name: Enforce Claude verdict
+        shell: bash
+        env:
+          CLAUDE_RESULT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+          raw=os.environ.get('CLAUDE_RESULT','').strip()
+          if not raw:
+              raise SystemExit('Claude review returned no structured verdict')
+          result=json.loads(raw)
+          verdict=result.get('verdict')
+          summary=result.get('summary','')
+          print(f'Claude verdict: {verdict}')
+          print(summary)
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a',encoding='utf-8') as f:
+              f.write(f'## Claude ECONOMY REVIEW: {verdict}\n\n{summary}\n')
+          if verdict != 'PASS':
+              sys.exit(1)
+          PY
+
+  build:
+    name: Build reviewed ZIP
+    needs: [tests, claude-review]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify manifest safety and build ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check TarsReportApp.js
+          VERSION="$(python3 -c 'import json; print(json.load(open("app.json"))["version"])')"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          ZIP_NAME="tars-report_${VERSION}_${SHORT_SHA}.zip"
+          zip -q -j "$ZIP_NAME" app.json TarsReportApp.js en.json ru.json icon.png
+          unzip -t "$ZIP_NAME"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "ZIP_SHA256=$(sha256sum "$ZIP_NAME" | awk '{print $1}')" >> "$GITHUB_ENV"
+      - name: Upload reviewed ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-tars-zip-${{ github.sha }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build summary
+        shell: bash
+        run: |
+          echo "## READY FOR MANUAL DEPLOY" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "ZIP: $ZIP_NAME" >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA-256: $ZIP_SHA256" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deploy remains manual and is not triggered by this workflow." >> "$GITHUB_STEP_SUMMARY"
