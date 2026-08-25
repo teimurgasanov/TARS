@@ -8,6 +8,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: read
   id-token: write
 
 jobs:
@@ -25,6 +26,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           trigger_phrase: '@claude-fix'
           claude_args: >-
-            --max-turns 12
+            --model claude-sonnet-5
+            --max-turns 24
             --allowedTools "Read,Grep,Glob,Edit,Write,Bash(git diff:*),Bash(git status:*),Bash(node:*),Bash(npm test:*)"
           show_full_output: 'false'
