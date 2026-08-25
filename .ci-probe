@@ -1,3 +1,4 @@
 Claude guarded pipeline probe. No TARS runtime change.
 Retry after enabling OIDC id-token permission.
 Retry after simplifying Claude PASS/BLOCK verdict parsing.
+Retry after switching Claude review from OAuth to ANTHROPIC_API_KEY.
