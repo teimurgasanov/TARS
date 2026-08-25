@@ -1,56 +1,70 @@
 name: TARS Guarded Review Build
 
 on:
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
+  id-token: write
+
+concurrency:
+  group: tars-guarded-review-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  run-develop-pipeline:
-    name: Manual guarded review of develop
+  tests:
+    name: Regression tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: develop
-          fetch-depth: 2
-      - name: Syntax and regression tests
+          fetch-depth: 0
+      - name: Syntax check
+        run: node --check TarsReportApp.js
+      - name: Run all regression tests
         shell: bash
         run: |
           set -euo pipefail
-          node --check TarsReportApp.js
           for test_file in tests/*.test.js; do
             echo "==> $test_file"
             node "$test_file"
           done
+
+  claude-review:
+    name: Claude ECONOMY REVIEW
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Verify Claude credential exists
         shell: bash
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "$ANTHROPIC_API_KEY" ] && [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-            echo 'Claude review blocked: add ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in Settings > Secrets and variables > Actions.'
-            exit 1
-          fi
-      - name: Claude ECONOMY REVIEW
+          test -n "$CLAUDE_CODE_OAUTH_TOKEN" || { echo 'Claude review blocked: CLAUDE_CODE_OAUTH_TOKEN missing'; exit 1; }
+      - name: Review PR diff
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            TARS ECONOMY REVIEW. Read CLAUDE.md. Review ONLY HEAD against HEAD^ with minimal context. Do not modify anything. Baseline 0.9.344 is protected. Check receipts, duplicates, OCR, reports, photos, calculations, Rocket.Chat, and receipt-date semantics. PASS only if there is no blocking regression; otherwise BLOCK.
+            TARS ECONOMY REVIEW. Read CLAUDE.md first. Review ONLY this PR diff against develop and only minimal surrounding context. Do not edit, write, commit, push, deploy, or create files. Baseline 0.9.344 behavior is protected. Check regressions in receipts, duplicate protection, OCR, reports, photos, calculations, and Rocket.Chat. For receipt-date changes require one Europe/Astrakhan calendar-date semantic across acceptance, index, duplicate identity, sums, summaries, /cheki, /prinyat, repair and archive, while report/workday behavior remains unchanged. Return PASS only with no blocking regression; otherwise BLOCK with concise reason.
           claude_args: >-
             --max-turns 8
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
             --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["PASS","BLOCK"]},"summary":{"type":"string"}},"required":["verdict","summary"],"additionalProperties":false}'
           display_report: 'false'
           show_full_output: 'false'
-      - name: Enforce verdict and build ZIP
+      - name: Enforce Claude verdict
         shell: bash
         env:
           CLAUDE_RESULT: ${{ steps.claude.outputs.structured_output }}
@@ -58,11 +72,26 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import json, os, sys
-          result=json.loads(os.environ.get('CLAUDE_RESULT','') or '{}')
+          raw=os.environ.get('CLAUDE_RESULT','').strip()
+          if not raw: raise SystemExit('Claude review returned no structured verdict')
+          result=json.loads(raw)
           print('Claude verdict:', result.get('verdict'))
           print(result.get('summary',''))
           if result.get('verdict') != 'PASS': sys.exit(1)
           PY
+
+  build:
+    name: Build reviewed ZIP
+    needs: [tests, claude-review]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check TarsReportApp.js
           VERSION="$(python3 -c 'import json; print(json.load(open("app.json"))["version"])')"
           SHORT_SHA="$(git rev-parse --short=7 HEAD)"
           ZIP_NAME="tars-report_${VERSION}_${SHORT_SHA}.zip"
@@ -71,6 +100,7 @@ jobs:
           echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
       - uses: actions/upload-artifact@v4
         with:
-          name: reviewed-tars-zip
+          name: reviewed-tars-zip-${{ github.sha }}
           path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
           retention-days: 14
