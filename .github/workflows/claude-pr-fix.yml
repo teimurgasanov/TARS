@@ -1,0 +1,27 @@
+name: Claude PR Fix
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  fix:
+    if: ${{ github.event.issue.pull_request && startsWith(github.event.comment.body, '@claude-fix') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Apply explicitly requested PR fix
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          trigger_phrase: '@claude-fix'
+          claude_args: >-
+            --max-turns 12
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(git diff:*),Bash(git status:*),Bash(node:*),Bash(npm test:*)"
+          show_full_output: 'false'
