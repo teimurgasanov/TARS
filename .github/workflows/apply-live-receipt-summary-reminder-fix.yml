@@ -27,87 +27,34 @@ jobs:
           from pathlib import Path
           path = Path('TarsReportApp.js')
           s = path.read_text(encoding='utf-8')
-
-          old_helper = '''    function preUploadEntryMatchesMessage(entry, messageFileId, message, now = Date.now()) {
-      if (!entry || entry.source !== "pre") return false;
-      const uploadId = String(messageFileId || "");
-      if (!uploadId) return false;
-      const uploadMatches = String(entry.uploadAttemptKey || "") === uploadId || String(entry.uploadId || "") === uploadId;
-      if (!uploadMatches) return false;
-      const userId = String(message && message.sender && message.sender.id || "");
-      const roomId = String(message && message.room && message.room.id || "");
-      if (!userId || !roomId) return false;
-      if (String(entry.userId || "") !== userId || String(entry.roomId || "") !== roomId) return false;
-      const uploadedAt = Number(entry.uploadedAt || 0);
-      const ttlMs = 30 * 60 * 1e3;
-      return uploadedAt > 0 && uploadedAt >= now - ttlMs && uploadedAt <= now + 60 * 1e3;
-    }
-'''
-          new_helper = old_helper + '''    function preUploadEntryMatchesPostedContent(entry, exact, message, now = Date.now()) {
-      if (!entry || entry.source !== "pre") return false;
-      const postedExact = String(exact || "");
-      if (!postedExact || String(entry.exact || "") !== postedExact) return false;
-      const userId = String(message && message.sender && message.sender.id || "");
-      const roomId = String(message && message.room && message.room.id || "");
-      if (!userId || !roomId) return false;
-      if (String(entry.userId || "") !== userId || String(entry.roomId || "") !== roomId) return false;
-      const uploadedAt = Number(entry.uploadedAt || 0);
-      const ttlMs = 30 * 60 * 1e3;
-      return uploadedAt > 0 && uploadedAt >= now - ttlMs && uploadedAt <= now + 60 * 1e3;
-    }
-'''
-          if s.count(old_helper) != 1:
-              raise SystemExit(f'helper anchor count={s.count(old_helper)}')
-          s = s.replace(old_helper, new_helper, 1)
-
-          old_route = '''          const content = await read.getUploadReader().getBufferById(messageFileId);
-          if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;
-          let preclassifiedRoom;
-          if (personalRoom && intent !== "mailing") {
-            for (const candidateRoom of [PROTECTED_ROOMS.kassa, PROTECTED_ROOMS.otchet]) {
-              const candidateIndex = await getScopedIndex(candidateRoom);
-              const preEntry = candidateIndex && candidateIndex.photos.find((entry) => preUploadEntryMatchesMessage(entry, messageFileId, message));
-              if (preEntry) {
-'''
-          new_route = '''          const content = await read.getUploadReader().getBufferById(messageFileId);
-          if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;
-          const postedExact = exactHash(content);
-          let preclassifiedRoom;
-          if (personalRoom && intent !== "mailing") {
-            for (const candidateRoom of [PROTECTED_ROOMS.kassa, PROTECTED_ROOMS.otchet]) {
-              const candidateIndex = await getScopedIndex(candidateRoom);
-              const preEntry = candidateIndex && candidateIndex.photos.find((entry) => preUploadEntryMatchesMessage(entry, messageFileId, message) || preUploadEntryMatchesPostedContent(entry, postedExact, message));
-              if (preEntry) {
-'''
-          if s.count(old_route) != 1:
-              raise SystemExit(f'route anchor count={s.count(old_route)}')
-          s = s.replace(old_route, new_route, 1)
-
-          old_exact = '''          const exact = exactHash(content);
-          const visual = visualHash(messageFile, content);
-'''
-          new_exact = '''          const exact = postedExact;
-          const visual = visualHash(messageFile, content);
-'''
-          route_pos = s.find('protectedRoom = preclassifiedRoom || await protectedRoomForPersonalFile')
-          exact_pos = s.find(old_exact, route_pos)
-          if exact_pos < 0:
-              raise SystemExit('post exact anchor missing')
-          s = s[:exact_pos] + s[exact_pos:].replace(old_exact, new_exact, 1)
-
-          old_reminder = '''        const N = t.getCreator().startMessage().setSender(f).setRoom(C).setText(M);
-        await t.getCreator().finish(N);
-        h.push({ userId: x.masterUserId, username: x.username || A.username || "", roomId: x.roomId, workday: c, slot: o, createdAt: a });
-'''
-          new_reminder = '''        const N = t.getCreator().startMessage().setSender(f).setRoom(C).setText(M);
-        await t.getCreator().finish(N);
-        u[v] = true;
-        h.push({ userId: x.masterUserId, username: x.username || A.username || "", roomId: x.roomId, workday: c, slot: o, createdAt: a });
-'''
-          if s.count(old_reminder) != 1:
-              raise SystemExit(f'reminder anchor count={s.count(old_reminder)}')
-          s = s.replace(old_reminder, new_reminder, 1)
-
+          helper_anchor = '    async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig) {'
+          helper = '    function preUploadEntryMatchesPostedContent(entry, exact, message, now = Date.now()) {\n      if (!entry || entry.source !== "pre") return false;\n      const postedExact = String(exact || "");\n      if (!postedExact || String(entry.exact || "") !== postedExact) return false;\n      const userId = String(message && message.sender && message.sender.id || "");\n      const roomId = String(message && message.room && message.room.id || "");\n      if (!userId || !roomId) return false;\n      if (String(entry.userId || "") !== userId || String(entry.roomId || "") !== roomId) return false;\n      const uploadedAt = Number(entry.uploadedAt || 0);\n      const ttlMs = 30 * 60 * 1e3;\n      return uploadedAt > 0 && uploadedAt >= now - ttlMs && uploadedAt <= now + 60 * 1e3;\n    }\n'
+          if 'function preUploadEntryMatchesPostedContent' not in s:
+              if s.count(helper_anchor) != 1:
+                  raise SystemExit(f'helper anchor count={s.count(helper_anchor)}')
+              s = s.replace(helper_anchor, helper + helper_anchor, 1)
+          route_anchor = '          if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;\n          let preclassifiedRoom;'
+          route_repl = '          if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;\n          const postedExact = exactHash(content);\n          let preclassifiedRoom;'
+          if 'const postedExact = exactHash(content);' not in s:
+              if s.count(route_anchor) != 1:
+                  raise SystemExit(f'route anchor count={s.count(route_anchor)}')
+              s = s.replace(route_anchor, route_repl, 1)
+          old_find = 'const preEntry = candidateIndex && candidateIndex.photos.find((entry) => preUploadEntryMatchesMessage(entry, messageFileId, message));'
+          new_find = 'const preEntry = candidateIndex && candidateIndex.photos.find((entry) => preUploadEntryMatchesMessage(entry, messageFileId, message) || preUploadEntryMatchesPostedContent(entry, postedExact, message));'
+          if old_find in s:
+              if s.count(old_find) != 1:
+                  raise SystemExit(f'pre-entry anchor count={s.count(old_find)}')
+              s = s.replace(old_find, new_find, 1)
+          elif new_find not in s:
+              raise SystemExit('pre-entry routing anchor missing')
+          reminder_anchor = '        await t.getCreator().finish(N);\n        h.push({ userId: x.masterUserId, username: x.username || A.username || "", roomId: x.roomId, workday: c, slot: o, createdAt: a });'
+          reminder_repl = '        await t.getCreator().finish(N);\n        u[v] = true;\n        h.push({ userId: x.masterUserId, username: x.username || A.username || "", roomId: x.roomId, workday: c, slot: o, createdAt: a });'
+          if reminder_anchor in s:
+              if s.count(reminder_anchor) != 1:
+                  raise SystemExit(f'reminder anchor count={s.count(reminder_anchor)}')
+              s = s.replace(reminder_anchor, reminder_repl, 1)
+          elif 'await t.getCreator().finish(N);\n        u[v] = true;' not in s:
+              raise SystemExit('reminder anchor missing')
           path.write_text(s, encoding='utf-8')
           PY
       - name: Validate
