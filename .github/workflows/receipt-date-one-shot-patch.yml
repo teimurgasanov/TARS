@@ -1,0 +1,70 @@
+name: Receipt Date One Shot Patch
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ github.event.issue.pull_request && startsWith(github.event.comment.body, '@receipt-date-patch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/receipt-calendar-date-complete
+          fetch-depth: 0
+      - name: Apply exact guarded replacements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js')
+          s=p.read_text()
+          replacements=[
+            ('const targetDate = String(entry && entry.receiptDate || expectedWorkday(ocrConfig));',
+             'const targetDate = String(entry && entry.receiptDate || expectedReceiptDate(ocrConfig));'),
+            ('let date = this.reportWorkday(), username = "";',
+             'let date = G.expectedReceiptDate(config), username = "";'),
+            ('let targetDate = this.reportWorkday();',
+             'let targetDate = G.expectedReceiptDate(config);'),
+            ('module2.exports = {\n      exactHash,',
+             'module2.exports = {\n      exactHash,\n      expectedReceiptDate,')
+          ]
+          for old,new in replacements:
+              count=s.count(old)
+              if count != 1:
+                  raise SystemExit(f'guard failed: expected exactly one occurrence, got {count}: {old}')
+              s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+      - name: Verify only intended runtime file changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff -- TarsReportApp.js
+          test "$(git diff --name-only | tr -d '\r')" = "TarsReportApp.js"
+      - name: Syntax and regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check TarsReportApp.js
+          node tests/receipt-date-cutoff-behavior.test.js
+          for test_file in tests/*.test.js; do
+            echo "==> $test_file"
+            node "$test_file"
+          done
+      - name: Commit exact fix to PR branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "tars-ci"
+          git config user.email "tars-ci@users.noreply.github.com"
+          git add TarsReportApp.js
+          git commit -m "fix: use calendar date across receipt command fallbacks"
+          git push origin HEAD:fix/receipt-calendar-date-complete
