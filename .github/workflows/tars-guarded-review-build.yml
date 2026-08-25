@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  id-token: write
 
 concurrency:
   group: tars-guarded-review-${{ github.ref }}
