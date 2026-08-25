@@ -1,0 +1,70 @@
+name: Apply receipt target date fix
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-receipt-target-date-fix.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - name: Align repair target date
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js')
+          s=p.read_text()
+          start=s.find('async function repairTodayReceiptIndex')
+          if start<0: raise SystemExit('repairTodayReceiptIndex missing')
+          end=s.find('\n    async function ', start+30)
+          if end<0: end=len(s)
+          block=s[start:end]
+          old='const targetDate = expectedWorkday(config);'
+          if block.count(old)!=1: raise SystemExit(f'targetDate anchor mismatch: {block.count(old)}')
+          block=block.replace(old,'const targetDate = expectedReceiptDate(config);',1)
+          s=s[:start]+block+s[end:]
+          p.write_text(s)
+          PY
+          node --check TarsReportApp.js
+      - name: Strengthen receipt date accounting test
+        shell: bash
+        run: |
+          cat >> tests/receipt-date-accounting.test.js <<'EOF'
+          {
+            const fs=require('fs'), assert=require('assert');
+            const s=fs.readFileSync('TarsReportApp.js','utf8');
+            const start=s.indexOf('async function repairTodayReceiptIndex');
+            const end=s.indexOf('\n    async function ',start+30);
+            const block=s.slice(start,end>start?end:undefined);
+            assert(block.includes('const targetDate = expectedReceiptDate(config);'),'repair targetDate must be receipt calendar date');
+            assert(!block.includes('const targetDate = expectedWorkday(config);'),'repair must not use workday target date');
+            assert(block.includes('receiptCalendarDateForTimestamp(createdAt, config)'),'message scan must use receipt calendar date');
+            console.log('PASS: receipt repair target and message dates share calendar semantics');
+          }
+          EOF
+      - name: Run all regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in tests/*.test.js; do echo "==> $f"; node "$f"; done
+      - name: Commit only after PASS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'TARS Automation'
+          git config user.email 'tars-automation@users.noreply.github.com'
+          git add TarsReportApp.js tests/receipt-date-accounting.test.js
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: use receipt calendar date for repair target'
+          git push origin HEAD:develop
