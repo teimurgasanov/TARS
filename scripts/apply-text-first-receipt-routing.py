@@ -1,0 +1,58 @@
+from pathlib import Path
+
+path = Path('TarsReportApp.js')
+text = path.read_text(encoding='utf-8')
+start = text.index('async function personalImageKindForPreUpload')
+end = text.index('async function personalImageIsReceiptForPreUpload', start)
+block = text[start:end]
+
+old_decl = '      let ocrMailing = false;\n'
+new_decl = '      let ocrMailing = false;\n      let ocrHasText = false;\n'
+if block.count(old_decl) != 1:
+    raise SystemExit(f'expected exactly one ocrMailing declaration, found {block.count(old_decl)}')
+block = block.replace(old_decl, new_decl, 1)
+
+old_ocr = '            const text = receiptOcrText(payload);\n            checked = true;\n'
+new_ocr = '            const text = receiptOcrText(payload);\n            checked = true;\n            if (String(text || "").trim()) ocrHasText = true;\n'
+if block.count(old_ocr) != 1:
+    raise SystemExit(f'expected exactly one OCR text assignment, found {block.count(old_ocr)}')
+block = block.replace(old_ocr, new_ocr, 1)
+
+old_tail = '''      if (ocrMailing) return "mailing";\n      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      if (ocrReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      return void 0;\n'''
+new_tail = '''      if (ocrMailing) return "mailing";\n      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      if (ocrReceipt) return "receipt";\n      // OpenAI Vision is the primary image classifier. If it inspected the image\n      // and did not explicitly classify it as a work photo or mailing proof,\n      // send it to strict receipt validation rather than silently treating it as a photo.\n      if (aiChecked) return "receipt";\n      // OCR text is a safe fallback: work photos in the locked workflow contain no text.\n      // This only routes to validateReceiptStrict; it does not accept the receipt by itself.\n      if (ocrHasText) return "receipt";\n      return void 0;\n'''
+if block.count(old_tail) != 1:
+    raise SystemExit(f'expected exactly one classifier tail, found {block.count(old_tail)}')
+block = block.replace(old_tail, new_tail, 1)
+
+text = text[:start] + block + text[end:]
+path.write_text(text, encoding='utf-8')
+
+test = Path('tests/openai-vision-receipt-routing.test.js')
+test.write_text(r'''const fs = require('fs');
+const assert = require('assert');
+
+const source = fs.readFileSync('TarsReportApp.js', 'utf8');
+const start = source.indexOf('async function personalImageKindForPreUpload');
+const end = source.indexOf('async function personalImageIsReceiptForPreUpload', start);
+if (start < 0 || end <= start) throw new Error('personalImageKindForPreUpload block not found');
+const block = source.slice(start, end);
+
+assert(block.includes('let ocrHasText = false;'), 'OCR text fallback state missing');
+assert(block.includes('if (String(text || "").trim()) ocrHasText = true;'), 'OCR text fallback is not populated');
+
+const aiReceipt = block.indexOf('if (aiReceipt) return "receipt"');
+const aiPhoto = block.indexOf('if (aiPhoto) return "photo"');
+const ocrReceipt = block.indexOf('if (ocrReceipt) return "receipt"');
+const aiFallback = block.indexOf('if (aiChecked) return "receipt"');
+const ocrTextFallback = block.indexOf('if (ocrHasText) return "receipt"');
+
+for (const [name, value] of Object.entries({aiReceipt, aiPhoto, ocrReceipt, aiFallback, ocrTextFallback})) {
+  assert(value >= 0, `${name} branch not found`);
+}
+assert(aiReceipt < aiPhoto, 'explicit OpenAI receipt must beat OpenAI photo');
+assert(aiPhoto < ocrReceipt, 'explicit OpenAI work-photo classification must beat generic OCR receipt heuristics');
+assert(ocrReceipt < aiFallback, 'strong OCR receipt detection should run before ambiguous AI fallback');
+assert(aiFallback < ocrTextFallback, 'OpenAI inspected-but-ambiguous images should route to strict receipt validation before OCR text fallback');
+
+console.log('PASS: OpenAI Vision is primary and ambiguous/text images route to strict receipt validation');
+''', encoding='utf-8')
