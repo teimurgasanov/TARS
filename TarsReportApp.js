@@ -4126,7 +4126,7 @@ var require_upload_duplicate_guard = __commonJS({
                   },
                   content,
                   {
-                    receiptDate: entry.receiptDate || workdayForTimestamp(createdAt, config || {}),
+                    receiptDate: entry.receiptDate || receiptCalendarDateForTimestamp(createdAt, config || {}),
                     receiptAmount,
                     receiptIdentity: entry.receiptIdentity
                   },
@@ -4992,11 +4992,11 @@ var require_upload_duplicate_guard = __commonJS({
       if (entry && entry.receiptDate) return String(entry.receiptDate);
       const identity = String(entry && entry.receiptIdentity || "");
       if (identity.indexOf("txn:") === 0) return identity.slice(4).split("|")[0] || "";
-      return workdayForTimestamp(entry && entry.uploadedAt, config);
+      return receiptCalendarDateForTimestamp(entry && entry.uploadedAt, config);
     }
     async function confirmedTransferSummaryForUser(read, config, userId, targetDate, nameCandidates) {
       const index = await readIndex(read, PROTECTED_ROOMS.kassa.index);
-      const workday = targetDate || expectedWorkday(config);
+      const workday = targetDate || expectedReceiptDate(config);
       const candidates = Array.isArray(nameCandidates) ? nameCandidates : [];
       const seen = {};
       let count = 0;
@@ -5031,7 +5031,7 @@ var require_upload_duplicate_guard = __commonJS({
       const nameCandidates = entry && Array.isArray(entry.nameCandidates) ? entry.nameCandidates : [];
       const associationKey = userId || "name:" + transferNameKey(entry && (entry.username || entry.userName || nameCandidates[0]) || "");
       if (!associationKey || associationKey === "name:") return false;
-      const targetDate = String(entry && entry.receiptDate || expectedWorkday(config));
+      const targetDate = String(entry && entry.receiptDate || expectedReceiptDate(config));
       const room = message && isPersonalTarsRoom(message.room) ? message.room : await findResultRoom(read, config);
       const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
       if (!room || !appUser) return false;
@@ -5177,7 +5177,7 @@ var require_upload_duplicate_guard = __commonJS({
       }
       try {
         const index = await readIndex(read, PROTECTED_ROOMS.kassa.index);
-        const targetDate = expectedWorkday(config || {});
+        const targetDate = expectedReceiptDate(config || {});
         for (const entry of index.photos || []) {
           if (!entry || !entry.userId || dateFromEntry(entry, config || {}) !== targetDate) continue;
           if (matchesCandidate(entry.username) || matchesCandidate(entry.userName) || matchesCandidate(entry.userId)) {
@@ -5189,7 +5189,7 @@ var require_upload_duplicate_guard = __commonJS({
       return void 0;
     }
     async function sendMasterTransferSummaryRequest(message, read, persistence, modify, logger, http, config) {
-      const targetDate = expectedWorkday(config);
+      const targetDate = expectedReceiptDate(config);
       await repairTodayReceiptIndex(message, read, persistence, modify, http, config, logger);
       const candidates = transferSummaryCandidateNames(message);
       const user = await resolveTransferSummaryUser(message, read, config);
@@ -5344,7 +5344,7 @@ var require_upload_duplicate_guard = __commonJS({
     }
     async function sendTodayTransferSummary(message, read, persistence, modify, logger, http, config) {
       const index = await repairTodayReceiptIndex(message, read, persistence, modify, http, config, logger);
-      const targetDate = expectedWorkday(config);
+      const targetDate = expectedReceiptDate(config);
       const seen = {};
       let count = 0;
       let total = 0;
