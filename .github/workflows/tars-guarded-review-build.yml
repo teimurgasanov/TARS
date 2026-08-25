@@ -10,6 +10,7 @@ on:
       - 'en.json'
       - 'ru.json'
       - 'icon.png'
+      - '.github/workflows/tars-guarded-review-build.yml'
   workflow_dispatch:
 
 permissions:
