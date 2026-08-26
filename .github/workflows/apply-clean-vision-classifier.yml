@@ -27,7 +27,7 @@ jobs:
           cend = s.index('async function personalImageIsReceiptForPreUpload', cstart)
           block = s[cstart:cend]
           old = '''      if (ocrMailing) return "mailing";\n      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      if (ocrReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      return void 0;'''
-          new = '''      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      if (ocrMailing) return "mailing";\n      if (ocrReceipt) return "receipt";\n      return "unknown";'''
+          new = '''      if (ocrMailing) return "mailing";\n      if (aiMailing) return "mailing";\n      if (aiReceipt) return "receipt";\n      if (ocrReceipt) return "receipt";\n      if (aiPhoto) return "photo";\n      return "unknown";'''
           assert block.count(old) == 1, f'classifier guard expected once, got {block.count(old)}'
           block = block.replace(old, new, 1)
           s = s[:cstart] + block + s[cend:]
@@ -54,5 +54,5 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git rm .github/workflows/apply-clean-vision-classifier.yml
           git add TarsReportApp.js tests/clean-vision-classifier.test.js
-          git commit -m 'fix: replace personal image routing with clean Vision classifier'
+          git commit -m 'fix: replace ambiguous personal image fallback with explicit unknown'
           git push origin HEAD:fix/clean-vision-classifier
