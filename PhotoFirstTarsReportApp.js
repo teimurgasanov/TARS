@@ -39,15 +39,31 @@ function responseText(payload) {
   if (!payload) return '';
   if (typeof payload.output_text === 'string') return payload.output_text;
   if (typeof payload.text === 'string') return payload.text;
-  const output = Array.isArray(payload.output) ? payload.output : [];
   const parts = [];
-  for (const item of output) {
+  for (const item of Array.isArray(payload.output) ? payload.output : []) {
     for (const content of Array.isArray(item && item.content) ? item.content : []) {
       if (typeof content.text === 'string') parts.push(content.text);
       else if (content.text && typeof content.text.value === 'string') parts.push(content.text.value);
     }
   }
   return parts.join(' ');
+}
+
+function messageContainsUpload(message, uploadId) {
+  const id = String(uploadId || '');
+  if (!id || !message) return false;
+  for (const file of imageFiles(message)) {
+    if (String(file && (file._id || file.id) || '') === id) return true;
+  }
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  return attachments.some((attachment) => {
+    const values = [
+      attachment && attachment.imageUrl,
+      attachment && attachment.title && attachment.title.link,
+      attachment && attachment.title && attachment.title.value
+    ].map((value) => String(value || ''));
+    return values.some((value) => value.includes(id));
+  });
 }
 
 class PhotoFirstTarsReportApp extends TarsReportApp {
@@ -92,6 +108,19 @@ class PhotoFirstTarsReportApp extends TarsReportApp {
     return undefined;
   }
 
+  async alreadyInReports(room, uploadId, read) {
+    try {
+      const messages = await read.getRoomReader().getMessages(room.id, {
+        limit: 100,
+        skip: 0,
+        sort: { createdAt: 'desc' }
+      });
+      return (messages || []).some((message) => messageContainsUpload(message, uploadId));
+    } catch (_error) {
+      return false;
+    }
+  }
+
   async sendIndependentPhotoToReports(message, read, http, modify) {
     if (!message || !isDirectRoom(message.room)) return false;
     const files = imageFiles(message);
@@ -105,6 +134,10 @@ class PhotoFirstTarsReportApp extends TarsReportApp {
       const uploadId = String(file && (file._id || file.id) || '');
       if (!uploadId) continue;
       try {
+        if (await this.alreadyInReports(room, uploadId, read)) {
+          this.getLogger().info(`PHOTO_FIRST_ALREADY_FORWARDED upload=${uploadId}`);
+          continue;
+        }
         const content = await read.getUploadReader().getBufferById(uploadId);
         const kind = await this.classifyIndependentImage(file, content, read, http);
         if (kind !== 'photo') {
@@ -138,12 +171,18 @@ class PhotoFirstTarsReportApp extends TarsReportApp {
   }
 
   async executePostMessageSent(message, read, http, persistence, modify) {
+    let legacyResult;
     try {
-      if (await this.sendIndependentPhotoToReports(message, read, http, modify)) return;
+      legacyResult = await super.executePostMessageSent(message, read, http, persistence, modify);
+    } catch (error) {
+      this.getLogger().warn(`PHOTO_FIRST_LEGACY_HANDLER_FAILED: ${error && error.message || error}`);
+    }
+    try {
+      await this.sendIndependentPhotoToReports(message, read, http, modify);
     } catch (error) {
       this.getLogger().warn(`PHOTO_FIRST_ROUTE_FAILED: ${error && error.message || error}`);
     }
-    return super.executePostMessageSent(message, read, http, persistence, modify);
+    return legacyResult;
   }
 }
 
