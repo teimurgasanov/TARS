@@ -1,0 +1,27 @@
+name: Inspect Photo Forwarder
+on:
+  push:
+    branches: [fix/photo-inside-existing-forwarder]
+    paths: [.github/workflows/inspect-photo-forwarder.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/photo-inside-existing-forwarder
+      - name: Print forwarder context
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('TarsReportApp.js').read_text(encoding='utf-8')
+          needle='async function fastForwardPersonalReportPhotos'
+          i=s.find(needle)
+          if i<0: raise SystemExit('forwarder not found')
+          j=s.find('\n    async function ', i+len(needle))
+          if j<0: j=min(len(s), i+18000)
+          print(s[i:j])
+          PY
