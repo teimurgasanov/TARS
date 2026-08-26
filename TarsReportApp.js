@@ -5141,7 +5141,7 @@ var require_upload_duplicate_guard = __commonJS({
       await persistence.removeByAssociation(association);
       const amountText = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(summary.total);
       const username = entry && entry.username ? `@${entry.username}` : entry && entry.userName ? entry.userName : message && message.sender && message.sender.username ? `@${message.sender.username}` : message && message.sender && (message.sender.name || message.sender.id) || "мастер";
-      let text = `💳 СУММА ПЕРЕВОДОВ\nМастер: ${username}\nДата: ${displayDate(targetDate)}\nЧеков: ${summary.count}\nСумма переводов: ${amountText} ₽`;
+      let text = `🧾 ИТОГО ПО ЧЕКАМ\nМастер: ${username}\nДата: ${displayDate(targetDate)}\nЧеков: ${summary.count}\nОбщая сумма чеков: ${amountText} ₽`;
       if (summary.missing) text += `\nНе учтено чеков без суммы: ${summary.missing}`;
       const builder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text);
       const messageId = await modify.getCreator().finish(builder);
