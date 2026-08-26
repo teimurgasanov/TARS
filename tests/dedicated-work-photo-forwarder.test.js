@@ -1,3 +1,4 @@
+// Single-decision work-photo route regression guard.
 const fs = require('fs');
 const assert = require('assert');
 const source = fs.readFileSync('TarsReportApp.js', 'utf8');
