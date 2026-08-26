@@ -1,0 +1,15 @@
+const fs = require('fs');
+const assert = require('assert');
+const source = fs.readFileSync('TarsReportApp.js', 'utf8');
+const a = source.indexOf('async function shouldForwardConfirmedWorkPhoto');
+const b = source.indexOf('async function fastForwardPersonalReportPhotos', a);
+assert(a >= 0 && b > a);
+const h = source.slice(a,b);
+for (const token of ['initialKind === \"receipt\"','initialKind === \"mailing\"','initialKind === \"photo\"','requestOpenAiReceiptCheck','aiCandidateMarksReceipt','aiCandidateMarksMailing','aiCandidateMarksReportPhoto','reason: \"unknown\"']) assert(h.includes(token), token);
+const c = source.indexOf('async function fastForwardPersonalReportPhotos');
+const d = source.indexOf('async function publishDirectReportPhotos', c);
+const f = source.slice(c,d);
+assert(f.includes('shouldForwardConfirmedWorkPhoto('));
+assert(f.includes('FAST_PHOTO_FORWARD_CONFIRMED'));
+assert(!f.includes('FAST_PHOTO_FORWARD_DEFAULT_TO_PHOTO'));
+console.log('PASS: dedicated work-photo forwarder');

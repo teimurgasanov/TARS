@@ -1905,6 +1905,23 @@ var require_upload_duplicate_guard = __commonJS({
       if (removed && logger) logger.info(`Removed ${removed} mailing proof forward(s) from Otchet`);
       return removed;
     }
+    async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger) {
+      const initialKind = await personalImageKindForPreUpload(file, content, http, config, logger);
+      if (initialKind === "receipt") return { forward: false, reason: "receipt" };
+      if (initialKind === "mailing") return { forward: false, reason: "mailing" };
+      if (initialKind === "photo") return { forward: true, reason: "classifier" };
+      if (!config || !config.openaiApiKey || !content || !content.length) return { forward: false, reason: "unknown" };
+      try {
+        const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger);
+        if (!aiCandidate) return { forward: false, reason: "unknown" };
+        if (aiCandidateMarksReceipt(aiCandidate)) return { forward: false, reason: "receipt" };
+        if (aiCandidateMarksMailing(aiCandidate)) return { forward: false, reason: "mailing" };
+        if (aiCandidateMarksReportPhoto(aiCandidate)) return { forward: true, reason: "openai-work-photo" };
+      } catch (error) {
+        if (logger) logger.warn(`Dedicated work-photo classifier failed: ${error && error.message || error}`);
+      }
+      return { forward: false, reason: "unknown" };
+    }
     async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config) {
       if (!message || !isPersonalTarsRoom(message.room)) return false;
       const intent = directFileIntent(message);
@@ -1948,21 +1965,12 @@ var require_upload_duplicate_guard = __commonJS({
       if (!bestCandidate) return false;
       const sourceFile = bestCandidate.sourceFile;
       const uploadId = bestCandidate.uploadId;
-      const confirmedKind = await personalImageKindForPreUpload(sourceFile, bestCandidate.content, http, config, logger);
-      if (confirmedKind === "mailing") {
-        if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED_MAILING upload=${uploadId}`);
+      const workPhotoDecision = await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger);
+      if (!workPhotoDecision.forward) {
+        if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED upload=${uploadId} reason=${workPhotoDecision.reason || "unknown"}`);
         return false;
       }
-      if (confirmedKind !== "photo") {
-        const looksLikeReceipt = confirmedKind === "receipt" || await isBlockedPersonalPhotoImage(sourceFile, bestCandidate.content, http, config, logger);
-        if (looksLikeReceipt) {
-          if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED_RECEIPT upload=${uploadId}`);
-          return false;
-        }
-        // Not confidently a receipt or mailing proof: default to report photo
-        // instead of leaving it stuck in the personal chat.
-        if (logger) logger.info(`FAST_PHOTO_FORWARD_DEFAULT_TO_PHOTO upload=${uploadId} kind=${confirmedKind || "unknown"}`);
-      }
+      if (logger) logger.info(`FAST_PHOTO_FORWARD_CONFIRMED upload=${uploadId} source=${workPhotoDecision.reason || "unknown"}`);
       const alreadyPublished = Array.isArray(index.photos) && index.photos.some((entry) => {
         if (!entry) return false;
         const sameUpload = String(entry.uploadId || entry.reportUploadId || "") === uploadId;
