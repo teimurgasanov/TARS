@@ -16,12 +16,12 @@ const aiPhoto = block.indexOf('if (aiPhoto) return "photo"');
 const aiFallback = block.indexOf('if (aiChecked) return "receipt"');
 const ocrTextFallback = block.indexOf('if (ocrHasText) return "receipt"');
 
-for (const [name, value] of Object.entries({aiReceipt, ocrReceipt, aiPhoto, aiFallback, ocrTextFallback})) {
+for (const [name, value] of Object.entries({aiReceipt, ocrReceipt, aiPhoto, ocrTextFallback})) {
   assert(value >= 0, `${name} branch not found`);
 }
+assert(aiFallback < 0, 'generic aiChecked fallback is too broad and must not route every ambiguous image as a receipt');
 assert(aiReceipt < ocrReceipt, 'explicit OpenAI receipt should route immediately');
 assert(ocrReceipt < aiPhoto, 'strong OCR receipt must keep priority over generic AI photo');
-assert(aiPhoto < aiFallback, 'explicit OpenAI work-photo classification must still route as photo');
-assert(aiFallback < ocrTextFallback, 'ambiguous Vision result should reach strict receipt validation before generic OCR-text fallback');
+assert(aiPhoto < ocrTextFallback, 'explicit OpenAI work-photo classification must still route as photo before generic OCR-text fallback');
 
-console.log('PASS: Vision ambiguity and OCR text fall back to strict receipt validation without weakening protected OCR priority');
+console.log('PASS: explicit Vision decisions are preserved; OCR text only falls back to strict receipt validation');
