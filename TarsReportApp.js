@@ -3167,6 +3167,9 @@ var require_upload_duplicate_guard = __commonJS({
     function normalizeOpenAiStatus(value) {
       return String(value || "").trim().toLowerCase().replace(/ё/g, "е");
     }
+    function isGazpromReceiptText(value) {
+      return /газпром\s*банк|газпромбанк|gazprom\s*bank|gazprombank/i.test(String(value || ""));
+    }
     function receiptAmountFromAiValue(value) {
       if (typeof value === "number") return Number.isFinite(value) && value > 0 ? Math.round(value * 100) / 100 : void 0;
       return normalizeReceiptAmount(value);
@@ -3181,7 +3184,7 @@ var require_upload_duplicate_guard = __commonJS({
       const status = normalizeOpenAiStatus(json.status);
       let statusRejection = "";
       if (/failed|cancel|error|declin|reject|not_success|неуспеш|отклон|отмен|ошиб/.test(status)) statusRejection = "🚫 ЧЕК НЕ ПРОШЁЛ ПРОВЕРКУ";
-      else if (/pending|processing|ожидан|обработ/.test(status)) statusRejection = "🚫 СТАТУС ЧЕКА НЕ ПОДТВЕРЖДЁН";
+      else if (/pending|processing|ожидан|обработ/.test(status) && !isGazpromReceiptText(json.bank || text)) statusRejection = "🚫 СТАТУС ЧЕКА НЕ ПОДТВЕРЖДЁН";
       return {
         text,
         receiptDate: normalizeOpenAiDate(json.date, requiredDate),
@@ -3600,7 +3603,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (/успешно|исполнен[ао]?|выполнен[ао]?|оплачен[ао]?|платеж\s+выполнен|перевод\s+выполнен|зачислен[ао]?|completed|success|successful|approved/i.test(source)) {
         return "";
       }
-      if (/ожидает\s+(?:подтверждения|обработки|исполнения)|в\s+обработке|на\s+обработке|на\s+проверке|на\s+подпис(?:ь|ании)|к\s+отправке|готов\s+к\s+отправке|черновик|картотек|дневн\w*\s+очеред|поставлен\s+в\s+рейс|отправлен|платеж\s+(?:создан|обрабатывается)|request_sent|created|sending|timeout|processing|pending/i.test(source)) {
+      if (/ожидает\s+(?:подтверждения|обработки|исполнения)|в\s+обработке|на\s+обработке|на\s+проверке|на\s+подпис(?:ь|ании)|к\s+отправке|готов\s+к\s+отправке|черновик|картотек|дневн\w*\s+очеред|поставлен\s+в\s+рейс|отправлен|платеж\s+(?:создан|обрабатывается)|request_sent|created|sending|timeout|processing|pending/i.test(source) && !isGazpromReceiptText(source)) {
         return "🚫 ПЛАТЕЖ НЕ ПОДТВЕРЖДЁН — СУММА НЕ ЗАСЧИТАНА";
       }
       if (/отказ|отменен|отклонен|не\s+выполнен|неуспеш|ошибка\s+(?:платежа|операции)|rejected|failed|declined|error/i.test(source)) {
