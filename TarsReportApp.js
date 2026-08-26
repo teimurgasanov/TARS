@@ -2678,7 +2678,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (aiReceipt) return "receipt";
       if (ocrReceipt) return "receipt";
       if (aiPhoto) return "photo";
-      return void 0;
+      return "unknown";
     }
     async function personalImageIsReceiptForPreUpload(file, content, http, config, logger) {
       const kind = await personalImageKindForPreUpload(file, content, http, config, logger);
@@ -2710,15 +2710,11 @@ var require_upload_duplicate_guard = __commonJS({
         return PROTECTED_ROOMS.kassa;
       }
       if (kind === "photo") return PROTECTED_ROOMS.otchet;
-      if (await isBlockedPersonalPhotoImage(file, content, http, config, logger)) {
-        if (logger) logger.info(`Personal upload classified as receipt by image content: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
-        return PROTECTED_ROOMS.kassa;
+      if (kind === "unknown") {
+        if (logger) logger.info(`Personal upload classification unknown; keeping in personal chat for control: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
+        return void 0;
       }
-      // Default: anything not confidently a receipt or mailing proof is treated
-      // as a report work photo and goes to Otchet, rather than staying stuck
-      // in the personal chat when classification is uncertain.
-      if (logger) logger.info(`Personal upload not confirmed as receipt/mailing; defaulting to report photo: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
-      return PROTECTED_ROOMS.otchet;
+      return void 0;
     }
     function normalizedUsername(value) {
       return String(value || "").trim().replace(/^@/, "").toLowerCase();
