@@ -13,7 +13,7 @@ jobs:
         with:
           ref: feature/photo-module-inline
           fetch-depth: 0
-      - name: Integrate isolated photo module
+      - name: Inline isolated photo route
         shell: bash
         run: |
           set -euo pipefail
@@ -21,38 +21,30 @@ jobs:
           from pathlib import Path
           p=Path('TarsReportApp.js')
           s=p.read_text(encoding='utf-8')
-          req='const { routeIndependentPhoto } = require("./IndependentPhotoRoute");\n'
-          if req not in s:
+          module=Path('IndependentPhotoRoute.js').read_text(encoding='utf-8')
+          module=module.replace('"use strict";\n\n','',1)
+          module=module.replace('\nmodule.exports = { routeIndependentPhoto };\n','\n')
+          begin='// INDEPENDENT_PHOTO_ROUTE_BEGIN\n'
+          end='// INDEPENDENT_PHOTO_ROUTE_END\n'
+          if begin not in s:
               marker='"use strict";\n'
               if marker not in s: raise SystemExit('strict marker missing')
-              s=s.replace(marker, marker+req, 1)
+              s=s.replace(marker, marker+begin+module+end, 1)
           old='''    const appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();\n    if (G.isTarsAppMessage(e, appUser)) return;'''
           new='''    const appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();\n    if (G.isTarsAppMessage(e, appUser)) return;\n    try {\n      if (await routeIndependentPhoto(e, n, t, r, this.getLogger(), {\n        isPersonalRoom: G.isPersonalTarsRoom,\n        directFileIntent: G.directFileIntent,\n        isAppMessage: (message) => G.isTarsAppMessage(message, appUser)\n      })) {\n        await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);\n        return;\n      }\n    } catch (error) {\n      this.getLogger().warn(`INDEPENDENT_PHOTO_ROUTE_FAILED: ${error && error.message || error}`);\n    }'''
-          if old not in s: raise SystemExit('post-message insertion marker missing')
-          s=s.replace(old,new,1)
+          if 'routeIndependentPhoto(e, n, t, r' not in s:
+              if old not in s: raise SystemExit('post-message insertion marker missing')
+              s=s.replace(old,new,1)
           p.write_text(s,encoding='utf-8')
-
-          for path in ['.github/workflows/tars-guarded-review-build.yml','.github/workflows/deploy-rocketchat.yml']:
-              q=Path(path); x=q.read_text(encoding='utf-8')
-              x=x.replace('node --check TarsReportApp.js\n', 'node --check TarsReportApp.js\n          node --check IndependentPhotoRoute.js\n', 1)
-              if 'zip -q -j "$ZIP_NAME" app.json TarsReportApp.js en.json ru.json icon.png' in x:
-                  x=x.replace('zip -q -j "$ZIP_NAME" app.json TarsReportApp.js en.json ru.json icon.png','zip -q -j "$ZIP_NAME" app.json TarsReportApp.js IndependentPhotoRoute.js en.json ru.json icon.png',1)
-              if 'zip -q -j "$ZIP_PATH" app.json TarsReportApp.js en.json ru.json icon.png' in x:
-                  x=x.replace('zip -q -j "$ZIP_PATH" app.json TarsReportApp.js en.json ru.json icon.png','zip -q -j "$ZIP_PATH" app.json TarsReportApp.js IndependentPhotoRoute.js en.json ru.json icon.png',1)
-              q.write_text(x,encoding='utf-8')
-
-          Path('tests/independent-photo-module.test.js').write_text('''const fs=require("fs"),assert=require("assert"),cp=require("child_process");\ncp.execFileSync(process.execPath,["--check","IndependentPhotoRoute.js"],{stdio:"inherit"});\nconst app=fs.readFileSync("TarsReportApp.js","utf8");\nconst mod=fs.readFileSync("IndependentPhotoRoute.js","utf8");\nassert(app.includes('require("./IndependentPhotoRoute")'));\nassert(app.includes('routeIndependentPhoto(e, n, t, r'));\nassert(mod.includes('kind !== "photo"'));\nassert(mod.includes('intent === "receipt" || intent === "mailing"'));\nassert(mod.includes('isPersonalRoom(message.room)'));\nfor(const f of [".github/workflows/tars-guarded-review-build.yml",".github/workflows/deploy-rocketchat.yml"]){ const x=fs.readFileSync(f,"utf8"); assert(x.includes("IndependentPhotoRoute.js")); }\nconsole.log("PASS: isolated photo module is integrated without replacing TARS class");\n''',encoding='utf-8')
+          Path('tests/independent-photo-inline.test.js').write_text('''const fs=require("fs"),assert=require("assert");\nconst s=fs.readFileSync("TarsReportApp.js","utf8");\nassert(s.includes("INDEPENDENT_PHOTO_ROUTE_BEGIN"));\nassert(s.includes("async function routeIndependentPhoto"));\nassert(s.includes('kind !== "photo"'));\nassert(s.includes('intent === "receipt" || intent === "mailing"'));\nassert(s.includes('routeIndependentPhoto(e, n, t, r'));\nassert(!s.includes('require("./IndependentPhotoRoute")'));\nconsole.log("PASS: independent photo route is inline and leaves deploy package unchanged");\n''',encoding='utf-8')
           PY
           node --check TarsReportApp.js
-          node --check IndependentPhotoRoute.js
           for f in tests/*.test.js; do node "$f"; done
       - name: Commit integration
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add TarsReportApp.js IndependentPhotoRoute.js tests/independent-photo-module.test.js .github/workflows/tars-guarded-review-build.yml .github/workflows/deploy-rocketchat.yml
-          git commit -m 'feat: integrate isolated photo route module'
-          git rm .github/workflows/apply-inline-photo-module.yml
-          git commit -m 'ci: remove one-shot photo module workflow'
+          git add TarsReportApp.js tests/independent-photo-inline.test.js
+          git commit -m 'feat: add isolated inline photo route'
           git push origin HEAD:feature/photo-module-inline
