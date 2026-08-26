@@ -2041,7 +2041,7 @@ var require_upload_duplicate_guard = __commonJS({
         const content = bestCandidate.content;
         const exact = exactHash(content);
         const visual = visualHash(sourceFile, content);
-        const duplicate = findExactDuplicate(index, exact);
+        const duplicate = findDuplicate(index, exact, visual);
         const duplicateReportMessageId = String(duplicate && duplicate.reportMessageId || "");
         const duplicateStaleStatus = duplicateReportMessageId === "duplicate" || duplicateReportMessageId === "blocked" || duplicateReportMessageId === "failed";
         const duplicatePublished = Boolean(duplicate && (duplicate.reportUploadId || duplicateReportMessageId && duplicateReportMessageId !== "publishing" && !duplicateStaleStatus));
@@ -2052,9 +2052,10 @@ var require_upload_duplicate_guard = __commonJS({
           (!duplicate.userId || String(duplicate.userId || "") === String(message.sender && message.sender.id || "")) &&
           (!duplicate.roomId || String(duplicate.roomId || "") === String(message.room && message.room.id || ""))
         );
-        if (duplicate && duplicatePublished && !reusablePreUpload && String(duplicate.uploadId || "") !== uploadId) {
-          if (logger) logger.info(`FAST_PHOTO_FORWARD_SKIP_DUPLICATE upload=${uploadId}`);
-          return true;
+        const sameSourceMessage = Boolean(duplicate && message.id && String(duplicate.messageId || "") === String(message.id));
+        if (duplicate && !reusablePreUpload && !sameSourceMessage && String(duplicate.uploadId || "") !== uploadId) {
+          if (logger) logger.info(`FAST_PHOTO_FORWARD_DEFER_DUPLICATE_REJECTION upload=${uploadId}`);
+          return false;
         }
         if (reusablePreUpload && logger) logger.info(`FAST_PHOTO_FORWARD_REUSE_PRE upload=${uploadId}`);
         const now = Date.now();
@@ -4408,7 +4409,8 @@ var require_upload_duplicate_guard = __commonJS({
         String(duplicate.userId || "") === String(message.sender && message.sender.id || "") &&
         now - Number(duplicate.uploadedAt || 0) < 2 * 60 * 1e3
       );
-      if (duplicate && !sameFreshPreUploadMarker && String(duplicate.uploadId || "") !== uploadId) {
+      const samePostedMessage = Boolean(duplicate && message.id && String(duplicate.messageId || "") === String(message.id));
+      if (duplicate && !sameFreshPreUploadMarker && !samePostedMessage) {
         await writeIndex(persistence, indexName, index);
         if (message.id && message.sender) {
           await deleteReceiptMessage(message, read, modify, logger);
@@ -4495,7 +4497,7 @@ var require_upload_duplicate_guard = __commonJS({
       const now = Date.now();
       const pendingTtl = 15 * 60 * 1e3;
       index.photos = index.photos.filter((entry) => entry.source !== "pre" || now - Number(entry.uploadedAt || 0) < pendingTtl);
-      let exactMatch = findExactDuplicate(index, exact);
+      let exactMatch = protectedRoom.kind === "photo" ? findDuplicate(index, exact, visual) : findExactDuplicate(index, exact);
       const attemptKey = uploadAttemptKey(file);
       const pendingAge = exactMatch ? now - Number(exactMatch.uploadedAt || 0) : Number.POSITIVE_INFINITY;
       const sameStableAttempt = Boolean(attemptKey && exactMatch && exactMatch.uploadAttemptKey === attemptKey);
@@ -4699,7 +4701,7 @@ var require_upload_duplicate_guard = __commonJS({
           }
           const exact = exactHash(content);
           const visual = visualHash(messageFile, content);
-          const exactMatch = findExactDuplicate(index, exact);
+          const exactMatch = protectedRoom.kind === "photo" ? findDuplicate(index, exact, visual) : findExactDuplicate(index, exact);
           const isSameConfirmedMessage = exactMatch && exactMatch.messageId && message.id && exactMatch.messageId === message.id;
           const isSameConfirmedUpload = exactMatch && exactMatch.uploadId && messageFileId && String(exactMatch.uploadId) === String(messageFileId) && exactMatch.source !== "duplicate" && exactMatch.source !== "rejected";
           if (isSameConfirmedMessage || isSameConfirmedUpload) {
@@ -4967,7 +4969,7 @@ var require_upload_duplicate_guard = __commonJS({
             receiptAmount = receiptCheck.receiptAmount;
             receiptWarning = receiptCheck.receiptWarning || "";
           } else {
-            const exactPhotoMatch = findExactDuplicate(index, exact);
+            const exactPhotoMatch = findDuplicate(index, exact, visual);
             if (exactPhotoMatch) {
               const reportMessageId = String(exactPhotoMatch.reportMessageId || "");
               const staleReportStatus = reportMessageId === "duplicate" || reportMessageId === "blocked" || reportMessageId === "failed";
