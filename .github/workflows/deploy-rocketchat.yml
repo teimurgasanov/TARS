@@ -38,10 +38,14 @@ jobs:
               echo "Deployment blocked: confirmation must be exactly DEPLOY."
               exit 1
             fi
-            echo "sha=${{ inputs.commit_sha }}" >> "$GITHUB_OUTPUT"
+            TARGET_SHA="${{ inputs.commit_sha }}"
+            SOURCE="manual"
           else
-            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            TARGET_SHA="${{ github.sha }}"
+            SOURCE="develop-push"
           fi
+          echo "sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
 
       - name: Checkout deployment target
         uses: actions/checkout@v4
@@ -53,7 +57,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin develop --no-tags
+          git fetch origin develop main --no-tags
           TARGET_SHA="$(git rev-parse HEAD)"
           REQUESTED_SHA="$(git rev-parse '${{ steps.target.outputs.sha }}^{commit}')"
           test "$TARGET_SHA" = "$REQUESTED_SHA" || { echo "Deployment blocked: SHA mismatch"; exit 1; }
@@ -70,17 +74,26 @@ jobs:
           set -euo pipefail
           test -z "$(git status --porcelain)"
           node --check TarsReportApp.js
+          git show origin/main:app.json > /tmp/stable-app.json
           python3 - <<'PY'
           import json
           with open('app.json', encoding='utf-8') as f:
               app = json.load(f)
-          required = ['id', 'version', 'nameSlug', 'classFile']
+          with open('/tmp/stable-app.json', encoding='utf-8') as f:
+              stable = json.load(f)
+          required = ['id', 'version', 'nameSlug', 'classFile', 'permissions']
           missing = [k for k in required if not app.get(k)]
           if missing:
               raise SystemExit(f"app.json missing required fields: {missing}")
           if app['classFile'] != 'TarsReportApp.js':
               raise SystemExit('Unexpected classFile; deployment blocked')
+          for key in ('id', 'nameSlug', 'classFile'):
+              if app.get(key) != stable.get(key):
+                  raise SystemExit(f'{key} differs from stable main; deployment blocked')
+          if app.get('permissions') != stable.get('permissions'):
+              raise SystemExit('App permissions differ from stable main; deployment blocked')
           print(f"App: {app['nameSlug']} version {app['version']} id {app['id']}")
+          print(f"Permissions unchanged from stable main: {len(app['permissions'])}")
           PY
 
       - name: Run full regression tests
@@ -92,12 +105,19 @@ jobs:
             node "$test_file"
           done
 
-      - name: Install pinned Rocket.Chat Apps CLI
+      - name: Build private-app ZIP
         shell: bash
         run: |
           set -euo pipefail
-          npm install --global @rocket.chat/apps-cli@1.14.0
-          rc-apps --version
+          VERSION="$(python3 -c 'import json; print(json.load(open("app.json"))["version"])')"
+          ZIP_PATH="$RUNNER_TEMP/tars-report_${VERSION}.zip"
+          rm -f "$ZIP_PATH"
+          zip -q -j "$ZIP_PATH" app.json TarsReportApp.js en.json ru.json icon.png
+          unzip -t "$ZIP_PATH"
+          echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+          echo "ZIP_SHA256=$(sha256sum "$ZIP_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "Built: $ZIP_PATH"
+          unzip -l "$ZIP_PATH"
 
       - name: Validate Rocket.Chat deployment secrets
         shell: bash
@@ -115,7 +135,7 @@ jobs:
             *) echo "Deployment blocked: ROCKETCHAT_URL must use https://"; exit 1 ;;
           esac
 
-      - name: Deploy to Rocket.Chat
+      - name: Authenticate to Rocket.Chat
         shell: bash
         env:
           ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
@@ -123,15 +143,77 @@ jobs:
           ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
         run: |
           set -euo pipefail
-          rc-apps deploy \
-            --url "$ROCKETCHAT_URL" \
-            -u "$ROCKETCHAT_USER" \
-            -p "$ROCKETCHAT_PASSWORD"
+          LOGIN_JSON=$(curl --fail-with-body --silent --show-error \
+            -H 'Content-Type: application/json' \
+            --data "$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({'user': os.environ['ROCKETCHAT_USER'], 'password': os.environ['ROCKETCHAT_PASSWORD']}))
+          PY
+          )" \
+            "$ROCKETCHAT_URL/api/v1/login")
+          AUTH_TOKEN=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("data",{}).get("authToken", ""))' <<<"$LOGIN_JSON")
+          USER_ID=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("data",{}).get("userId", ""))' <<<"$LOGIN_JSON")
+          test -n "$AUTH_TOKEN" || { echo 'Login succeeded without authToken; deployment blocked'; exit 1; }
+          test -n "$USER_ID" || { echo 'Login succeeded without userId; deployment blocked'; exit 1; }
+          echo "AUTH_TOKEN=$AUTH_TOKEN" >> "$GITHUB_ENV"
+          echo "USER_ID=$USER_ID" >> "$GITHUB_ENV"
+          echo 'Rocket.Chat authentication: OK'
+
+      - name: Update private app through Rocket.Chat upload API
+        shell: bash
+        env:
+          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
+        run: |
+          set -euo pipefail
+          PERMISSIONS_JSON=$(python3 - <<'PY'
+          import json
+          app=json.load(open('app.json', encoding='utf-8'))
+          print(json.dumps(app['permissions'], separators=(',', ':')))
+          PY
+          )
+          HTTP_CODE=$(curl --silent --show-error \
+            --output /tmp/deploy-response.out \
+            --write-out '%{http_code}' \
+            -X POST \
+            -H "X-Auth-Token: $AUTH_TOKEN" \
+            -H "X-User-Id: $USER_ID" \
+            -H 'Accept: application/json' \
+            -F "app=@${ZIP_PATH};type=application/zip" \
+            -F "permissions=${PERMISSIONS_JSON}" \
+            "$ROCKETCHAT_URL/api/apps/update")
+          echo "POST /api/apps/update -> HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo 'Rocket.Chat rejected the private-app update. No retry will be attempted.'
+            python3 - <<'PY'
+          raw=open('/tmp/deploy-response.out','rb').read(2000)
+          print(raw.decode('utf-8','replace'))
+          PY
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          raw=open('/tmp/deploy-response.out','rb').read()
+          if not raw:
+              print('Rocket.Chat returned success with an empty response body.')
+          else:
+              try:
+                  data=json.loads(raw.decode('utf-8'))
+              except Exception:
+                  print('Rocket.Chat returned success with a non-JSON body.')
+              else:
+                  app=data.get('app', data) if isinstance(data, dict) else {}
+                  if isinstance(app, dict):
+                      print('Installed app id:', app.get('id'))
+                      print('Installed version:', app.get('version'))
+                      print('Installed status:', app.get('status'))
+          PY
 
       - name: Deployment summary
         if: success()
         shell: bash
         run: |
-          echo "Rocket.Chat deployment completed."
+          echo "Rocket.Chat private-app update completed."
           echo "Commit: $(git rev-parse HEAD)"
+          echo "Source: ${{ steps.target.outputs.source }}"
           python3 -c 'import json; print("Version:", json.load(open("app.json"))["version"])'
+          echo "ZIP SHA-256: $ZIP_SHA256"
