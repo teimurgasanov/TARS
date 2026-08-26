@@ -2071,7 +2071,7 @@ var require_upload_duplicate_guard = __commonJS({
         entry.reportPublishedAt = now;
         await writeIndex(persistence, indexName, index);
         const sourceUpload = await read.getUploadReader().getById(uploadId);
-        const reportMessageId = await forwardReportPhotoMessage(message, sourceFile, sourceUpload, room, appUser, modify, logger, {
+        let reportMessageId = await forwardReportPhotoMessage(message, sourceFile, sourceUpload, room, appUser, modify, logger, {
           user: message.sender,
           sourceMessageId: message.id,
           read,
@@ -2079,6 +2079,25 @@ var require_upload_duplicate_guard = __commonJS({
           http,
           config
         });
+        if (!reportMessageId) {
+          // Independent delivery fallback, but still inside the existing guarded
+          // photo-forwarding path. Receipts/mailings never reach this point.
+          const fallbackFile = {
+            _id: uploadId,
+            name: String(sourceFile && (sourceFile.name || sourceFile.title) || sourceUpload && sourceUpload.name || "photo-report.jpg"),
+            type: String(sourceFile && (sourceFile.type || sourceFile.mimeType) || sourceUpload && sourceUpload.type || "image/jpeg")
+          };
+          const master = message.sender ? `@${message.sender.username || message.sender.name || message.sender.id}` : "мастер";
+          const fallbackBuilder = modify.getCreator().startMessage({
+            room,
+            sender: appUser,
+            text: `Мастер: ${master}`,
+            file: fallbackFile,
+            parseUrls: false
+          });
+          reportMessageId = await modify.getCreator().finish(fallbackBuilder);
+          if (reportMessageId && logger) logger.info(`FAST_PHOTO_FORWARD_FALLBACK_OK upload=${uploadId} message=${reportMessageId}`);
+        }
         if (!reportMessageId) throw new Error("Rocket.Chat did not create the fast forwarded report photo message");
         entry.reportRoomId = room.id;
         entry.reportUploadId = uploadId;
