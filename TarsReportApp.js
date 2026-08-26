@@ -1949,8 +1949,9 @@ var require_upload_duplicate_guard = __commonJS({
       if (finalKind === "receipt") return { forward: false, reason: "receipt" };
       if (finalKind === "mailing") return { forward: false, reason: "mailing" };
       if (finalKind === "unknown" || !finalKind) {
-        const dedicatedWorkPhoto = await requestOpenAiWorkPhotoCheck(file, content, http, config, logger);
-        if (dedicatedWorkPhoto) return { forward: true, reason: "dedicated-work-photo-vision" };
+        // Stable 0.9.344 behavior: receipt and mailing are already blocked;
+        // an otherwise unknown personal image continues to Reports.
+        return { forward: true, reason: "stable-0944-unknown-photo-fallback" };
       }
       return { forward: false, reason: finalKind || "unknown" };
     }
