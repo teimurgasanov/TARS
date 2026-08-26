@@ -1,4 +1,4 @@
-const { TarsReportApp } = require('./TarsReportApp');
+const { TarsReportApp } = require('./LegacyTarsReportApp');
 
 function imageFiles(message) {
   const files = [];
@@ -67,7 +67,6 @@ class PhotoFirstTarsReportApp extends TarsReportApp {
     const room = await read.getRoomReader().getByName('Otchet') || await read.getRoomReader().getByName('otchet');
     const appUser = await read.getUserReader().getByUsername('tars') || await read.getUserReader().getAppUser();
     if (!room || !appUser) return false;
-
     for (const file of files) {
       const uploadId = String(file && (file._id || file.id) || '');
       if (!uploadId) continue;
