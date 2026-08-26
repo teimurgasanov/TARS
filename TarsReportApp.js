@@ -2684,7 +2684,6 @@ var require_upload_duplicate_guard = __commonJS({
       if (aiPhoto) return "photo";
       // If OpenAI Vision inspected the image but could not map it to a known class,
       // route it to validateReceiptStrict instead of silently treating it as a work photo.
-      if (aiChecked) return "receipt";
       // OCR text is the last fallback. It only routes to strict receipt validation;
       // it does not accept the receipt by itself.
       if (ocrHasText) return "receipt";
