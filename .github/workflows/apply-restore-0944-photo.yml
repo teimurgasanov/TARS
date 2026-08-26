@@ -1,0 +1,41 @@
+name: Apply Restore 0944 Photo Forward
+on:
+  push:
+    branches: [fix/restore-0944-photo-forward]
+    paths: [.github/workflows/apply-restore-0944-photo.yml]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/restore-0944-photo-forward
+          fetch-depth: 0
+      - name: Restore stable unknown-image fallback
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js')
+          s=p.read_text(encoding='utf-8')
+          old='''      if (finalKind === "unknown" || !finalKind) {\n        const dedicatedWorkPhoto = await requestOpenAiWorkPhotoCheck(file, content, http, config, logger);\n        if (dedicatedWorkPhoto) return { forward: true, reason: "dedicated-work-photo-vision" };\n      }\n      return { forward: false, reason: finalKind || "unknown" };'''
+          new='''      if (finalKind === "unknown" || !finalKind) {\n        // Restore the stable 0.9.344 behavior: after receipt and mailing\n        // have been explicitly rejected, an otherwise unknown personal image\n        // is treated as a report photo instead of being stranded in the DM.\n        return { forward: true, reason: "stable-0944-unknown-photo-fallback" };\n      }\n      return { forward: false, reason: finalKind || "unknown" };'''
+          if old not in s: raise SystemExit('expected current work-photo decision block not found')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
+          test=Path('tests/restore-0944-photo-fallback.test.js')
+          test.write_text('''const fs=require("fs"); const assert=require("assert");\nconst s=fs.readFileSync("TarsReportApp.js","utf8");\nconst a=s.indexOf("async function shouldForwardConfirmedWorkPhoto"); const b=s.indexOf("async function fastForwardPersonalReportPhotos",a);\nassert(a>=0&&b>a); const x=s.slice(a,b);\nassert(x.includes('finalKind === "receipt"')); assert(x.includes('finalKind === "mailing"'));\nassert(x.includes('stable-0944-unknown-photo-fallback'));\nassert(x.includes('forward: true'));\nconsole.log("PASS: stable 0.9.344 unknown-image photo fallback restored behind receipt/mailing guards");\n''',encoding='utf-8')
+          PY
+          node --check TarsReportApp.js
+          for f in tests/*.test.js; do node "$f"; done
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TarsReportApp.js tests/restore-0944-photo-fallback.test.js
+          git commit -m 'fix: restore stable 0.9.344 photo fallback'
+          git rm .github/workflows/apply-restore-0944-photo.yml
+          git commit -m 'ci: remove one-shot restore workflow'
+          git push origin HEAD:fix/restore-0944-photo-forward
