@@ -26,4 +26,15 @@ assert(!cleanupBlock.includes('removeByAssociation'));
 assert(!cleanupBlock.includes('receiptAmount = 0'));
 assert(!cleanupBlock.includes('receiptIdentity = ""'));
 
-console.log('PASS: noon cleanup preserves financial receipt index');
+const receiptCleanupStart = source.indexOf('async function cleanupArchivedReceiptMessages');
+const receiptCleanupEnd = source.indexOf('async function cleanupExpiredReceiptArchive', receiptCleanupStart);
+const receiptCleanupBlock = source.slice(receiptCleanupStart, receiptCleanupEnd);
+assert(source.includes('const RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED = false'));
+assert(source.includes('const RECEIPT_CHAT_ARCHIVE_ENABLED = false'));
+assert(receiptCleanupBlock.includes('if (!RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED) return 0;'));
+assert(source.includes('if (RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED && config.archiveEnabled && r)'));
+assert(source.includes('archiveEnabled: RECEIPT_CHAT_ARCHIVE_ENABLED'));
+assert(source.includes('if (!config || !config.archiveEnabled) return null;'));
+assert(!source.includes('provideSlashCommand(new ArchiveReceiptCommand(this))'));
+
+console.log('PASS: personal and receipt source chats retain their messages and financial index');

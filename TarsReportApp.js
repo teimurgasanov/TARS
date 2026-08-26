@@ -2423,6 +2423,7 @@ var require_upload_duplicate_guard = __commonJS({
       }
     }
     async function archiveReceipt(file, content, receiptCheck, exact, read, persistence, modify, config, logger) {
+      if (!config || !config.archiveEnabled) return null;
       const receiptDate = receiptCheck && receiptCheck.receiptDate || "";
       const previous = await read.getPersistenceReader().readByAssociation(archiveDayAssociation(receiptDate));
       const existingRecords = (previous || []).filter((entry) => entry && entry.archiveStatus === "stored" && entry.exact === exact);
@@ -4123,7 +4124,10 @@ var require_upload_duplicate_guard = __commonJS({
       if (deleted && logger) logger.info(`Deleted ${deleted} expired private master messages from ${room.id}`);
       return deleted;
     }
+    const RECEIPT_CHAT_ARCHIVE_ENABLED = false;
+    const RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED = false;
     async function cleanupArchivedReceiptMessages(room, read, persistence, modify, logger, config) {
+      if (!RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED) return 0;
       if (!room || !read || !persistence || !modify) return 0;
       const index = await readIndex(read, PROTECTED_ROOMS.kassa.index), now = Date.now();
       let deleted = 0, changed = false;
@@ -5856,7 +5860,7 @@ var C = class extends j.App {
       id: "forward-pending-report-photos-now",
       processor: this.forwardPendingReportPhotosJob
     }]);
-    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ArchiveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "opozdanie")), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "late")), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "shtraf")), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "penalty")), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.api.provideApi({
+    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "opozdanie")), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "late")), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "shtraf")), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "penalty")), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.api.provideApi({
       visibility: A.ApiVisibility.PUBLIC,
       security: A.ApiSecurity.UNSECURE,
       endpoints: [new S(this), new ReportFormEndpoint(this), new ReportFormScriptEndpoint(this)]
@@ -6016,10 +6020,9 @@ var C = class extends j.App {
       adminUsername: String(await n.getValueById("receipt_admin_username") || "shura"),
       resultRoomName: String(await n.getValueById("receipt_result_room") || ""),
       reviewRejectedReceipts: true,
-      // The private Rocket.Chat room cheki-arhiv is the primary receipt
-      // archive and is always enabled. The old switch controlled the removed
-      // external Object Storage backend and must not disable this archive.
-      archiveEnabled: true,
+      // Accepted receipts remain in their source chats. TARS must not create
+      // or populate a separate Rocket.Chat archive room.
+      archiveEnabled: RECEIPT_CHAT_ARCHIVE_ENABLED,
       archiveBucket: String(await n.getValueById("receipt_archive_bucket") || "").trim(),
       archiveAccessKey: String(await n.getValueById("receipt_archive_access_key") || "").trim(),
       archiveSecretKey: String(await n.getValueById("receipt_archive_secret_key") || "").trim()
@@ -7805,13 +7808,13 @@ var C = class extends j.App {
         let c = await n.getRoomReader().getById(o.roomId);
         if (c) {
           a += await G.cleanupExpiredMasterRoom(c, void 0, n, t, config, this.getLogger());
-          if (config.archiveEnabled && r) a += await G.cleanupArchivedReceiptMessages(c, n, r, t, this.getLogger(), config);
+          if (RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED && config.archiveEnabled && r) a += await G.cleanupArchivedReceiptMessages(c, n, r, t, this.getLogger(), config);
         }
       } catch (c) {
         this.getLogger().warn(`Could not clean private cash room ${o.roomId}: ${c && c.message || c}`);
       }
     }
-    if (config.archiveEnabled && r) {
+    if (RECEIPT_CHAT_ARCHIVE_ENABLED && config.archiveEnabled && r) {
       try {
         a += await G.cleanupExpiredReceiptArchive(n, r, t, this.getLogger());
       } catch (cleanupError) {
