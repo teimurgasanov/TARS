@@ -1,59 +1,111 @@
 name: TARS Guarded Review Build
 
 on:
-  push:
-    branches: [feature/independent-photo-to-reports]
+  pull_request:
+    branches: [develop]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pull-requests: read
+  id-token: write
+
+concurrency:
+  group: tars-guarded-review-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  bootstrap-independent-photo-route:
+  tests:
+    name: Regression tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feature/independent-photo-to-reports
           fetch-depth: 0
-      - name: Apply independent photo-to-reports route
+      - name: Syntax check
+        run: node --check TarsReportApp.js
+      - name: Run all regression tests
         shell: bash
+        run: |
+          set -euo pipefail
+          for test_file in tests/*.test.js; do
+            echo "==> $test_file"
+            node "$test_file"
+          done
+
+  claude-review:
+    name: Claude ECONOMY REVIEW
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify Claude credential exists
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$ANTHROPIC_API_KEY" || { echo 'Claude review blocked: ANTHROPIC_API_KEY missing'; exit 1; }
+      - name: Review PR diff
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            TARS ECONOMY REVIEW. Read CLAUDE.md first. Review ONLY this PR diff against develop and only minimal surrounding context. Do not edit, write, commit, push, deploy, or create files. Baseline 0.9.344 behavior is protected. Check regressions in receipts, duplicate protection, OCR, reports, photos, calculations, and Rocket.Chat. For receipt-date changes require one Europe/Astrakhan calendar-date semantic across acceptance, index, duplicate identity, sums, summaries, /cheki, /prinyat, repair and archive, while report/workday behavior remains unchanged. Your final line MUST be exactly FINAL_VERDICT: PASS if there is no blocking regression, or FINAL_VERDICT: BLOCK if there is one. Put any concise reason before that final line.
+          claude_args: >-
+            --model claude-sonnet-5
+            --max-turns 20
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
+          display_report: 'false'
+          show_full_output: 'false'
+      - name: Enforce Claude verdict
+        shell: bash
+        env:
+          CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          from pathlib import Path
-          p=Path('TarsReportApp.js')
-          s=p.read_text(encoding='utf-8')
-          insert_before='    async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config) {'
-          fn='''    async function independentPersonalPhotoToReports(message, read, modify, logger, http, config) {\n      if (!message || !isPersonalTarsRoom(message.room)) return false;\n      const intent = directFileIntent(message);\n      if (intent === "receipt" || intent === "mailing") return false;\n      const imageFiles = messageImageFiles(message);\n      if (!imageFiles.length) return false;\n      const room = await findOtchetRoom(read);\n      const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();\n      if (!room || !appUser) return false;\n      for (const sourceFile of imageFiles) {\n        const uploadId = String(sourceFile && (sourceFile._id || sourceFile.id) || "");\n        if (!uploadId) continue;\n        try {\n          const content = await read.getUploadReader().getBufferById(uploadId);\n          const kind = await personalImageKindForPreUpload(sourceFile, content, http, config, logger);\n          if (kind === "receipt" || kind === "mailing") continue;\n          const sourceUpload = await read.getUploadReader().getById(uploadId);\n          const reportMessageId = await forwardReportPhotoMessage(message, sourceFile, sourceUpload, room, appUser, modify, logger, { user: message.sender, sourceMessageId: message.id, read, content, http, config });\n          if (reportMessageId) {\n            if (logger) logger.info(`INDEPENDENT_PHOTO_OK upload=${uploadId} message=${reportMessageId}`);\n            return true;\n          }\n        } catch (error) {\n          if (logger) logger.warn(`INDEPENDENT_PHOTO_FAILED upload=${uploadId}: ${error && error.message || error}`);\n        }\n      }\n      return false;\n    }\n'''
-          if insert_before not in s:
-              raise SystemExit('independent route insertion anchor not found')
-          if 'async function independentPersonalPhotoToReports' not in s:
-              s=s.replace(insert_before,fn+insert_before,1)
-          export_anchor='      fastForwardPersonalReportPhotos,\n      publishPendingReportPhotos,'
-          if '      independentPersonalPhotoToReports,' not in s:
-              if export_anchor not in s: raise SystemExit('export anchor not found')
-              s=s.replace(export_anchor,'      independentPersonalPhotoToReports,\n      fastForwardPersonalReportPhotos,\n      publishPendingReportPhotos,',1)
-          call_anchor='        const i = await this.receiptOcrConfig(n);\n        if (await this.handleMonthlyScheduleMessage(e, n, s, r)) return;'
-          call='''        const i = await this.receiptOcrConfig(n);\n        if (G.isPersonalTarsRoom(e && e.room) && G.directFileIntent(e) !== "receipt" && G.directFileIntent(e) !== "mailing") {\n          if (await G.independentPersonalPhotoToReports(e, n, r, this.getLogger(), t, i)) {\n            await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);\n            return;\n          }\n        }\n        if (await this.handleMonthlyScheduleMessage(e, n, s, r)) return;'''
-          if 'G.independentPersonalPhotoToReports(e, n, r' not in s:
-              if call_anchor not in s: raise SystemExit('post-message call anchor not found')
-              s=s.replace(call_anchor,call,1)
-          p.write_text(s,encoding='utf-8')
-          Path('tests/independent-photo-to-reports.test.js').write_text('''const fs=require("fs"),assert=require("assert"); const s=fs.readFileSync("TarsReportApp.js","utf8"); assert(s.includes("async function independentPersonalPhotoToReports")); const a=s.indexOf("async executePostMessageSent"),b=s.indexOf("async receiptOcrConfig",a); assert(a>=0&&b>a); const x=s.slice(a,b); const route=x.indexOf("independentPersonalPhotoToReports"); const claim=x.indexOf("claimPostMessage"); assert(route>=0); assert(claim<0||route<claim); assert(x.includes('directFileIntent(e) !== "receipt"')); assert(x.includes('directFileIntent(e) !== "mailing"')); console.log("PASS: independent photo route is before legacy financial claim and keeps receipt/mailing guards");\n''',encoding='utf-8')
+          import os, pathlib, re, sys
+          path = pathlib.Path(os.environ.get('CLAUDE_EXECUTION_FILE',''))
+          if not path.is_file():
+              raise SystemExit('Claude review output file missing')
+          text = path.read_text(encoding='utf-8', errors='replace')
+          verdicts = re.findall(r'FINAL_VERDICT:\s*(PASS|BLOCK)\b', text)
+          if not verdicts:
+              raise SystemExit('Claude review returned no FINAL_VERDICT')
+          verdict = verdicts[-1]
+          print('Claude verdict:', verdict)
+          if verdict != 'PASS':
+              sys.exit(1)
           PY
-          node --check TarsReportApp.js
-          for f in tests/*.test.js; do node "$f"; done
-      - name: Commit code and restore guarded workflow
+
+  build:
+    name: Build reviewed ZIP
+    needs: [tests, claude-review]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ZIP
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch origin develop
-          git show origin/develop:.github/workflows/tars-guarded-review-build.yml > .github/workflows/tars-guarded-review-build.yml
-          rm -f .github/workflows/apply-independent-photo-route.yml
-          git add TarsReportApp.js tests/independent-photo-to-reports.test.js .github/workflows/tars-guarded-review-build.yml
-          git rm -f --ignore-unmatch .github/workflows/apply-independent-photo-route.yml
-          git commit -m 'feat: add independent photo-to-reports route'
-          git push origin HEAD:feature/independent-photo-to-reports
+          node --check TarsReportApp.js
+          VERSION="$(python3 -c 'import json; print(json.load(open("app.json"))["version"])')"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          ZIP_NAME="tars-report_${VERSION}_${SHORT_SHA}.zip"
+          zip -q -j "$ZIP_NAME" app.json TarsReportApp.js en.json ru.json icon.png
+          unzip -t "$ZIP_NAME"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-tars-zip-${{ github.sha }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+          retention-days: 14
