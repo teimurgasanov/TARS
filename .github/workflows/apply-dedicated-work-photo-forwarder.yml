@@ -1,0 +1,130 @@
+name: Apply Dedicated Work Photo Forwarder
+
+on:
+  push:
+    branches:
+      - fix/dedicated-work-photo-forwarder
+    paths:
+      - .github/workflows/apply-dedicated-work-photo-forwarder.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/dedicated-work-photo-forwarder
+          fetch-depth: 0
+      - name: Apply runtime patch and regression test
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('TarsReportApp.js')
+          s = p.read_text(encoding='utf-8')
+
+          anchor = '    async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config) {'
+          if anchor not in s:
+              raise SystemExit('fastForwardPersonalReportPhotos anchor not found')
+
+          helper = '''    async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger) {
+      const initialKind = await personalImageKindForPreUpload(file, content, http, config, logger);
+      if (initialKind === "receipt") return { forward: false, reason: "receipt" };
+      if (initialKind === "mailing") return { forward: false, reason: "mailing" };
+      if (initialKind === "photo") return { forward: true, reason: "classifier" };
+      if (!config || !config.openaiApiKey || !content || !content.length) return { forward: false, reason: "unknown" };
+      try {
+        const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger);
+        if (!aiCandidate) return { forward: false, reason: "unknown" };
+        if (aiCandidateMarksReceipt(aiCandidate)) return { forward: false, reason: "receipt" };
+        if (aiCandidateMarksMailing(aiCandidate)) return { forward: false, reason: "mailing" };
+        if (aiCandidateMarksReportPhoto(aiCandidate)) return { forward: true, reason: "openai-work-photo" };
+      } catch (error) {
+        if (logger) logger.warn(`Dedicated work-photo classifier failed: ${error && error.message || error}`);
+      }
+      return { forward: false, reason: "unknown" };
+    }
+'''
+          if 'async function shouldForwardConfirmedWorkPhoto' not in s:
+              s = s.replace(anchor, helper + anchor, 1)
+
+          old = '''      const confirmedKind = await personalImageKindForPreUpload(sourceFile, bestCandidate.content, http, config, logger);
+      if (confirmedKind === "mailing") {
+        if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED_MAILING upload=${uploadId}`);
+        return false;
+      }
+      if (confirmedKind !== "photo") {
+        const looksLikeReceipt = confirmedKind === "receipt" || await isBlockedPersonalPhotoImage(sourceFile, bestCandidate.content, http, config, logger);
+        if (looksLikeReceipt) {
+          if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED_RECEIPT upload=${uploadId}`);
+          return false;
+        }
+        // Not confidently a receipt or mailing proof: default to report photo
+        // instead of leaving it stuck in the personal chat.
+        if (logger) logger.info(`FAST_PHOTO_FORWARD_DEFAULT_TO_PHOTO upload=${uploadId} kind=${confirmedKind || "unknown"}`);
+      }
+'''
+          new = '''      const workPhotoDecision = await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger);
+      if (!workPhotoDecision.forward) {
+        if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED upload=${uploadId} reason=${workPhotoDecision.reason || "unknown"}`);
+        return false;
+      }
+      if (logger) logger.info(`FAST_PHOTO_FORWARD_CONFIRMED upload=${uploadId} source=${workPhotoDecision.reason || "unknown"}`);
+'''
+          if old not in s:
+              raise SystemExit('legacy fast-photo classification block not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+
+          test = Path('tests/dedicated-work-photo-forwarder.test.js')
+          test.write_text(r'''const fs = require('fs');
+const assert = require('assert');
+
+const source = fs.readFileSync('TarsReportApp.js', 'utf8');
+
+const helperStart = source.indexOf('async function shouldForwardConfirmedWorkPhoto');
+const helperEnd = source.indexOf('async function fastForwardPersonalReportPhotos', helperStart);
+assert(helperStart >= 0 && helperEnd > helperStart, 'dedicated work-photo helper must exist');
+const helper = source.slice(helperStart, helperEnd);
+
+assert(helper.includes('initialKind === "receipt"'), 'receipt must be blocked before forwarding');
+assert(helper.includes('initialKind === "mailing"'), 'mailing proof must be blocked before forwarding');
+assert(helper.includes('initialKind === "photo"'), 'confirmed photo must be forwarded');
+assert(helper.includes('requestOpenAiReceiptCheck'), 'unknown images must get a dedicated OpenAI visual decision');
+assert(helper.includes('aiCandidateMarksReceipt'), 'OpenAI receipt result must block forwarding');
+assert(helper.includes('aiCandidateMarksMailing'), 'OpenAI mailing result must block forwarding');
+assert(helper.includes('aiCandidateMarksReportPhoto'), 'OpenAI work-photo result must allow forwarding');
+assert(helper.includes('reason: "unknown"'), 'unknown must remain blocked, never default to photo');
+
+const forwardStart = source.indexOf('async function fastForwardPersonalReportPhotos');
+const forwardEnd = source.indexOf('async function publishDirectReportPhotos', forwardStart);
+assert(forwardStart >= 0 && forwardEnd > forwardStart, 'fast forward block must exist');
+const forward = source.slice(forwardStart, forwardEnd);
+assert(forward.includes('shouldForwardConfirmedWorkPhoto('), 'forwarder must use the dedicated work-photo decision');
+assert(forward.includes('FAST_PHOTO_FORWARD_CONFIRMED'), 'forwarding must log explicit confirmation');
+assert(!forward.includes('FAST_PHOTO_FORWARD_DEFAULT_TO_PHOTO'), 'unknown images must never default to report photos');
+
+console.log('PASS: dedicated work-photo forwarder isolates photo routing from receipt financial logic');
+''', encoding='utf-8')
+          PY
+
+          node --check TarsReportApp.js
+          node tests/dedicated-work-photo-forwarder.test.js
+          for test_file in tests/*.test.js; do
+            node "$test_file"
+          done
+
+      - name: Commit patch and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TarsReportApp.js tests/dedicated-work-photo-forwarder.test.js
+          git commit -m 'fix: add dedicated work-photo forwarding decision'
+          git rm .github/workflows/apply-dedicated-work-photo-forwarder.yml
+          git commit -m 'ci: remove one-shot work-photo patch workflow'
+          git push origin HEAD:fix/dedicated-work-photo-forwarder
