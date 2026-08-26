@@ -7,9 +7,11 @@ const fastStart = source.indexOf('async function fastForwardPersonalReportPhotos
 const fastEnd = source.indexOf('async function publishPendingReportPhotos', fastStart);
 const fastBlock = source.slice(fastStart, fastEnd);
 assert.match(fastBlock, /const duplicate = findDuplicate\(index, exact, visual\)/);
-assert.match(fastBlock, /FAST_PHOTO_FORWARD_DEFER_DUPLICATE_REJECTION/);
-assert.match(fastBlock, /return false;/);
+assert.match(fastBlock, /FAST_PHOTO_FORWARD_BLOCKED_DUPLICATE/);
+assert.match(fastBlock, /await deleteReceiptMessage\(message, read, modify, logger\)/);
+assert.match(fastBlock, /notifyDuplicateUser\(message\.sender, message\.room, PROTECTED_ROOMS\.otchet/);
 assert.doesNotMatch(fastBlock, /FAST_PHOTO_FORWARD_SKIP_DUPLICATE/);
+assert.doesNotMatch(fastBlock, /FAST_PHOTO_FORWARD_DEFER_DUPLICATE_REJECTION/);
 
 const postedStart = source.indexOf('async function rememberOrDeletePostedPersonalImageDuplicate');
 const postedEnd = source.indexOf('async function guardUpload', postedStart);

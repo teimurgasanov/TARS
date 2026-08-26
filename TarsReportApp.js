@@ -2053,9 +2053,13 @@ var require_upload_duplicate_guard = __commonJS({
           (!duplicate.roomId || String(duplicate.roomId || "") === String(message.room && message.room.id || ""))
         );
         const sameSourceMessage = Boolean(duplicate && message.id && String(duplicate.messageId || "") === String(message.id));
-        if (duplicate && !reusablePreUpload && !sameSourceMessage && String(duplicate.uploadId || "") !== uploadId) {
-          if (logger) logger.info(`FAST_PHOTO_FORWARD_DEFER_DUPLICATE_REJECTION upload=${uploadId}`);
-          return false;
+        if (duplicate && !reusablePreUpload && !sameSourceMessage) {
+          if (message.id && message.sender) {
+            await deleteReceiptMessage(message, read, modify, logger);
+            await notifyDuplicateUser(message.sender, message.room, PROTECTED_ROOMS.otchet, read, modify, logger, "🚫 ПОВТОР ФОТО");
+          }
+          if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED_DUPLICATE upload=${uploadId}`);
+          return true;
         }
         if (reusablePreUpload && logger) logger.info(`FAST_PHOTO_FORWARD_REUSE_PRE upload=${uploadId}`);
         const now = Date.now();
