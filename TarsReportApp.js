@@ -2590,9 +2590,14 @@ var require_upload_duplicate_guard = __commonJS({
     }
     function aiCandidateMarksReportPhoto(candidate) {
       const text = String(candidate && candidate.text || "");
-      return Boolean(candidate && (
-        /"visual_type"\s*:\s*"(?:hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo)"/i.test(text)
-      ));
+      const parsed = parseReceiptJson(text) || {};
+      const visualType = String(parsed.visual_type || "").trim().toLowerCase();
+      if (/^(?:hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo)$/.test(visualType)) return true;
+      if (!candidate || parsed.is_receipt !== false) return false;
+      if (parsed.is_mailing_proof === true || parsed.is_screenshot_of_chat === true) return false;
+      if (/^(?:bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|salon_photo|chat_screenshot)$/.test(visualType)) return false;
+      const serviceType = String(parsed.service_type || "").trim().toLowerCase();
+      return /^(?:haircut|coloring|manicure|pedicure|brows|lashes)$/.test(serviceType);
     }
     async function isBlockedPersonalPhotoImage(file, content, http, config, logger) {
       if (!config || !content || !content.length) return false;
