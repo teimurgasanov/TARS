@@ -6025,7 +6025,7 @@ var C = class extends j.App {
       reviewRejectedReceipts: true,
       // Accepted receipts remain in their source chats. TARS must not create
       // or populate a separate Rocket.Chat archive room.
-      archiveEnabled: RECEIPT_CHAT_ARCHIVE_ENABLED,
+      archiveEnabled: false,
       archiveBucket: String(await n.getValueById("receipt_archive_bucket") || "").trim(),
       archiveAccessKey: String(await n.getValueById("receipt_archive_access_key") || "").trim(),
       archiveSecretKey: String(await n.getValueById("receipt_archive_secret_key") || "").trim()
@@ -7811,13 +7811,13 @@ var C = class extends j.App {
         let c = await n.getRoomReader().getById(o.roomId);
         if (c) {
           a += await G.cleanupExpiredMasterRoom(c, void 0, n, t, config, this.getLogger());
-          if (RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED && config.archiveEnabled && r) a += await G.cleanupArchivedReceiptMessages(c, n, r, t, this.getLogger(), config);
+          if (config.archiveEnabled && r) a += await G.cleanupArchivedReceiptMessages(c, n, r, t, this.getLogger(), config);
         }
       } catch (c) {
         this.getLogger().warn(`Could not clean private cash room ${o.roomId}: ${c && c.message || c}`);
       }
     }
-    if (RECEIPT_CHAT_ARCHIVE_ENABLED && config.archiveEnabled && r) {
+    if (config.archiveEnabled && r) {
       try {
         a += await G.cleanupExpiredReceiptArchive(n, r, t, this.getLogger());
       } catch (cleanupError) {

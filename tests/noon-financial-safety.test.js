@@ -32,8 +32,15 @@ const receiptCleanupBlock = source.slice(receiptCleanupStart, receiptCleanupEnd)
 assert(source.includes('const RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED = false'));
 assert(source.includes('const RECEIPT_CHAT_ARCHIVE_ENABLED = false'));
 assert(receiptCleanupBlock.includes('if (!RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED) return 0;'));
-assert(source.includes('if (RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED && config.archiveEnabled && r)'));
-assert(source.includes('archiveEnabled: RECEIPT_CHAT_ARCHIVE_ENABLED'));
+assert(source.includes('if (config.archiveEnabled && r)'));
+assert(source.includes('archiveEnabled: false'));
+const appClassStart = source.indexOf('var C = class extends j.App');
+assert(appClassStart >= 0, 'TarsReportApp class not found');
+const appClassEnd = source.indexOf('exports.TarsReportApp = C', appClassStart);
+assert(appClassEnd > appClassStart, 'TarsReportApp class end not found');
+const appClassBlock = source.slice(appClassStart, appClassEnd);
+assert(!appClassBlock.includes('RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED'));
+assert(!appClassBlock.includes('RECEIPT_CHAT_ARCHIVE_ENABLED'));
 assert(source.includes('if (!config || !config.archiveEnabled) return null;'));
 assert(!source.includes('provideSlashCommand(new ArchiveReceiptCommand(this))'));
 
