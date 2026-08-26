@@ -1,6 +1,6 @@
 {
   "id": "4c07ba1e-e87d-4d85-9e76-7d818d567439",
-  "version": "0.9.348",
+  "version": "0.9.349",
   "requiredApiVersion": "^1.44.0",
   "iconFile": "icon.png",
   "author": {
@@ -10,7 +10,7 @@
   },
   "name": "Мужские мастера",
   "nameSlug": "tars-report",
-  "classFile": "TarsReportApp.js",
+  "classFile": "PhotoFirstTarsReportApp.js",
   "description": "TARS: строгий OpenAI-приём читаемых чеков",
   "permissions": [
     { "name": "ui.registerButtons" },
