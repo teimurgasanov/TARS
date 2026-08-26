@@ -1,6 +1,8 @@
 name: Deploy TARS to Rocket.Chat
 
 on:
+  push:
+    branches: [develop]
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -21,44 +23,48 @@ concurrency:
 
 jobs:
   deploy:
-    name: Validate and deploy reviewed develop commit
+    name: Validate and deploy develop commit
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
-      - name: Require explicit confirmation
+      - name: Resolve deployment target
+        id: target
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ inputs.confirm }}" != "DEPLOY" ]; then
-            echo "Deployment blocked: confirmation must be exactly DEPLOY."
-            exit 1
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.confirm }}" != "DEPLOY" ]; then
+              echo "Deployment blocked: confirmation must be exactly DEPLOY."
+              exit 1
+            fi
+            echo "sha=${{ inputs.commit_sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Checkout reviewed commit
+      - name: Checkout deployment target
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ steps.target.outputs.sha }}
           fetch-depth: 0
 
-      - name: Verify commit belongs to develop
+      - name: Verify exact develop commit
         shell: bash
         run: |
           set -euo pipefail
           git fetch origin develop --no-tags
           TARGET_SHA="$(git rev-parse HEAD)"
-          REQUESTED_SHA="$(git rev-parse '${{ inputs.commit_sha }}^{commit}')"
-          if [ "$TARGET_SHA" != "$REQUESTED_SHA" ]; then
-            echo "Deployment blocked: checked-out SHA does not match requested SHA."
+          REQUESTED_SHA="$(git rev-parse '${{ steps.target.outputs.sha }}^{commit}')"
+          test "$TARGET_SHA" = "$REQUESTED_SHA" || { echo "Deployment blocked: SHA mismatch"; exit 1; }
+          git merge-base --is-ancestor "$TARGET_SHA" origin/develop || { echo "Deployment blocked: target is not in develop"; exit 1; }
+          if [ "${{ github.event_name }}" = "push" ] && [ "$TARGET_SHA" != "$(git rev-parse origin/develop)" ]; then
+            echo "Deployment blocked: automatic deploy only installs current develop HEAD."
             exit 1
           fi
-          if ! git merge-base --is-ancestor "$TARGET_SHA" origin/develop; then
-            echo "Deployment blocked: requested commit is not contained in origin/develop."
-            exit 1
-          fi
-          echo "Reviewed commit verified: $TARGET_SHA"
+          echo "Develop commit verified: $TARGET_SHA"
 
-      - name: Verify repository is unchanged
+      - name: Verify repository and manifest safety
         shell: bash
         run: |
           set -euo pipefail
