@@ -3944,7 +3944,30 @@ var require_upload_duplicate_guard = __commonJS({
       if (!entry) return false;
       return entry.source !== "pre" && entry.source !== "invalid" && entry.source !== "rejected" && entry.source !== "archive_failed" && entry.source !== "duplicate" && Boolean(entry.receiptDate || entry.receiptIdentity);
     }
+    const PERSONAL_CHAT_ARCHIVING_ENABLED = false;
+    function personalChatDaySeparator(now = Date.now(), config) {
+      const date = receiptCalendarDateForTimestamp(now, config);
+      return `──────── ${displayDate(date)} ────────`;
+    }
+    async function ensurePersonalChatDaySeparator(room, read, modify, config, logger, now = Date.now()) {
+      if (!room || !isPersonalTarsRoom(room) || !read || !modify) return 0;
+      const separator = personalChatDaySeparator(now, config);
+      const messages = await read.getRoomReader().getMessages(room.id, {
+        limit: 100,
+        skip: 0,
+        sort: { createdAt: "desc" },
+        showThreadMessages: true
+      });
+      if ((messages || []).some((message) => String(message && message.text || "").trim() === separator)) return 0;
+      const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
+      if (!appUser) return 0;
+      const builder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(separator);
+      await modify.getCreator().finish(builder);
+      if (logger) logger.info(`Started personal chat day ${separator} in ${room.id}`);
+      return 1;
+    }
     async function archiveAndCleanupPersonalRoomAtNoon(room, read, persistence, modify, config, logger, now = Date.now()) {
+      if (!PERSONAL_CHAT_ARCHIVING_ENABLED) return 0;
       if (!room || !isPersonalTarsRoom(room) || !read || !persistence || !modify || !config || !config.archiveEnabled) return 0;
       if (!personalChatCleanupReady(now, config)) return 0;
       const receiptIndex = await readIndex(read, PROTECTED_ROOMS.kassa.index);
@@ -4052,6 +4075,7 @@ var require_upload_duplicate_guard = __commonJS({
       return deleted;
     }
     async function cleanupExpiredMasterRoom(room, currentUser, read, modify, config, logger) {
+      if (!PERSONAL_CHAT_ARCHIVING_ENABLED) return ensurePersonalChatDaySeparator(room, read, modify, config, logger);
       if (!room || !isPersonalTarsRoom(room)) return 0;
       // Legacy callers may still request cleanup after message events. Keep
       // them aligned with the dedicated noon job: nothing is removed before
@@ -5581,6 +5605,7 @@ var require_upload_duplicate_guard = __commonJS({
       personalChatCleanupReady,
       personalChatMessageIsExpired,
       archiveAndCleanupPersonalRoomAtNoon,
+      ensurePersonalChatDaySeparator,
       cleanupExpiredMasterRoom,
       cleanupArchivedReceiptMessages,
       cleanupExpiredReceiptArchive,
@@ -5793,8 +5818,8 @@ var C = class extends j.App {
       i18nDescription: "receipt_archive_secret_key_description"
     });
     e.scheduler.registerProcessors([{
-      id: "archive-personal-rooms-noon",
-      processor: async (jobContext, read, modify, http, persistence) => this.archivePersonalRoomsAtNoonJob(jobContext, read, modify, http, persistence),
+      id: "separate-personal-chat-days",
+      processor: async (jobContext, read, modify, http, persistence) => this.separatePersonalChatDaysJob(jobContext, read, modify, http, persistence),
       startupSetting: {
         type: J.StartupType.RECURRING,
         interval: "5 minutes",
@@ -7750,26 +7775,24 @@ var C = class extends j.App {
     await n.createWithAssociation({ roomId: s.id, masterUserId: t.id, username: t.username || "", updatedAt: Date.now() }, r);
   }
   async archivePersonalRoomsAtNoonJob(e, n, t, s, r) {
-    if (!r) return 0;
+    return 0;
+  }
+  async separatePersonalChatDaysJob(e, n, t, s, r) {
     const config = await this.receiptOcrConfig(n);
-    if (!G.personalChatCleanupReady(Date.now(), config)) return 0;
-    const association = this.privateCashRoomsAssociation();
-    const records = await n.getPersistenceReader().readByAssociation(association);
-    let archivedAndDeleted = 0;
+    const records = await n.getPersistenceReader().readByAssociation(this.privateCashRoomsAssociation());
     const seenRooms = {};
+    let separated = 0;
     for (const record of records || []) {
       if (!record || !record.roomId || seenRooms[record.roomId]) continue;
       seenRooms[record.roomId] = true;
       try {
         const room = await n.getRoomReader().getById(record.roomId);
-        if (!room) continue;
-        archivedAndDeleted += await G.archiveAndCleanupPersonalRoomAtNoon(room, n, r, t, config, this.getLogger());
+        if (room) separated += await G.ensurePersonalChatDaySeparator(room, n, t, config, this.getLogger());
       } catch (error) {
-        this.getLogger().warn(`Could not archive/clear personal room ${record.roomId} at noon: ${error && error.message || error}`);
+        this.getLogger().warn(`Could not separate personal chat day in ${record.roomId}: ${error && error.message || error}`);
       }
     }
-    if (archivedAndDeleted) this.getLogger().info(`Noon personal cleanup archived and deleted ${archivedAndDeleted} message(s)`);
-    return archivedAndDeleted;
+    return separated;
   }
   async cleanupPrivateCashRoomsJob(e, n, t, s, r) {
     let association = new y.RocketChatAssociationRecord(
