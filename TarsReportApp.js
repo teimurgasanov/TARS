@@ -4370,7 +4370,6 @@ var require_upload_duplicate_guard = __commonJS({
       const indexName = "personal-image-duplicate-index-v1";
       const index = await readIndex(read, indexName);
       const now = Date.now();
-      index.photos = index.photos.filter((entry) => !entry.expiresAt || Number(entry.expiresAt || 0) > now);
       const duplicate = findDuplicate(index, exact, visual);
       if (duplicate) {
         if (logger) logger.info(`Blocked duplicate personal image for user ${file && file.userId || "unknown"}`);
@@ -4385,8 +4384,7 @@ var require_upload_duplicate_guard = __commonJS({
         username: fileUser && fileUser.username || "",
         userName: fileUser && fileUser.name || "",
         roomId: room && room.id || "",
-        uploadId: String(file && (file._id || file.id || file.name) || ""),
-        expiresAt: now + 24 * 60 * 60 * 1e3
+        uploadId: String(file && (file._id || file.id || file.name) || "")
       });
       await writeIndex(persistence, indexName, index);
     }
@@ -4398,7 +4396,6 @@ var require_upload_duplicate_guard = __commonJS({
       const index = await readIndex(read, indexName);
       const now = Date.now();
       const uploadId = String(file && (file._id || file.id || file.name) || "");
-      index.photos = index.photos.filter((entry) => !entry.expiresAt || Number(entry.expiresAt || 0) > now);
       const duplicate = findDuplicate(index, exact, visual);
       const sameFreshPreUploadMarker = Boolean(
         duplicate &&
@@ -4434,7 +4431,7 @@ var require_upload_duplicate_guard = __commonJS({
       entry.messageId = message.id || entry.messageId || "";
       entry.uploadId = uploadId || entry.uploadId || "";
       entry.postProcessedAt = now;
-      entry.expiresAt = now + 24 * 60 * 60 * 1e3;
+      delete entry.expiresAt;
       if (!duplicate) index.photos.push(entry);
       await writeIndex(persistence, indexName, index);
       return false;
