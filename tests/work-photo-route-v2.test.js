@@ -1,0 +1,14 @@
+const fs = require('fs');
+const assert = require('assert');
+const source = fs.readFileSync('TarsReportApp.js', 'utf8');
+const a = source.indexOf('async function requestOpenAiWorkPhotoCheck');
+const b = source.indexOf('async function fastForwardPersonalReportPhotos', a);
+assert(a >= 0 && b > a, 'dedicated work-photo Vision helper must exist');
+const block = source.slice(a, b);
+assert(block.includes('is_work_photo'), 'dedicated classifier must return an explicit work-photo boolean');
+assert(block.includes('finalKind === "receipt"'), 'receipt must be blocked before dedicated work-photo fallback');
+assert(block.includes('finalKind === "mailing"'), 'mailing proof must be blocked before dedicated work-photo fallback');
+assert(block.includes('finalKind === "unknown" || !finalKind'), 'dedicated Vision fallback must run only for unknown classification');
+assert(block.includes('dedicated-work-photo-vision'), 'confirmed fallback result must be forwardable');
+assert(!block.includes('FAST_PHOTO_FORWARD_DEFAULT_TO_PHOTO'), 'unknown must never default to photo without Vision confirmation');
+console.log('PASS: work-photo route v2 uses guarded dedicated Vision fallback');

@@ -1905,11 +1905,53 @@ var require_upload_duplicate_guard = __commonJS({
       if (removed && logger) logger.info(`Removed ${removed} mailing proof forward(s) from Otchet`);
       return removed;
     }
+    async function requestOpenAiWorkPhotoCheck(file, content, http, config, logger) {
+      if (!config || !config.openaiApiKey || !content || !content.length || !http) return false;
+      const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+      const imageUrl = `data:${receiptImageMimeType(file)};base64,${bytesToBase64(content)}`;
+      try {
+        const response = await http.post("https://api.openai.com/v1/responses", {
+          headers: {
+            Authorization: "Bearer " + config.openaiApiKey,
+            "Content-Type": "application/json"
+          },
+          data: {
+            model,
+            input: [{
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: 'Определи только одно: является ли изображение фото выполненной работы салона. Фото работы = стрижка, укладка, окрашивание, волосы крупным планом, маникюр/ногетьи, педикюр/стопы, брови или ресницы. Банковские чеки, квитанции, экраны банков, QR/СБП, скриншоты переписки/рассылки, интерфейс Rocket.Chat, интерьер салона, товары и любые другие изображения не являются фото работы. Верни только JSON без Markdown: {"is_work_photo":true|false,"kind":"hair|nails|pedicure|brows_lashes|other"}.'
+                },
+                { type: "input_image", image_url: imageUrl }
+              ]
+            }],
+            max_output_tokens: 120
+          },
+          timeout: 2e4
+        });
+        if (!response || response.statusCode < 200 || response.statusCode >= 300) return false;
+        const payload = response.data || response.content || response;
+        const text = openAiReceiptOutputText(payload);
+        const match = String(text || "").match(/\{[\s\S]{0,10000}\}/);
+        if (!match) return false;
+        const parsed = JSON.parse(match[0]);
+        return parsed && parsed.is_work_photo === true;
+      } catch (error) {
+        if (logger) logger.warn(`Dedicated work-photo Vision failed: ${error && error.message || error}`);
+        return false;
+      }
+    }
     async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger) {
       const finalKind = await personalImageKindForPreUpload(file, content, http, config, logger);
       if (finalKind === "photo") return { forward: true, reason: "classifier" };
       if (finalKind === "receipt") return { forward: false, reason: "receipt" };
       if (finalKind === "mailing") return { forward: false, reason: "mailing" };
+      if (finalKind === "unknown" || !finalKind) {
+        const dedicatedWorkPhoto = await requestOpenAiWorkPhotoCheck(file, content, http, config, logger);
+        if (dedicatedWorkPhoto) return { forward: true, reason: "dedicated-work-photo-vision" };
+      }
       return { forward: false, reason: finalKind || "unknown" };
     }
     async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config) {
