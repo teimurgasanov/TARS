@@ -1,0 +1,44 @@
+name: Apply Photo Before Financial Claim
+on:
+  push:
+    branches: [fix/photo-before-financial-claim]
+    paths: [.github/workflows/apply-photo-before-claim.yml]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/photo-before-financial-claim
+          fetch-depth: 0
+      - name: Move financial claim behind personal photo routing
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('TarsReportApp.js'); s=p.read_text(encoding='utf-8')
+          old='''        if (uploadEventKey) {\n          postMessageClaimToken = await G.claimPostMessage(e, n, r, this.getLogger());\n          if (!postMessageClaimToken) {\n            this.getLogger().info(`POST_PROBE_SKIP_CLAIM invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);\n            return;\n          }\n        }\n        const i = await this.receiptOcrConfig(n);'''
+          new='''        // Do not let the financial post-message claim suppress ordinary personal\n        // work-photo forwarding. Receipt/financial processing claims below.\n        const i = await this.receiptOcrConfig(n);'''
+          if old not in s: raise SystemExit('early claim block not found')
+          s=s.replace(old,new,1)
+          marker='''      if (await G.rejectDuplicateMessage(e, n, s, r, this.getLogger(), t, i)) return;'''
+          replacement='''      if (uploadEventKey && !postMessageClaimToken) {\n        postMessageClaimToken = await G.claimPostMessage(e, n, r, this.getLogger());\n        if (!postMessageClaimToken) {\n          this.getLogger().info(`POST_PROBE_SKIP_FINANCIAL_CLAIM invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);\n          return;\n        }\n      }\n      if (await G.rejectDuplicateMessage(e, n, s, r, this.getLogger(), t, i)) return;'''
+          if marker not in s: raise SystemExit('financial processing marker not found')
+          s=s.replace(marker,replacement,1)
+          p.write_text(s,encoding='utf-8')
+          Path('tests/photo-before-financial-claim.test.js').write_text('''const fs=require("fs"),assert=require("assert"); const s=fs.readFileSync("TarsReportApp.js","utf8"); const a=s.indexOf("async executePostMessageSent"); const b=s.indexOf("async receiptOcrConfig",a); assert(a>=0&&b>a); const x=s.slice(a,b); const photo=x.indexOf("fastForwardPersonalReportPhotos"); const claim=x.indexOf("claimPostMessage"); const financial=x.indexOf("rejectDuplicateMessage"); assert(photo>=0,"photo route exists"); assert(claim>photo,"claim cannot suppress photo route"); assert(financial>claim,"financial duplicate processing remains behind claim"); assert(x.includes("completePostMessageClaim"),"successful financial claim is completed"); console.log("PASS: personal photo forwarding precedes financial claim while financial processing stays claimed");\n''',encoding='utf-8')
+          PY
+          node --check TarsReportApp.js
+          for f in tests/*.test.js; do node "$f"; done
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TarsReportApp.js tests/photo-before-financial-claim.test.js
+          git commit -m 'fix: route personal photos before financial claim'
+          git rm .github/workflows/apply-photo-before-claim.yml
+          git commit -m 'ci: remove one-shot photo claim workflow'
+          git push origin HEAD:fix/photo-before-financial-claim
