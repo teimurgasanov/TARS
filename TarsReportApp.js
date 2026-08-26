@@ -2003,6 +2003,15 @@ var require_upload_duplicate_guard = __commonJS({
       const preclassifiedReceipt = Array.isArray(receiptIndex.photos) && receiptIndex.photos.find((entry) => preUploadEntryMatchesPostedContent(entry, postedExact, message));
       if (preclassifiedReceipt) {
         if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED_PRECLASSIFIED_RECEIPT upload=${uploadId}`);
+        if (!preclassifiedReceipt.resultMessageId) {
+          try {
+            if (await publishAcceptedReceipt(preclassifiedReceipt, message, read, modify, config, logger)) {
+              await writeIndex(persistence, PROTECTED_ROOMS.kassa.index, receiptIndex);
+            }
+          } catch (error) {
+            if (logger) logger.warn(`Could not publish preclassified receipt result: ${error && error.message || error}`);
+          }
+        }
         return false;
       }
       const workPhotoDecision = await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger);
