@@ -5872,13 +5872,8 @@ var C = class extends j.App {
       if (messageId) recentPostMessageIds.add(messageId);
       if (uploadEventKey) recentPostUploadIds.add(uploadEventKey);
       try {
-        if (uploadEventKey) {
-          postMessageClaimToken = await G.claimPostMessage(e, n, r, this.getLogger());
-          if (!postMessageClaimToken) {
-            this.getLogger().info(`POST_PROBE_SKIP_CLAIM invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
-            return;
-          }
-        }
+        // Do not let the financial post-message claim suppress ordinary personal
+        // work-photo forwarding. Receipt/financial processing claims below.
         const i = await this.receiptOcrConfig(n);
         if (await this.handleMonthlyScheduleMessage(e, n, s, r)) return;
         if (await this.handleMasterChatTextMessage(e, n, r, s)) return;
@@ -5909,6 +5904,13 @@ var C = class extends j.App {
             return;
           }
         }
+      if (uploadEventKey && !postMessageClaimToken) {
+        postMessageClaimToken = await G.claimPostMessage(e, n, r, this.getLogger());
+        if (!postMessageClaimToken) {
+          this.getLogger().info(`POST_PROBE_SKIP_FINANCIAL_CLAIM invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
+          return;
+        }
+      }
       if (await G.rejectDuplicateMessage(e, n, s, r, this.getLogger(), t, i)) return;
       if (hasPersonalImageUpload && G.directFileIntent(e) !== "mailing") {
         await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
