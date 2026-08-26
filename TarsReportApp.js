@@ -1998,6 +1998,13 @@ var require_upload_duplicate_guard = __commonJS({
       if (!bestCandidate) return false;
       const sourceFile = bestCandidate.sourceFile;
       const uploadId = bestCandidate.uploadId;
+      const receiptIndex = await readIndex(read, PROTECTED_ROOMS.kassa.index);
+      const postedExact = exactHash(bestCandidate.content);
+      const preclassifiedReceipt = Array.isArray(receiptIndex.photos) && receiptIndex.photos.find((entry) => preUploadEntryMatchesPostedContent(entry, postedExact, message));
+      if (preclassifiedReceipt) {
+        if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED_PRECLASSIFIED_RECEIPT upload=${uploadId}`);
+        return false;
+      }
       const workPhotoDecision = await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger);
       if (!workPhotoDecision.forward) {
         if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED upload=${uploadId} reason=${workPhotoDecision.reason || "unknown"}`);
