@@ -3209,10 +3209,11 @@ var require_upload_duplicate_guard = __commonJS({
       const successStatus = /"status"\s*:\s*"(?:success|успешно|исполнен|исполнено|выполнен|оплачен|completed)"/i.test(text);
       return Boolean(receiptSeen && receiptVisual && successStatus);
     }
-    async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0) {
+    async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false) {
       if (!config || !config.openaiApiKey || !content || !content.length) return void 0;
       const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
       const imageUrl = `data:${receiptImageMimeType(file)};base64,${bytesToBase64(content)}`;
+      const amountFocusPrompt = focusAmount ? "ПОВТОРНАЯ ПРОВЕРКА СУММЫ: внимательно увеличь область с итогом и обязательно перечитай сумму операции. Ищи подписи ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания. Верни amount числом без пробелов и знака валюты. Не используй комиссию, баланс, время, номер карты, документа или квитанции. " : "";
       let response;
       try {
         response = await http.post("https://api.openai.com/v1/responses", {
@@ -3227,7 +3228,7 @@ var require_upload_duplicate_guard = __commonJS({
               content: [
                 {
                   type: "input_text",
-                  text: "Ты проверяешь фото банковского чека салона. Верни только JSON без Markdown: {\"is_receipt\":boolean,\"has_readable_text\":boolean,\"visual_type\":\"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown\",\"is_mailing_proof\":boolean,\"service_type\":\"haircut|coloring|manicure|pedicure|brows|lashes|unknown\",\"is_screenshot_of_chat\":boolean,\"date\":\"YYYY-MM-DD|null\",\"amount\":number|null,\"status\":\"success|failed|pending|unknown\",\"bank\":\"string|null\"}. Визуальные типы чеков: PDF/белый банковский чек с логотипом банка; экран приложения банка с квитанцией; фото телефона, на котором открыт чек; QR/СБП чек; справка по операции. Визуальный тип mailing_proof_screenshot: скрин Instagram/Direct/личных сообщений со списком получателей и статусами Отправлено, Просмотрено, Sent, Seen, Delivered, либо текстом что аккаунт не может получать сообщения. Такой скрин всегда is_receipt=false и is_mailing_proof=true, это не фото работы. Визуальные типы фото работ: человек после стрижки, укладки или окрашивания = hair_work_photo; волосы крупным планом = hair_work_photo; руки/ногти/маникюр = nails_work_photo; стопы/педикюр = pedicure_work_photo; брови/ресницы/лицо крупно = brows_lashes_work_photo; интерьер салона без чека = salon_photo, это не фото выполненной работы для Otchet. is_receipt=true только если это банковский чек, квитанция, справка по операции, перевод или платеж российского банка/платежного сервиса: Сбер, Т-Банк/Тинькофф, ВТБ, Альфа, Газпромбанк, Райффайзен, Открытие, Росбанк, ПСБ, МКБ, МТС Банк, Почта Банк, Совкомбанк/Халва, Россельхозбанк, ОЗОН Банк, Уралсиб, Ак Барс, Русский Стандарт, Дом.РФ, ЮMoney, СБП/QR. Фото человека, волос, результата работы, маникюра, педикюра, бровей, ресниц или салона всегда is_receipt=false, даже если на фоне есть текст, вывеска или логотип. Не выдумывай дату или сумму. Если видишь 17.08.2026, это 2026-08-17, не 2016. Сумма - итог операции/перевода/платежа в рублях: строки ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания, Сумма с учетом комиссии или Сумма в валюте операции. Если видишь 1 800 RUR, 1800 RUR, 1 800 RUB, 1 800 ₽, 1 800 руб, 600 ₽, 600 Р или 600 P, amount=1800 для 1 800 и amount=600 для 600. RUR, RUB, ₽, Р и руб - это рубли. Не бери комиссию, батарею, время, номер карты, номер квитанции, адрес, телефон, код подтверждения или баланс как сумму. status=success только для Успешно, Исполнен, Исполнено, Выполнен, Оплачен, Completed, Success. status=pending для Ожидает подтверждения, В обработке, На обработке, На подпись, На подписании, К отправке, Готов к отправке, Черновик, Картотека, В дневной очереди, Поставлен в рейс, Отправлен, request_sent, created, sending, timeout, processing, pending."
+                  text: amountFocusPrompt + "Ты проверяешь фото банковского чека салона. Верни только JSON без Markdown: {\"is_receipt\":boolean,\"has_readable_text\":boolean,\"visual_type\":\"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown\",\"is_mailing_proof\":boolean,\"service_type\":\"haircut|coloring|manicure|pedicure|brows|lashes|unknown\",\"is_screenshot_of_chat\":boolean,\"date\":\"YYYY-MM-DD|null\",\"amount\":number|null,\"status\":\"success|failed|pending|unknown\",\"bank\":\"string|null\"}. Визуальные типы чеков: PDF/белый банковский чек с логотипом банка; экран приложения банка с квитанцией; фото телефона, на котором открыт чек; QR/СБП чек; справка по операции. Визуальный тип mailing_proof_screenshot: скрин Instagram/Direct/личных сообщений со списком получателей и статусами Отправлено, Просмотрено, Sent, Seen, Delivered, либо текстом что аккаунт не может получать сообщения. Такой скрин всегда is_receipt=false и is_mailing_proof=true, это не фото работы. Визуальные типы фото работ: человек после стрижки, укладки или окрашивания = hair_work_photo; волосы крупным планом = hair_work_photo; руки/ногти/маникюр = nails_work_photo; стопы/педикюр = pedicure_work_photo; брови/ресницы/лицо крупно = brows_lashes_work_photo; интерьер салона без чека = salon_photo, это не фото выполненной работы для Otchet. is_receipt=true только если это банковский чек, квитанция, справка по операции, перевод или платеж российского банка/платежного сервиса: Сбер, Т-Банк/Тинькофф, ВТБ, Альфа, Газпромбанк, Райффайзен, Открытие, Росбанк, ПСБ, МКБ, МТС Банк, Почта Банк, Совкомбанк/Халва, Россельхозбанк, ОЗОН Банк, Уралсиб, Ак Барс, Русский Стандарт, Дом.РФ, ЮMoney, СБП/QR. Фото человека, волос, результата работы, маникюра, педикюра, бровей, ресниц или салона всегда is_receipt=false, даже если на фоне есть текст, вывеска или логотип. Не выдумывай дату или сумму. Если видишь 17.08.2026, это 2026-08-17, не 2016. Сумма - итог операции/перевода/платежа в рублях: строки ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания, Сумма с учетом комиссии или Сумма в валюте операции. Если видишь 1 800 RUR, 1800 RUR, 1 800 RUB, 1 800 ₽, 1 800 руб, 600 ₽, 600 Р или 600 P, amount=1800 для 1 800 и amount=600 для 600. RUR, RUB, ₽, Р и руб - это рубли. Не бери комиссию, батарею, время, номер карты, номер квитанции, адрес, телефон, код подтверждения или баланс как сумму. status=success только для Успешно, Исполнен, Исполнено, Выполнен, Оплачен, Completed, Success. status=pending для Ожидает подтверждения, В обработке, На обработке, На подпись, На подписании, К отправке, Готов к отправке, Черновик, Картотека, В дневной очереди, Поставлен в рейс, Отправлен, request_sent, created, sending, timeout, processing, pending."
                 },
                 { type: "input_image", image_url: imageUrl }
               ]
@@ -3239,14 +3240,14 @@ var require_upload_duplicate_guard = __commonJS({
       } catch (networkError) {
         if (retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1);
+          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount);
         }
         throw networkError;
       }
       if (!response || response.statusCode < 2e2 || response.statusCode >= 3e2) {
         if (response && (response.statusCode >= 500 || response.statusCode === 429) && retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1);
+          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount);
         }
         throw new Error(`OpenAI receipt HTTP ${response && response.statusCode || "unknown"}`);
       }
@@ -3849,6 +3850,10 @@ var require_upload_duplicate_guard = __commonJS({
           try {
             const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger);
             if (aiCandidate) candidates.push(aiCandidate);
+            if (!aiCandidate || !isValidReceiptAmount(aiCandidate.receiptAmount)) {
+              const amountCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, true);
+              if (amountCandidate) candidates.push(amountCandidate);
+            }
           } catch (aiError) {
             failures.push(String(aiError && aiError.message || aiError));
             if (logger) logger.warn(`OpenAI receipt double-check failed: ${aiError && aiError.message || aiError}`);
