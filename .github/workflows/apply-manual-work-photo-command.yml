@@ -1,0 +1,145 @@
+name: Apply Manual Work Photo Command
+
+on:
+  push:
+    branches:
+      - fix/manual-work-photo-command
+    paths:
+      - .github/workflows/apply-manual-work-photo-command.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/manual-work-photo-command
+          fetch-depth: 0
+
+      - name: Apply manual next-photo command
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('TarsReportApp.js')
+          s = p.read_text(encoding='utf-8')
+
+          marker = 'var ArchiveReceiptCommand = class {'
+          if marker not in s:
+              raise SystemExit('ArchiveReceiptCommand marker not found')
+          command_class = r'''var WorkPhotoCommand = class {
+  constructor(e) {
+    this.app = e, this.command = "photo", this.i18nParamsExample = "receipt_archive_command_params", this.i18nDescription = "receipt_archive_command_description", this.providesPreview = false;
+  }
+  async executor(e, n, t, s, r) {
+    const room = e.getRoom();
+    const sender = e.getSender();
+    const roomId = String(room && room.id || "");
+    const userId = String(sender && sender.id || "");
+    if (!roomId || !userId) return;
+    if (!this.app._manualWorkPhotoIntents) this.app._manualWorkPhotoIntents = {};
+    this.app._manualWorkPhotoIntents[`${roomId}:${userId}`] = Date.now() + 120000;
+    const appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();
+    if (appUser) {
+      const builder = t.getCreator().startMessage().setSender(appUser).setRoom(room).setText("📸 Следующее изображение в течение 2 минут будет отправлено в «Отчёты» как фото работы. Чеки и рассылки команда не пропускает.");
+      await t.getCreator().finish(builder);
+    }
+  }
+};
+'''
+          s = s.replace(marker, command_class + marker, 1)
+
+          old_sig = 'async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config) {'
+          new_sig = 'async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config, manualForce = false) {'
+          if old_sig not in s:
+              raise SystemExit('fastForwardPersonalReportPhotos signature not found')
+          s = s.replace(old_sig, new_sig, 1)
+
+          old_decision = '''      const workPhotoDecision = await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger);
+      if (!workPhotoDecision.forward) {
+        if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED upload=${uploadId} reason=${workPhotoDecision.reason || "unknown"}`);
+        return false;
+      }
+      if (logger) logger.info(`FAST_PHOTO_FORWARD_CONFIRMED upload=${uploadId} source=${workPhotoDecision.reason || "unknown"}`);
+'''
+          new_decision = '''      const workPhotoDecision = manualForce ? { forward: true, reason: "manual-photo-command" } : await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger);
+      if (!workPhotoDecision.forward) {
+        if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED upload=${uploadId} reason=${workPhotoDecision.reason || "unknown"}`);
+        return false;
+      }
+      if (logger) logger.info(`FAST_PHOTO_FORWARD_CONFIRMED upload=${uploadId} source=${workPhotoDecision.reason || "unknown"}`);
+'''
+          if old_decision not in s:
+              raise SystemExit('work photo decision block not found')
+          s = s.replace(old_decision, new_decision, 1)
+
+          old_post = '''        if (hasPersonalImageUpload && G.directFileIntent(e) !== "receipt" && G.directFileIntent(e) !== "mailing") {
+          this.getLogger().info(`POST_DELAY_PERSONAL_PHOTO_FORWARD message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
+          await new Promise((resolve) => setTimeout(resolve, 1e3));
+          if (await G.fastForwardPersonalReportPhotos(e, n, s, r, this.getLogger(), t, i)) {
+            await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
+            return;
+          }
+        }
+'''
+          new_post = '''        if (hasPersonalImageUpload && G.directFileIntent(e) !== "receipt" && G.directFileIntent(e) !== "mailing") {
+          const manualKey = `${String(e && e.room && e.room.id || "")}:${String(e && e.sender && e.sender.id || "")}`;
+          const manualExpires = Number(this._manualWorkPhotoIntents && this._manualWorkPhotoIntents[manualKey] || 0);
+          const manualForce = manualExpires > Date.now();
+          if (manualForce && this._manualWorkPhotoIntents) delete this._manualWorkPhotoIntents[manualKey];
+          this.getLogger().info(`POST_DELAY_PERSONAL_PHOTO_FORWARD message=${messageId || "none"} uploads=${uploadEventKey || "none"} manual=${manualForce ? "yes" : "no"}`);
+          await new Promise((resolve) => setTimeout(resolve, 1e3));
+          if (await G.fastForwardPersonalReportPhotos(e, n, s, r, this.getLogger(), t, i, manualForce)) {
+            await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
+            return;
+          }
+        }
+'''
+          if old_post not in s:
+              raise SystemExit('post-message photo block not found')
+          s = s.replace(old_post, new_post, 1)
+
+          old_reg = 'e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ArchiveReceiptCommand(this))'
+          new_reg = 'e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new WorkPhotoCommand(this)), e.slashCommands.provideSlashCommand(new ArchiveReceiptCommand(this))'
+          if old_reg not in s:
+              raise SystemExit('slash command registration block not found')
+          s = s.replace(old_reg, new_reg, 1)
+          p.write_text(s, encoding='utf-8')
+
+          app = Path('app.json')
+          a = app.read_text(encoding='utf-8')
+          if '"version": "0.9.348"' not in a:
+              raise SystemExit('expected version 0.9.348 not found')
+          app.write_text(a.replace('"version": "0.9.348"', '"version": "0.9.349"', 1), encoding='utf-8')
+
+          test = Path('tests/manual-work-photo-command.test.js')
+          test.write_text(r'''const fs = require('fs');
+const assert = require('assert');
+const source = fs.readFileSync('TarsReportApp.js', 'utf8');
+assert(source.includes('this.command = "photo"'), 'manual /photo slash command must exist');
+assert(source.includes('_manualWorkPhotoIntents'), 'manual command must store one-shot intent');
+assert(source.includes('Date.now() + 120000'), 'manual intent must expire after two minutes');
+assert(source.includes('manualForce ? { forward: true, reason: "manual-photo-command" }'), 'manual command must bypass only work-photo classification');
+assert(source.includes('G.directFileIntent(e) !== "receipt" && G.directFileIntent(e) !== "mailing"'), 'receipt and mailing guards must remain before manual force');
+assert(source.includes('delete this._manualWorkPhotoIntents[manualKey]'), 'manual intent must be one-shot');
+assert(source.includes('provideSlashCommand(new WorkPhotoCommand(this))'), 'manual slash command must be registered');
+console.log('PASS: manual /photo command safely arms exactly one next work-photo upload');
+''', encoding='utf-8')
+          PY
+          node --check TarsReportApp.js
+          for test_file in tests/*.test.js; do node "$test_file"; done
+
+      - name: Commit patch and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TarsReportApp.js app.json tests/manual-work-photo-command.test.js
+          git commit -m 'fix: add one-shot manual work-photo command'
+          git rm .github/workflows/apply-manual-work-photo-command.yml
+          git commit -m 'ci: remove one-shot manual work-photo workflow'
+          git push origin HEAD:fix/manual-work-photo-command
