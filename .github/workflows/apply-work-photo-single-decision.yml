@@ -1,0 +1,96 @@
+name: Apply Work Photo Single Decision
+
+on:
+  push:
+    branches:
+      - fix/dedicated-work-photo-forwarder
+    paths:
+      - .github/workflows/apply-work-photo-single-decision.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/dedicated-work-photo-forwarder
+          fetch-depth: 0
+      - name: Replace repeated Vision decision
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('TarsReportApp.js')
+          s = p.read_text(encoding='utf-8')
+          old = '''    async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger) {
+      const initialKind = await personalImageKindForPreUpload(file, content, http, config, logger);
+      if (initialKind === "receipt") return { forward: false, reason: "receipt" };
+      if (initialKind === "mailing") return { forward: false, reason: "mailing" };
+      if (initialKind === "photo") return { forward: true, reason: "classifier" };
+      if (!config || !config.openaiApiKey || !content || !content.length) return { forward: false, reason: "unknown" };
+      try {
+        const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger);
+        if (!aiCandidate) return { forward: false, reason: "unknown" };
+        if (aiCandidateMarksReceipt(aiCandidate)) return { forward: false, reason: "receipt" };
+        if (aiCandidateMarksMailing(aiCandidate)) return { forward: false, reason: "mailing" };
+        if (aiCandidateMarksReportPhoto(aiCandidate)) return { forward: true, reason: "openai-work-photo" };
+      } catch (error) {
+        if (logger) logger.warn(`Dedicated work-photo classifier failed: ${error && error.message || error}`);
+      }
+      return { forward: false, reason: "unknown" };
+    }
+'''
+          new = '''    async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger) {
+      const finalKind = await personalImageKindForPreUpload(file, content, http, config, logger);
+      if (finalKind === "photo") return { forward: true, reason: "classifier" };
+      if (finalKind === "receipt") return { forward: false, reason: "receipt" };
+      if (finalKind === "mailing") return { forward: false, reason: "mailing" };
+      return { forward: false, reason: finalKind || "unknown" };
+    }
+'''
+          if old not in s:
+              raise SystemExit('expected dedicated work-photo helper block not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+
+          test = Path('tests/dedicated-work-photo-forwarder.test.js')
+          test.write_text(r'''const fs = require('fs');
+const assert = require('assert');
+const source = fs.readFileSync('TarsReportApp.js', 'utf8');
+const a = source.indexOf('async function shouldForwardConfirmedWorkPhoto');
+const b = source.indexOf('async function fastForwardPersonalReportPhotos', a);
+assert(a >= 0 && b > a, 'dedicated helper must exist');
+const h = source.slice(a, b);
+assert.strictEqual((h.match(/personalImageKindForPreUpload\(/g) || []).length, 1, 'work-photo helper must make one classification decision');
+assert(!h.includes('requestOpenAiReceiptCheck'), 'work-photo helper must not call OpenAI a second time');
+assert(h.includes('finalKind === "photo"'), 'confirmed photo must forward');
+assert(h.includes('finalKind === "receipt"'), 'receipt must block');
+assert(h.includes('finalKind === "mailing"'), 'mailing proof must block');
+assert(h.includes('finalKind || "unknown"'), 'unknown must remain blocked');
+const c = source.indexOf('async function fastForwardPersonalReportPhotos');
+const d = source.indexOf('async function publishDirectReportPhotos', c);
+const f = source.slice(c, d);
+assert(f.includes('shouldForwardConfirmedWorkPhoto('), 'forwarder must use dedicated decision helper');
+assert(f.includes('FAST_PHOTO_FORWARD_CONFIRMED'), 'forwarding must log confirmation');
+assert(!f.includes('FAST_PHOTO_FORWARD_DEFAULT_TO_PHOTO'), 'unknown must never default to report photo');
+console.log('PASS: dedicated work-photo forwarding uses one final classification decision');
+''', encoding='utf-8')
+          PY
+          node --check TarsReportApp.js
+          node tests/dedicated-work-photo-forwarder.test.js
+          for test_file in tests/*.test.js; do node "$test_file"; done
+
+      - name: Commit fix and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add TarsReportApp.js tests/dedicated-work-photo-forwarder.test.js
+          git commit -m 'fix: use one final work-photo classification decision'
+          git rm .github/workflows/apply-work-photo-single-decision.yml
+          git commit -m 'ci: remove one-shot single-decision workflow'
+          git push origin HEAD:fix/dedicated-work-photo-forwarder
