@@ -2012,6 +2012,11 @@ var require_upload_duplicate_guard = __commonJS({
             if (logger) logger.warn(`Could not publish preclassified receipt result: ${error && error.message || error}`);
           }
         }
+        try {
+          await publishMasterTransferSummary(preclassifiedReceipt, message, read, persistence, modify, config, logger, true);
+        } catch (error) {
+          if (logger) logger.warn(`Could not publish immediate receipt total: ${error && error.message || error}`);
+        }
         return false;
       }
       const workPhotoDecision = await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger);
@@ -5087,7 +5092,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (identity.indexOf("txn:") === 0) return identity.slice(4).split("|")[0] || "";
       return receiptCalendarDateForTimestamp(entry && entry.uploadedAt, config);
     }
-    async function confirmedTransferSummaryForUser(read, config, userId, targetDate, nameCandidates) {
+    async function confirmedTransferSummaryForUser(read, config, userId, targetDate, nameCandidates, currentValidatedReceipt) {
       const index = await readIndex(read, PROTECTED_ROOMS.kassa.index);
       const workday = targetDate || expectedReceiptDate(config);
       const candidates = Array.isArray(nameCandidates) ? nameCandidates : [];
@@ -5111,6 +5116,18 @@ var require_upload_duplicate_guard = __commonJS({
         count += 1;
         total += amount;
       }
+      if (currentValidatedReceipt && currentValidatedReceipt.source === "pre") {
+        const currentMatchesUser = userId ? currentValidatedReceipt.userId === userId : !candidates.length || transferEntryMatchesCandidates(currentValidatedReceipt, candidates);
+        const currentKey = normalizedReceiptIdentityKey(currentValidatedReceipt.receiptIdentity) || String(currentValidatedReceipt.exact || "");
+        if (currentMatchesUser && dateFromEntry(currentValidatedReceipt, config) === workday && (!currentKey || !seen[currentKey])) {
+          const currentAmount = amountFromEntry(currentValidatedReceipt);
+          if (currentAmount === void 0) missing += 1;
+          else {
+            count += 1;
+            total += currentAmount;
+          }
+        }
+      }
       return { count, total: Math.round(total * 100) / 100, missing };
     }
     function masterTransferSummaryAssociation(userId, targetDate) {
@@ -5119,7 +5136,7 @@ var require_upload_duplicate_guard = __commonJS({
         `receipt-transfer-summary:${targetDate}:${userId}`
       );
     }
-    async function publishMasterTransferSummary(entry, message, read, persistence, modify, config, logger) {
+    async function publishMasterTransferSummary(entry, message, read, persistence, modify, config, logger, includeCurrentValidatedReceipt = false) {
       const userId = String(entry && entry.userId || "");
       const nameCandidates = entry && Array.isArray(entry.nameCandidates) ? entry.nameCandidates : [];
       const associationKey = userId || "name:" + transferNameKey(entry && (entry.username || entry.userName || nameCandidates[0]) || "");
@@ -5128,7 +5145,7 @@ var require_upload_duplicate_guard = __commonJS({
       const room = message && isPersonalTarsRoom(message.room) ? message.room : await findResultRoom(read, config);
       const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
       if (!room || !appUser) return false;
-      const summary = await confirmedTransferSummaryForUser(read, config, userId, targetDate, nameCandidates);
+      const summary = await confirmedTransferSummaryForUser(read, config, userId, targetDate, nameCandidates, includeCurrentValidatedReceipt ? entry : void 0);
       const association = masterTransferSummaryAssociation(associationKey, targetDate);
       const previous = await read.getPersistenceReader().readByAssociation(association);
       for (const record of previous || []) {
