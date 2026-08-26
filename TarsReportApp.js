@@ -1906,21 +1906,11 @@ var require_upload_duplicate_guard = __commonJS({
       return removed;
     }
     async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger) {
-      const initialKind = await personalImageKindForPreUpload(file, content, http, config, logger);
-      if (initialKind === "receipt") return { forward: false, reason: "receipt" };
-      if (initialKind === "mailing") return { forward: false, reason: "mailing" };
-      if (initialKind === "photo") return { forward: true, reason: "classifier" };
-      if (!config || !config.openaiApiKey || !content || !content.length) return { forward: false, reason: "unknown" };
-      try {
-        const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger);
-        if (!aiCandidate) return { forward: false, reason: "unknown" };
-        if (aiCandidateMarksReceipt(aiCandidate)) return { forward: false, reason: "receipt" };
-        if (aiCandidateMarksMailing(aiCandidate)) return { forward: false, reason: "mailing" };
-        if (aiCandidateMarksReportPhoto(aiCandidate)) return { forward: true, reason: "openai-work-photo" };
-      } catch (error) {
-        if (logger) logger.warn(`Dedicated work-photo classifier failed: ${error && error.message || error}`);
-      }
-      return { forward: false, reason: "unknown" };
+      const finalKind = await personalImageKindForPreUpload(file, content, http, config, logger);
+      if (finalKind === "photo") return { forward: true, reason: "classifier" };
+      if (finalKind === "receipt") return { forward: false, reason: "receipt" };
+      if (finalKind === "mailing") return { forward: false, reason: "mailing" };
+      return { forward: false, reason: finalKind || "unknown" };
     }
     async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config) {
       if (!message || !isPersonalTarsRoom(message.room)) return false;
