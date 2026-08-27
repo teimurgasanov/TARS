@@ -2836,6 +2836,8 @@ var require_upload_duplicate_guard = __commonJS({
     var MAX_DECODE_PIXELS = 24 * 1024 * 1024;
     var VISUAL_DISTANCE_LIMIT = 4;
     var RECEIPT_VISUAL_DISTANCE_LIMIT = 1;
+    var recentReceiptIndexWrite;
+    var receiptIndexWriteQueue = Promise.resolve();
     function indexAssociation(indexName) {
       return new RocketChatAssociationRecord(
         RocketChatAssociationModel.MISC,
@@ -2971,6 +2973,50 @@ var require_upload_duplicate_guard = __commonJS({
       }
       return index;
     }
+    function receiptIndexEntryKey(entry) {
+      if (!entry) return "";
+      return String(entry.exact || entry.uploadAttemptKey || entry.uploadId || entry.messageId || "");
+    }
+    function receiptIndexEntryRank(entry) {
+      if (!entry) return -1;
+      if (entry.archiveStatus === "expired") return 5;
+      if (entry.source === "duplicate" || entry.source === "rejected" || entry.source === "invalid") return 4;
+      if (entry.source === "confirmed" || entry.source === "archive_failed" || entry.archiveStatus === "stored" || entry.archiveKey) return 3;
+      if (entry.source === "post") return 2;
+      if (entry.source === "pre") return 1;
+      return 0;
+    }
+    function receiptIndexEntryRevision(entry) {
+      return Math.max(Number(entry && entry.archiveDeletedAt || 0), Number(entry && entry.postProcessedAt || 0), Number(entry && entry.archivedAt || 0), Number(entry && entry.updatedAt || 0), Number(entry && entry.uploadedAt || 0));
+    }
+    function mergeConcurrentReceiptIndex(current, recent, now = Date.now()) {
+      const merged = Array.isArray(current) ? current.slice() : [];
+      const positions = {};
+      for (let index = 0; index < merged.length; index += 1) {
+        const key = receiptIndexEntryKey(merged[index]);
+        if (key) positions[key] = index;
+      }
+      for (const cached of Array.isArray(recent) ? recent : []) {
+        const key = receiptIndexEntryKey(cached);
+        if (!key) continue;
+        const position = positions[key];
+        if (position === void 0) {
+          const recentPre = cached.source === "pre" && now - Number(cached.uploadedAt || 0) < 30 * 60 * 1e3;
+          if (cached.source !== "pre" || recentPre) {
+            positions[key] = merged.length;
+            merged.push(cached);
+          }
+          continue;
+        }
+        const incoming = merged[position];
+        const cachedRank = receiptIndexEntryRank(cached);
+        const incomingRank = receiptIndexEntryRank(incoming);
+        if (cachedRank > incomingRank || cachedRank === incomingRank && receiptIndexEntryRevision(cached) > receiptIndexEntryRevision(incoming)) {
+          merged[position] = { ...incoming, ...cached };
+        }
+      }
+      return merged;
+    }
     function findDuplicate(index, exact, visual) {
       return index.photos.find(
         (entry) => entry.exact === exact || visual && entry.visual && hammingDistance(visual, entry.visual) <= VISUAL_DISTANCE_LIMIT
@@ -3019,6 +3065,23 @@ var require_upload_duplicate_guard = __commonJS({
     }
     async function writeIndex(persistence, indexName, index) {
       const association = indexAssociation(indexName);
+      const isReceiptIndex = indexName === PROTECTED_ROOMS.kassa.index;
+      if (isReceiptIndex) {
+        const writeReceiptIndex = async () => {
+          const photos = mergeConcurrentReceiptIndex(index.photos, recentReceiptIndexWrite && recentReceiptIndexWrite.photos).slice(-MAX_RECORDS);
+          await persistence.updateByAssociation(
+            association,
+            { version: INDEX_VERSION, photos, updatedAt: Date.now(), seededAt: index.seededAt || void 0 },
+            true
+          );
+          index.photos = photos;
+          recentReceiptIndexWrite = { photos: photos.slice(), updatedAt: Date.now() };
+        };
+        const queuedWrite = receiptIndexWriteQueue.then(writeReceiptIndex, writeReceiptIndex);
+        receiptIndexWriteQueue = queuedWrite.then(() => void 0, () => void 0);
+        await queuedWrite;
+        return;
+      }
       const photos = index.photos.slice(-MAX_RECORDS);
       await persistence.updateByAssociation(
         association,
