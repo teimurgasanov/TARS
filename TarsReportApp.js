@@ -3278,6 +3278,14 @@ var require_upload_duplicate_guard = __commonJS({
       const successStatus = /"status"\s*:\s*"(?:success|успешно|исполнен|исполнено|выполнен|оплачен|completed)"/i.test(text);
       return Boolean(receiptSeen && receiptVisual && successStatus);
     }
+    function receiptCandidateAmountConflict(candidates, aiCandidate, requiredDate) {
+      if (!aiCandidate || !isValidReceiptAmount(aiCandidate.receiptAmount)) return false;
+      return (Array.isArray(candidates) ? candidates : []).some((candidate) => {
+        if (!candidate || candidate === aiCandidate || candidate.aiReceipt) return false;
+        if (candidate.receiptDate !== requiredDate || !isValidReceiptAmount(candidate.receiptAmount)) return false;
+        return !sameReceiptAmount(candidate.receiptAmount, aiCandidate.receiptAmount);
+      });
+    }
     async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false) {
       if (!config || !config.openaiApiKey || !content || !content.length) return void 0;
       const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
@@ -3931,7 +3939,7 @@ var require_upload_duplicate_guard = __commonJS({
         }
         const hardContainer = returnContainer();
         if (hardContainer) return hardContainer;
-        const strongOpenAiAccepted = candidates.find((candidate) => aiCandidateStronglyAcceptsReceipt(candidate, requiredDate));
+        const strongOpenAiAccepted = candidates.find((candidate) => aiCandidateStronglyAcceptsReceipt(candidate, requiredDate) && !receiptCandidateAmountConflict(candidates, candidate, requiredDate));
         if (strongOpenAiAccepted) return {
           ok: true,
           receiptDate: strongOpenAiAccepted.receiptDate,
