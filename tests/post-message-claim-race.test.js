@@ -8,10 +8,10 @@ const handlerStart = source.indexOf('async executePostMessageSent(e, n, t, s, r)
 const handlerEnd = source.indexOf('async receiptOcrConfig(e)', handlerStart);
 assert(handlerStart >= 0 && handlerEnd > handlerStart, 'executePostMessageSent block not found');
 const handler = source.slice(handlerStart, handlerEnd);
-assert(handler.includes('postMessageClaimToken = await G.claimPostMessage(e, n, r, this.getLogger())'), 'distributed claim is not wired into image post-message handling');
+assert(handler.includes('postMessageClaimToken = await G.claimPostMessage(e, n, s, this.getLogger())'), 'distributed claim is not wired to persistence in image post-message handling');
 assert(handler.includes('if (!postMessageClaimToken)'), 'losing contender is not blocked');
 assert(handler.includes('postMessageClaimFailed = true'), 'claim failure state is not tracked');
-assert(handler.includes('await G.completePostMessageClaim(e, postMessageClaimToken, r, this.getLogger())'), 'winning claim is not completed');
+assert(handler.includes('await G.completePostMessageClaim(e, postMessageClaimToken, s, this.getLogger())'), 'winning claim is not completed through persistence');
 assert(handler.indexOf('if (uploadEventKey)') < handler.indexOf('await this.receiptOcrConfig(n)'), 'claim must happen before OCR/accounting');
 
 const claimStart = source.indexOf('function postMessageFileIds(message)');

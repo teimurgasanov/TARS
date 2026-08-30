@@ -12,6 +12,9 @@ if (amountStart < 0 || amountEnd < 0 || amountEnd <= amountStart) {
 function isValidReceiptAmount(value) {
   return Number.isFinite(Number(value)) && Number(value) > 0;
 }
+function receiptStatusBlocks(value) {
+  return Boolean(value);
+}
 
 eval(source.slice(amountStart, amountEnd));
 
@@ -25,7 +28,8 @@ const openAiCandidate = {
   receiptDate: requiredDate,
   receiptAmount: 2742,
   aiReceipt: true,
-  text: '{"is_receipt":true,"status":"success","amount":2742}'
+  receiptAmountSource: 'openai:gpt-4.1-mini',
+  text: '{"is_receipt":true,"visual_type":"bank_receipt","status":"success","amount":2742}'
 };
 
 assert.strictEqual(
@@ -36,9 +40,14 @@ assert.strictEqual(
   receiptCandidateAmountConflict([{ ...yandexCandidate, receiptAmount: 1900 }, { ...openAiCandidate, receiptAmount: 1900 }], { ...openAiCandidate, receiptAmount: 1900 }, requiredDate),
   false
 );
+const focusedOpenAiCandidate = { ...openAiCandidate, receiptAmountSource: 'openai:gpt-4.1' };
+assert.strictEqual(
+  receiptAmountsDisagree([yandexCandidate, openAiCandidate, focusedOpenAiCandidate], requiredDate),
+  true
+);
 assert.match(
   source,
-  /aiCandidateStronglyAcceptsReceipt\(candidate, requiredDate\) && !receiptCandidateAmountConflict\(candidates, candidate, requiredDate\)/
+  /!receiptAmountsDisagree\(candidates, requiredDate\) && candidates\.find/
 );
 
-console.log('PASS: conflicting OpenAI amount cannot override Yandex receipt amount');
+console.log('PASS: conflicting OCR and vision amounts cannot be auto-accepted');

@@ -17,17 +17,19 @@ const unknown = classifier.indexOf('return "unknown";');
 for (const [name, pos] of Object.entries({ocrMailing, aiMailing, aiReceipt, ocrReceipt, aiPhoto, unknown})) {
   assert(pos >= 0, `${name} branch missing`);
 }
-assert(ocrMailing < aiReceipt, 'high-confidence mailing OCR guard must stay protected');
-assert(aiMailing < aiReceipt, 'AI mailing must stay protected');
-assert(aiReceipt < aiPhoto, 'explicit AI receipt must beat generic AI photo');
-assert(ocrReceipt < aiPhoto, 'strong bank OCR must beat generic AI photo');
-assert(aiPhoto < unknown, 'unclassified images must become explicit unknown after known classes');
+assert(aiMailing < aiReceipt, 'visual mailing must stay protected');
+assert(aiReceipt < aiPhoto, 'explicit visual receipt must beat visual work photo');
+assert(aiPhoto < ocrMailing, 'visual classification must run before OCR fallback');
+assert(ocrMailing < ocrReceipt, 'OCR mailing fallback must stay protected');
+assert(ocrReceipt < unknown, 'unclassified images must become explicit unknown after OCR fallback');
 
 const pStart = source.indexOf('async function protectedRoomForPersonalFile');
 const pEnd = source.indexOf('\n    async function ', pStart + 10);
 if (pStart < 0 || pEnd <= pStart) throw new Error('personal protected-room block not found');
 const protectedBlock = source.slice(pStart, pEnd);
 assert(protectedBlock.includes('if (kind === "unknown")'), 'unknown must be handled explicitly');
+assert(protectedBlock.includes('await validateReceiptStrict(file, content, http, config, logger)'), 'unknown personal images must receive a strict receipt fallback');
+assert(protectedBlock.includes('return PROTECTED_ROOMS.kassa'), 'strictly confirmed fallback receipts must reach the receipt ledger');
 assert(!protectedBlock.includes('isBlockedPersonalPhotoImage(file, content'), 'legacy second classifier must not run after clean classifier');
 assert(!protectedBlock.includes('defaulting to report photo'), 'unknown must not default to report photo');
 

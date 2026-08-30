@@ -23,5 +23,8 @@ assert.strictEqual(receiptStatusRejection('Газпромбанк. Статус:
 assert.strictEqual(receiptStatusRejection('Gazprombank status pending'), '');
 assert.match(receiptStatusRejection('Сбербанк. Статус: Ожидает подтверждения'), /НЕ ПОДТВЕРЖДЁН/);
 assert.match(receiptStatusRejection('Газпромбанк. Статус: Платёж отклонен'), /НЕ ВЫПОЛНЕН/);
+assert.strictEqual(receiptStatusRejection('ПАО Сбербанк. Перевод отправлен. Сумма перевода 1000 ₽'), '');
+assert.match(receiptStatusRejection('Сбербанк. Статус: отправлен'), /НЕ ПОДТВЕРЖДЁН/);
+assert.match(source, /надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод/);
 
 console.log('PASS: Gazprom pending receipts bypass confirmation wait while failed payments remain blocked');

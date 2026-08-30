@@ -16,9 +16,9 @@ const aiPhoto = block.indexOf('if (aiPhoto) return "photo"');
 for (const [name, value] of Object.entries({ocrMailing, aiMailing, aiReceipt, ocrReceipt, aiPhoto})) {
   assert(value >= 0, `${name} branch not found`);
 }
-assert(ocrMailing < aiReceipt, 'mailing must keep priority over receipt');
-assert(aiMailing < aiReceipt, 'AI mailing must keep priority over receipt');
-assert(aiReceipt < aiPhoto, 'AI receipt must beat generic photo');
-assert(ocrReceipt < aiPhoto, 'OCR receipt must beat generic AI photo');
+assert(aiMailing < aiReceipt, 'visual mailing must keep priority over visual receipt');
+assert(aiReceipt < aiPhoto, 'visual receipt must beat visual work photo');
+assert(aiPhoto < ocrMailing, 'visual result must take priority over OCR fallback');
+assert(ocrMailing < ocrReceipt, 'OCR mailing fallback must keep priority over OCR receipt');
 
 console.log('PASS: receipt routing beats generic photo classification');
