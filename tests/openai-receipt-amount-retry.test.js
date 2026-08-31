@@ -14,21 +14,27 @@ if (requestStart < 0 || requestEnd <= requestStart || validationStart < 0 || val
 const request = source.slice(requestStart, requestEnd);
 const validation = source.slice(validationStart, validationEnd);
 
-assert.match(request, /focusAmount = false/);
-assert.match(request, /focusAmount \? primaryModel === "gpt-4\.1" \? "gpt-4\.1-mini" : "gpt-4\.1" : primaryModel/);
+assert.match(request, /focusAmount = false, focusDate = false/);
+assert.match(request, /focusAmount \|\| focusDate \? primaryModel === "gpt-4\.1" \? "gpt-4\.1-mini" : "gpt-4\.1" : primaryModel/);
 assert.match(request, /ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА/);
+assert.match(request, /ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ/);
+assert.match(request, /не подставляй дату загрузки/);
+assert.match(request, /найди границы экрана телефона/);
 assert.match(request, /Не используй комиссию, баланс, время, номер карты/);
 assert.match(request, /Оплата SberPay со статусом «Исполнено» также является успешной операцией/);
-assert.match(request, /retryAttempt \+ 1, focusAmount/);
+assert.match(request, /retryAttempt \+ 1, focusAmount, focusDate/);
 assert.doesNotMatch(validation, /if \(!aiCandidate \|\| !aiCandidateStronglyAcceptsReceipt\(aiCandidate, requiredDate\)/);
 assert.match(validation, /!candidate\.aiReceipt \|\| aiCandidateStronglyAcceptsReceipt\(candidate, requiredDate\)/);
-assert.match(validation, /receiptAmountHasIndependentConfirmation\(candidates, candidate, requiredDate\)/);
+assert.match(validation, /receiptAmountHasIndependentConfirmation\(candidates, candidate, requiredDate, !hasYandex\)/);
 assert.match(source, /повёрнуто на 90, 180 или 270 градусов/);
 assert.match(source, /detail: "high"/);
 assert.match(request, /amount_text/);
 assert.match(request, /candidate\.receiptAmountSource = `openai:\$\{model\}`/);
 assert.match(validation, /requestOpenAiReceiptCheck\(file, content, http, config, requiredDate, logger, 0, true\)/);
 assert.match(validation, /if \(amountCandidate\) candidates\.push\(amountCandidate\)/);
+assert.match(validation, /!candidates\.some\(\(candidate\) => candidate && candidate\.receiptDate === requiredDate\)/);
+assert.match(validation, /requestOpenAiReceiptCheck\(file, content, http, config, requiredDate, logger, 0, false, true\)/);
+assert.match(validation, /if \(dateCandidate\) candidates\.push\(dateCandidate\)/);
 
 const candidateStart = source.indexOf('function alignReceiptDateToRequiredYear');
 const candidateEnd = source.indexOf('function aiCandidateStronglyAcceptsReceipt', candidateStart);

@@ -1226,10 +1226,13 @@ var require_upload_duplicate_guard = __commonJS({
       return ids.sort();
     }
     function postMessageClaimKey(message) {
-      const fileIds = postMessageFileIds(message);
-      if (fileIds.length) return `upload:${fileIds.join(",")}`;
       const messageId = String(message && message.id || "");
-      return messageId ? `message:${messageId}` : "";
+      // Rocket.Chat may expose the original upload and its generated preview
+      // with different upload ids. They still belong to one message and must
+      // share one financial-processing claim.
+      if (messageId) return `message:${messageId}`;
+      const fileIds = postMessageFileIds(message);
+      return fileIds.length ? `upload:${fileIds.join(",")}` : "";
     }
     function postMessageClaimAssociation(message) {
       const claimKey = postMessageClaimKey(message);
@@ -1816,7 +1819,7 @@ var require_upload_duplicate_guard = __commonJS({
       return removed;
     }
     const RECEIPT_VISUAL_CRITERIA = "КРИТЕРИИ БАНКОВСКОГО ЧЕКА. Считай изображение чеком, банковской квитанцией или справкой по операции, если главным объектом является официальный банковский документ, банковский экран либо чек, открытый на экране другого телефона. Ищи совокупность признаков: название или логотип банка/платёжного сервиса; слова Чек, Квитанция, Справка по операции, Перевод, Платёж, Оплата, СБП или SberPay; дата и время операции; итоговая сумма рядом с ₽, руб, Р, RUB или RUR; статус Успешно, Исполнено, Выполнено, Оплачено, Completed или иной статус; отправитель, получатель, счёт/карта, номер операции, QR или СБП. Чек может быть повёрнут, снят под углом, с бликами, на белом PDF-листе или на экране телефона. Для классификации достаточно ясно видимого банковского интерфейса/документа и нескольких согласованных признаков; для зачёта суммы обязательно отдельно прочитай именно итог операции. Не считай чеком: одиночное число без банковского контекста, баланс, время, номер телефона/карты, обычную переписку, рассылку, интерфейс Rocket.Chat, фото человека или салонной работы. ";
-    const WORK_PHOTO_VISUAL_CRITERIA = "КРИТЕРИИ ФОТО РАБОТЫ САЛОНА. Считай фото работой, если главным объектом является человек целиком или часть человека, связанная с услугами салона: голова, волосы, причёска, стрижка, окрашивание, профиль, лицо, затылок, виски, борода; глаза, брови или ресницы; руки, пальцы или ногти; стопы, пальцы ног или ногти на ногах. Не требуй доказательства изменения до/после и не требуй идеального крупного плана: одного чёткого кадра клиента или соответствующей зоны достаточно. 1) HAIR — человек, голова, волосы, лицо с хорошо видимыми волосами, профиль, затылок, виски, борода, стрижка, укладка, причёска или окрашивание. 2) NAILS — руки, пальцы, ногти, покрытие, форма или дизайн. 3) PEDICURE — стопы, пальцы ног или ногти на ногах. 4) BROWS_LASHES — лицо, глаза, брови или ресницы крупно либо достаточно различимо. Даже если точный результат услуги невозможно доказать по одному кадру, наличие клиента и релевантной зоны означает фото работы. Никогда не считай работой банковский чек, квитанцию, справку по операции, экран телефона/банка, QR/СБП, документ, переписку/рассылку, интерфейс Rocket.Chat, пустой интерьер, отдельные инструменты или товар без человека. Если одновременно видны человек и документ/экран, классифицируй по главному объекту: читаемый банковский документ — чек; человек или релевантная зона салонной услуги — фото работы. ";
+    const WORK_PHOTO_VISUAL_CRITERIA = "СТРОГИЕ КРИТЕРИИ ФОТО РАБОТЫ САЛОНА. Считай изображение фото работы только когда одновременно выполнены все условия: 1) главным объектом является реальный человек целиком, клиент либо крупно показанная часть его тела; 2) ясно видна конкретная зона салонной услуги; 3) зона относится ровно к одному виду: HAIR — волосы, стрижка, окрашивание, укладка, причёска, затылок, виски или борода; NAILS — руки, пальцы или ногти; PEDICURE — стопы, пальцы ног или ногти на ногах; BROWS_LASHES — лицо крупно, глаза, брови или ресницы; 4) изображение не является документом, экраном телефона, скриншотом, перепиской или рекламным материалом. Не требуй коллаж до/после и не требуй идеального крупного плана, но человек и релевантная зона услуги должны быть реально видимы, а не предполагаться по обстановке. Обычный портрет без различимой зоны услуги, человек только на заднем плане, пустой интерьер, рабочее место, инструменты, товар или случайная фотография — не фото работы. Никогда не считай работой банковский чек, квитанцию, справку по операции, банковский экран, экран телефона, QR/СБП, документ, чек на экране другого телефона, переписку/рассылку или интерфейс Rocket.Chat. Если виден читаемый документ или экран с банковскими реквизитами, суммой, датой, статусом, отправителем или получателем, всегда классифицируй изображение как документ/чек, даже когда в кадре также видны руки или человек. При сомнении не подтверждай фото работы. ";
     async function requestOpenAiWorkPhotoCheckUncached(file, content, http, config, logger) {
       if (!config || !config.openaiApiKey || !content || !content.length || !http) return "";
       const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
@@ -1836,7 +1839,7 @@ var require_upload_duplicate_guard = __commonJS({
               content: [
                 {
                   type: "input_text",
-                  text: RECEIPT_VISUAL_CRITERIA + WORK_PHOTO_VISUAL_CRITERIA + 'Ты классифицируешь изображение для отчёта салона. Сначала определи главный объект. is_work_photo=true ставь для человека или зоны салонной услуги по критериям выше. Если главный объект — банковский документ или банковский экран, is_document_or_screen=true и is_work_photo=false. Верни только JSON без Markdown: {"is_work_photo":true|false,"is_document_or_screen":true|false,"kind":"hair|nails|pedicure|brows_lashes|other","confidence":0.0,"evidence":["короткий видимый признак"]}.'
+                  text: RECEIPT_VISUAL_CRITERIA + WORK_PHOTO_VISUAL_CRITERIA + 'Ты выполняешь строгую классификацию изображения для отчёта салона. is_work_photo=true разрешено только если одновременно has_visible_client=true, has_visible_service_area=true, kind выбран из hair, nails, pedicure, brows_lashes, а is_document_or_screen=false и is_receipt_or_banking=false. Любой читаемый банковский документ или банковский экран имеет приоритет над руками и людьми в кадре. При сомнении ставь is_work_photo=false. Верни только JSON без Markdown: {"is_work_photo":true|false,"is_document_or_screen":true|false,"is_receipt_or_banking":true|false,"has_visible_client":true|false,"has_visible_service_area":true|false,"kind":"hair|nails|pedicure|brows_lashes|other","confidence":0.0,"evidence":["короткий видимый признак"]}.'
                 },
                 { type: "input_image", image_url: imageUrl, detail: "high" }
               ]
@@ -1862,13 +1865,11 @@ var require_upload_duplicate_guard = __commonJS({
           if (!match) continue;
           const parsed = JSON.parse(match[0]);
           const confidence = Number(parsed && parsed.confidence);
-          // The model's positive work-photo decision is the classification.
-          // Do not reject an obvious haircut merely because its self-reported
-          // confidence/evidence formatting is conservative or incomplete.
-          // The explicit document/screen guard still blocks receipts, banking
-          // screens, chats and mailing screenshots.
-          if (parsed && parsed.is_work_photo === true && parsed.is_document_or_screen !== true) return "work";
-          if (parsed && parsed.is_document_or_screen === true) return "document";
+          const kind = String(parsed && parsed.kind || "").trim().toLowerCase();
+          const knownServiceArea = /^(?:hair|nails|pedicure|brows_lashes)$/.test(kind);
+          const blockedFinancialImage = Boolean(parsed && (parsed.is_document_or_screen === true || parsed.is_receipt_or_banking === true));
+          if (blockedFinancialImage) return "document";
+          if (parsed && parsed.is_work_photo === true && parsed.has_visible_client === true && parsed.has_visible_service_area === true && knownServiceArea) return "work";
           if (logger) logger.info(`Dedicated work-photo Vision inconclusive attempt=${attempt + 1} kind=${parsed && parsed.kind || "unknown"} confidence=${Number.isFinite(confidence) ? confidence : "unknown"}`);
         } catch (error) {
           if (logger) logger.warn(`Dedicated work-photo Vision failed attempt=${attempt + 1}: ${error && error.message || error}`);
@@ -1894,10 +1895,9 @@ var require_upload_duplicate_guard = __commonJS({
     }
     async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger, explicitPhotoIntent = false) {
       const finalKind = await personalImageKindForPreUpload(file, content, http, config, logger);
-      if (finalKind === "photo") return { forward: true, reason: "classifier" };
       if (finalKind === "receipt") return { forward: false, reason: "receipt" };
       if (finalKind === "mailing") return { forward: false, reason: "mailing" };
-      const dedicatedPhotoKind = finalKind === "unknown" || !finalKind ? await requestOpenAiWorkPhotoCheck(file, content, http, config, logger) : "";
+      const dedicatedPhotoKind = finalKind === "photo" || finalKind === "unknown" || !finalKind ? await requestOpenAiWorkPhotoCheck(file, content, http, config, logger) : "";
       if (dedicatedPhotoKind === "work") {
         return { forward: true, reason: "dedicated-work-photo-check" };
       }
@@ -1907,24 +1907,17 @@ var require_upload_duplicate_guard = __commonJS({
         // receipt processing instead of being accepted as a salon work photo.
         return { forward: false, reason: "document-or-screen" };
       }
-      if (finalKind === "unknown" || !finalKind) {
-        // Some Rocket.Chat installations do not return a usable result from
-        // the dedicated visual classifier. Before accepting by exclusion, run
-        // the strict receipt validator so a readable cheque/banking screen can
-        // never become a work photo. Mailing proofs were already rejected by
-        // personalImageKindForPreUpload above.
+      if (finalKind === "photo" || finalKind === "unknown" || !finalKind) {
+        // A failed or inconclusive image check must never become a work photo
+        // by exclusion. Run the receipt validator only to preserve the block
+        // reason; forwarding still requires a positive dedicated Vision result.
         try {
           const receiptCheck = await validateReceiptStrict(file, content, http, config, logger);
           if (receiptCheck && receiptCheck.ok) return { forward: false, reason: "strict-receipt-check" };
         } catch (error) {
           if (logger) logger.warn(`Work-photo strict receipt exclusion failed: ${error && error.message || error}`);
         }
-        if (explicitPhotoIntent) return { forward: true, reason: "photo-report-button-after-document-check" };
-        // Both the dedicated document/screen classifier and strict receipt
-        // validator have now had a chance to block financial images. Accept
-        // the remaining personal-room image automatically so masters do not
-        // need to press PHOTO merely because Vision was inconclusive.
-        return { forward: true, reason: "verified-non-receipt-image" };
+        return { forward: false, reason: "work-photo-not-strictly-confirmed" };
       }
       return { forward: false, reason: finalKind || "unknown" };
     }
@@ -2534,33 +2527,58 @@ var require_upload_duplicate_guard = __commonJS({
     function messageFiles(message) {
       const files = [];
       const seen = {};
-      const addFile = (file) => {
+      const authoritativeNames = {};
+      const derivedNames = {};
+      const normalizedFileName = (file) => {
+        const title = file && file.title;
+        const titleValue = String(title && typeof title === "object" ? title.value : title || "");
+        return String(file && (file.name || titleValue || file.url || file.path) || "").split("?")[0].split("/").pop().trim().toLowerCase();
+      };
+      const addFile = (file, authoritative = false) => {
         if (!file) return;
-        const id = String(file._id || file.id || file.name || file.title || "");
+        const id = String(file._id || file.id || file.url || file.path || file.name || file.title || "");
         if (id && seen[id]) return;
+        const name = normalizedFileName(file);
+        // Rocket.Chat can expose one upload twice: the canonical message.file
+        // and a generated attachment preview with another upload id. Prefer
+        // the original bytes; OCR of the small preview creates false amounts
+        // and a second ledger row for the same receipt.
+        if (!authoritative && name && authoritativeNames[name]) return;
+        // An attachment can contain title.link (the original) and imageUrl
+        // (a resized preview) with different upload ids but the same filename.
+        // The first derived reference is the canonical one; suppress the rest.
+        if (!authoritative && name && derivedNames[name]) return;
         if (id) seen[id] = true;
+        if (authoritative && name) authoritativeNames[name] = true;
+        if (!authoritative && name) derivedNames[name] = true;
         files.push(file);
       };
-      if (message && message.file) addFile(message.file);
+      if (message && message.file) addFile(message.file, true);
       if (message && Array.isArray(message.files)) {
-        for (const file of message.files) addFile(file);
+        for (const file of message.files) addFile(file, true);
       }
       if (message && Array.isArray(message.attachments)) {
         const visitAttachment = (attachment) => {
           if (!attachment) return;
           const title = attachment && attachment.title;
           const titleValue = String(title && typeof title === "object" ? title.value : title || "");
-          const urls = [
-            attachment && attachment.imageUrl,
-            attachment && attachment.image_url,
+          const originalUrls = [
             attachment && attachment.title && attachment.title.link,
-            attachment && attachment.title_link,
-            attachment && attachment.file && (attachment.file.url || attachment.file.path)
+            attachment && attachment.title_link
           ].map((value) => String(value || "")).filter(Boolean);
-          for (const url of urls) {
+          const previewUrls = [
+            attachment && attachment.imageUrl,
+            attachment && attachment.image_url
+          ].map((value) => String(value || "")).filter(Boolean);
+          const uploadIdFromUrl = (url) => {
+            const uploadMatch = String(url || "").match(/(?:file-upload|Uploads|uploads)\/([^/?#]+)/i) || String(url || "").match(/[?&](?:upload|file|id)=([^&#]+)/i);
+            return uploadMatch && decodeURIComponent(uploadMatch[1] || "");
+          };
+          const previewIds = previewUrls.map(uploadIdFromUrl).filter(Boolean);
+          const addAttachmentUrl = (url) => {
             const uploadMatch = url.match(/(?:file-upload|Uploads|uploads)\/([^/?#]+)/i) || url.match(/[?&](?:upload|file|id)=([^&#]+)/i);
             const uploadId = uploadMatch && decodeURIComponent(uploadMatch[1] || "");
-            if (!uploadId && !titleValue) continue;
+            if (!uploadId && !titleValue) return;
             addFile({
               _id: uploadId || url,
               id: uploadId || url,
@@ -2569,10 +2587,24 @@ var require_upload_duplicate_guard = __commonJS({
               type: attachment && attachment.imageUrl ? "image/jpeg" : "",
               url
             });
+          };
+          // title.link is the downloadable original. Rocket.Chat can also put
+          // its generated thumb-* file into attachment.file; add the original
+          // first and never let that small preview enter OCR or the ledger.
+          for (const url of originalUrls) addAttachmentUrl(url);
+          const attachmentFiles = [attachment.file, ...Array.isArray(attachment.files) ? attachment.files : []].filter(Boolean);
+          for (const file of attachmentFiles) {
+            const fileId = String(file && (file._id || file.id) || "");
+            const fileName = normalizedFileName(file);
+            const originalNameForThumb = fileName.replace(/^thumb[-_]/i, "");
+            const isGeneratedPreview = Boolean(
+              originalUrls.length > 0 && (previewIds.indexOf(fileId) !== -1 || /^thumb[-_]/i.test(fileName)) ||
+              /^thumb[-_]/i.test(fileName) && authoritativeNames[originalNameForThumb]
+            );
+            if (!isGeneratedPreview) addFile(file, originalUrls.length === 0);
           }
-          if (attachment.file) addFile(attachment.file);
-          if (Array.isArray(attachment.files)) {
-            for (const file of attachment.files) addFile(file);
+          if (!originalUrls.length && !attachmentFiles.length) {
+            for (const url of previewUrls) addAttachmentUrl(url);
           }
           if (Array.isArray(attachment.attachments)) {
             for (const nested of attachment.attachments) visitAttachment(nested);
@@ -2600,17 +2632,46 @@ var require_upload_duplicate_guard = __commonJS({
     }
     async function resolvePersonalImageMessageV2(initialMessage, read, logger, maxAttempts = 16, delayMs = 750, expectMedia = true) {
       if (!initialMessage || !isPersonalTarsRoom(initialMessage.room)) return initialMessage;
-      if (messageImageFiles(initialMessage).length) return initialMessage;
+      const isImageReference = (file) => {
+        if (!file) return false;
+        if (/^image\//i.test(String(file.type || file.mimeType || ""))) return true;
+        return /\.(?:jpe?g|png|webp|gif|heic|heif)$/i.test(String(file.name || file.title || file.url || file.path || "").split("?")[0]);
+      };
+      const hasCanonicalImageReference = (message) => {
+        if (message && message.file && isImageReference(message.file)) return true;
+        if (message && Array.isArray(message.files) && message.files.some(isImageReference)) return true;
+        const visit = (attachment) => {
+          if (!attachment) return false;
+          if (attachment.file && isImageReference(attachment.file)) return true;
+          if (Array.isArray(attachment.files) && attachment.files.some(isImageReference)) return true;
+          if (attachment.title && typeof attachment.title === "object" && attachment.title.link || attachment.title_link) return true;
+          return Array.isArray(attachment.attachments) && attachment.attachments.some(visit);
+        };
+        return Boolean(message && Array.isArray(message.attachments) && message.attachments.some(visit));
+      };
+      const isPreviewOnlyMessage = (message) => messageImageFiles(message).length > 0 && !hasCanonicalImageReference(message);
+      const initialImages = messageImageFiles(initialMessage);
+      // A normal file/file-list or title.link is already the original upload.
+      // imageUrl-only messages are generated previews and must wait for the
+      // canonical Rocket.Chat message instead of starting OCR themselves.
+      if (initialImages.length && !isPreviewOnlyMessage(initialMessage)) return initialMessage;
       const messageId = String(initialMessage.id || "");
       const roomId = String(initialMessage.room && initialMessage.room.id || "");
       if (!messageId || !roomId) return initialMessage;
+      const pendingMatch = String(initialMessage.text || "").match(/(?:^|[\s/\\])([^\s/\\]+\.(?:jpe?g|png|webp|gif|heic|heif))(?:$|[?#\s])/i);
+      const imageFileNames = (message) => messageImageFiles(message).map((file) => {
+        const title = file && file.title;
+        const titleValue = String(title && typeof title === "object" ? title.value : title || "");
+        return String(file && (file.name || titleValue || file.url || file.path) || "").split("?")[0].split("/").pop().trim().toLowerCase();
+      }).filter(Boolean);
+      const pendingFileName = String(pendingMatch && pendingMatch[1] || initialImages.length === 1 && imageFileNames(initialMessage)[0] || "").trim().toLowerCase();
       let bestMessage = initialMessage;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
         try {
           const direct = await read.getMessageReader().getById(messageId);
           if (direct) bestMessage = direct;
-          if (direct && messageImageFiles(direct).length) {
+          if (direct && messageImageFiles(direct).length && !isPreviewOnlyMessage(direct)) {
             if (logger) logger.info(`MEDIA_V2_SETTLED source=message-reader message=${messageId} attempt=${attempt + 1} images=${messageImageFiles(direct).length}`);
             return direct;
           }
@@ -2626,7 +2687,7 @@ var require_upload_duplicate_guard = __commonJS({
           const roomMessages = recent || [];
           const roomMessage = roomMessages.find((candidate) => candidate && String(candidate.id || "") === messageId);
           if (roomMessage) bestMessage = roomMessage;
-          if (roomMessage && messageImageFiles(roomMessage).length) {
+          if (roomMessage && messageImageFiles(roomMessage).length && !isPreviewOnlyMessage(roomMessage)) {
             if (logger) logger.info(`MEDIA_V2_SETTLED source=room-history message=${messageId} attempt=${attempt + 1} images=${messageImageFiles(roomMessage).length}`);
             return roomMessage;
           }
@@ -2636,12 +2697,18 @@ var require_upload_duplicate_guard = __commonJS({
           // older photos in the room must never be claimed by a new message.
           const initialTime = Number(new Date(initialMessage.createdAt || 0).getTime() || 0);
           const senderId = String(initialMessage.sender && initialMessage.sender.id || "");
-          const siblingMessage = initialTime && senderId ? roomMessages.find((candidate) => {
+          const siblingCandidates = initialTime && senderId ? roomMessages.filter((candidate) => {
             if (!candidate || String(candidate.id || "") === messageId) return false;
             if (String(candidate.sender && candidate.sender.id || "") !== senderId) return false;
             const candidateTime = Number(new Date(candidate.createdAt || 0).getTime() || 0);
-            return candidateTime >= initialTime && candidateTime - initialTime <= 2e4 && messageImageFiles(candidate).length > 0;
-          }) : void 0;
+            return candidateTime >= initialTime && candidateTime - initialTime <= 2e4 && messageImageFiles(candidate).length > 0 && !isPreviewOnlyMessage(candidate);
+          }) : [];
+          // Never attach an opaque preliminary event to an arbitrary nearby
+          // image when several receipts were sent together. An exact filename
+          // is safe; without one, only a single unambiguous candidate is safe.
+          const siblingMessage = pendingFileName
+            ? siblingCandidates.find((candidate) => imageFileNames(candidate).indexOf(pendingFileName) !== -1)
+            : siblingCandidates.length === 1 ? siblingCandidates[0] : void 0;
           if (siblingMessage) {
             if (logger) logger.info(`MEDIA_V2_SETTLED source=sibling-message origin=${messageId} message=${String(siblingMessage.id || "")} attempt=${attempt + 1} images=${messageImageFiles(siblingMessage).length}`);
             return siblingMessage;
@@ -2654,7 +2721,11 @@ var require_upload_duplicate_guard = __commonJS({
       // A short probe also runs for opaque personal messages because mobile
       // Rocket.Chat can hide every upload marker. Exhausting that probe does
       // not mean an ordinary text message failed to upload a file.
-      return { ...bestMessage, __mediaV2NotSettled: Boolean(expectMedia) };
+      return {
+        ...bestMessage,
+        __mediaV2NotSettled: Boolean(expectMedia),
+        __mediaV2PreviewOnly: isPreviewOnlyMessage(bestMessage)
+      };
     }
     function messageDescriptorText(message) {
       const parts = [message && message.text];
@@ -2855,8 +2926,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (logger) logger.info(`Personal upload classified as receipt by image content: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
         return PROTECTED_ROOMS.kassa;
       }
-      if (kind === "photo") return PROTECTED_ROOMS.otchet;
-      if (kind === "unknown") {
+      if (kind === "photo" || kind === "unknown") {
         // Keep the dedicated visual result in the routing decision as well as
         // in the fast photo-forwarding gate. Otherwise a banking screen that
         // was correctly rejected as a work photo could fall through as an
@@ -2870,7 +2940,7 @@ var require_upload_duplicate_guard = __commonJS({
           if (logger) logger.info(`Personal upload forced into receipt validation by document/screen classifier: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
           return PROTECTED_ROOMS.kassa;
         }
-        // The fast classifier is intentionally conservative and can return
+        // The strict work-photo classifier is intentionally conservative and can return
         // unknown for distant/tilted photos of a receipt on another phone.
         // After Rocket.Chat has accepted the upload, run the full receipt
         // validator before giving up. This keeps work photos and mailings out
@@ -3057,9 +3127,13 @@ var require_upload_duplicate_guard = __commonJS({
     }
     function receiptIndexEntryRank(entry) {
       if (!entry) return -1;
-      if (entry.archiveStatus === "expired") return 5;
+      if (entry.archiveStatus === "expired") return 6;
+      // A confirmed receipt is terminal. OCR repair or manual approval can
+      // legitimately promote an earlier rejection, while a stale concurrent
+      // writer must never turn that accepted receipt back into "rejected".
+      if (entry.source === "confirmed" || entry.archiveStatus === "stored" || entry.archiveKey) return 5;
       if (entry.source === "duplicate" || entry.source === "rejected" || entry.source === "invalid") return 4;
-      if (entry.source === "confirmed" || entry.source === "archive_failed" || entry.archiveStatus === "stored" || entry.archiveKey) return 3;
+      if (entry.source === "archive_failed") return 3;
       if (entry.source === "post") return 2;
       if (entry.source === "pre") return 1;
       return 0;
@@ -3102,6 +3176,29 @@ var require_upload_duplicate_guard = __commonJS({
     }
     function findExactDuplicate(index, exact) {
       return index.photos.find((entry) => entry.exact === exact);
+    }
+    function sameReceiptMessageImage(left, right) {
+      if (!left || !right) return false;
+      const leftMessageId = String(left.messageId || "");
+      const rightMessageId = String(right.messageId || "");
+      if (!leftMessageId || leftMessageId !== rightMessageId) return false;
+      const leftVisual = String(left.visual || "");
+      const rightVisual = String(right.visual || "");
+      if (leftVisual && rightVisual && hammingDistance(leftVisual, rightVisual) <= RECEIPT_VISUAL_DISTANCE_LIMIT) return true;
+      // Older app versions could store the original and Rocket.Chat's
+      // thumb-* projection as two accepted rows. Resizing can make their
+      // perceptual hashes too different, but they still share one message,
+      // amount and processing window. Reconcile that historical pair without
+      // merging different receipts that merely arrived at the same time.
+      const leftUploadId = String(left.uploadId || "");
+      const rightUploadId = String(right.uploadId || "");
+      const leftTime = Number(left.uploadedAt || left.postProcessedAt || 0);
+      const rightTime = Number(right.uploadedAt || right.postProcessedAt || 0);
+      return Boolean(
+        leftUploadId && rightUploadId && leftUploadId !== rightUploadId &&
+        sameReceiptAmount(amountFromEntry(left), amountFromEntry(right)) &&
+        leftTime && rightTime && Math.abs(leftTime - rightTime) <= 2 * 60 * 1e3
+      );
     }
     function isStableReceiptIdentity(receiptIdentity) {
       return /^(id:|txn:|text:)/.test(String(receiptIdentity || ""));
@@ -3233,10 +3330,26 @@ var require_upload_duplicate_guard = __commonJS({
       }
       return parts.join("\n");
     }
+    let receiptOcrRequestQueue = Promise.resolve();
+    let receiptOcrLastStartedAt = 0;
+    async function queuedReceiptOcrPost(http, options) {
+      const run = async () => {
+        // Several receipts can arrive in the same second. Space Yandex OCR
+        // requests so a burst does not turn a readable 300 ₽ into an
+        // OpenAI-only guess after HTTP 429 responses.
+        const waitMs = Math.max(0, 350 - (Date.now() - receiptOcrLastStartedAt));
+        if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+        receiptOcrLastStartedAt = Date.now();
+        return http.post("https://ocr.api.cloud.yandex.net/ocr/v1/recognizeText", options);
+      };
+      const pending = receiptOcrRequestQueue.then(run, run);
+      receiptOcrRequestQueue = pending.then(() => void 0, () => void 0);
+      return pending;
+    }
     async function requestReceiptOcr(file, content, http, config, model, retryAttempt = 0) {
       let response;
       try {
-        response = await http.post("https://ocr.api.cloud.yandex.net/ocr/v1/recognizeText", {
+        response = await queuedReceiptOcrPost(http, {
           headers: {
             Authorization: "Api-Key " + config.apiKey,
             "x-folder-id": config.folderId,
@@ -3251,15 +3364,15 @@ var require_upload_duplicate_guard = __commonJS({
           timeout: 9e3
         });
       } catch (networkError) {
-        if (retryAttempt < 1) {
-          await new Promise((resolve) => setTimeout(resolve, 900));
+        if (retryAttempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 1200 * (retryAttempt + 1)));
           return requestReceiptOcr(file, content, http, config, model, retryAttempt + 1);
         }
         throw networkError;
       }
       if (!response || response.statusCode < 2e2 || response.statusCode >= 3e2) {
-        if (response && (response.statusCode >= 500 || response.statusCode === 429) && retryAttempt < 1) {
-          await new Promise((resolve) => setTimeout(resolve, 900));
+        if (response && (response.statusCode >= 500 || response.statusCode === 429) && retryAttempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 1200 * (retryAttempt + 1)));
           return requestReceiptOcr(file, content, http, config, model, retryAttempt + 1);
         }
         throw new Error(`OCR HTTP ${response && response.statusCode || "unknown"} (${model})`);
@@ -3364,7 +3477,7 @@ var require_upload_duplicate_guard = __commonJS({
         return !sameReceiptAmount(candidate.receiptAmount, aiCandidate.receiptAmount);
       });
     }
-    function receiptAmountHasIndependentConfirmation(candidates, selected, requiredDate) {
+    function receiptAmountHasIndependentConfirmation(candidates, selected, requiredDate, allowOpenAiPair = true) {
       if (!selected || !isValidReceiptAmount(selected.receiptAmount)) return false;
       const selectedSource = String(selected.receiptAmountSource || "");
       return (Array.isArray(candidates) ? candidates : []).some((candidate) => {
@@ -3372,19 +3485,53 @@ var require_upload_duplicate_guard = __commonJS({
         if (candidate.receiptDate !== requiredDate || !isValidReceiptAmount(candidate.receiptAmount)) return false;
         const candidateSource = String(candidate.receiptAmountSource || "");
         if (!selectedSource || !candidateSource || selectedSource === candidateSource) return false;
-        return sameReceiptAmount(candidate.receiptAmount, selected.receiptAmount);
+        if (!sameReceiptAmount(candidate.receiptAmount, selected.receiptAmount)) return false;
+        const selectedProvider = selectedSource.split(":")[0].toLowerCase();
+        const candidateProvider = candidateSource.split(":")[0].toLowerCase();
+        return selectedProvider !== candidateProvider || allowOpenAiPair && selectedProvider === "openai";
       });
     }
-    function receiptAmountsDisagree(candidates, requiredDate) {
-      const amounts = (Array.isArray(candidates) ? candidates : []).filter((candidate) => candidate && !candidate.combinedReceipt && candidate.receiptDate === requiredDate && isValidReceiptAmount(candidate.receiptAmount)).map((candidate) => Number(candidate.receiptAmount));
-      return amounts.some((amount, index) => amounts.slice(index + 1).some((other) => !sameReceiptAmount(amount, other)));
+    function confirmedReceiptAmount(candidates, requiredDate, allowOpenAiPair = true) {
+      const groups = [];
+      let hasAnyYandexCandidate = false;
+      for (const candidate of Array.isArray(candidates) ? candidates : []) {
+        if (!candidate || candidate.combinedReceipt || candidate.receiptDate !== requiredDate || !isValidReceiptAmount(candidate.receiptAmount)) continue;
+        const source = String(candidate.receiptAmountSource || "");
+        if (!source) continue;
+        let group = groups.find((entry) => sameReceiptAmount(entry.amount, candidate.receiptAmount));
+        if (!group) {
+          group = { amount: Number(candidate.receiptAmount), sources: {}, openAiSources: {}, hasYandex: false };
+          groups.push(group);
+        }
+        group.sources[source] = true;
+        if (/^openai:/i.test(source)) group.openAiSources[source] = true;
+        if (/^yandex:/i.test(source)) {
+          group.hasYandex = true;
+          hasAnyYandexCandidate = true;
+        }
+      }
+      const confirmed = groups.filter((group) => {
+        const openAiCount = Object.keys(group.openAiSources).length;
+        return openAiCount >= 1 && group.hasYandex || allowOpenAiPair && !hasAnyYandexCandidate && openAiCount >= 2;
+      });
+      return confirmed.length === 1 ? confirmed[0].amount : void 0;
     }
-    async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false) {
+    function receiptAmountsDisagree(candidates, requiredDate, allowOpenAiPair = true) {
+      const amounts = (Array.isArray(candidates) ? candidates : []).filter((candidate) => candidate && !candidate.combinedReceipt && candidate.receiptDate === requiredDate && isValidReceiptAmount(candidate.receiptAmount)).map((candidate) => Number(candidate.receiptAmount));
+      const hasConflict = amounts.some((amount, index) => amounts.slice(index + 1).some((other) => !sameReceiptAmount(amount, other)));
+      // A single OCR outlier must not send a readable receipt to control when
+      // two genuinely independent reads agree exactly. Sources are independent
+      // only across OpenAI models or across OpenAI and Yandex; repeated Yandex
+      // layouts alone are still one provider and cannot form a consensus.
+      return hasConflict && confirmedReceiptAmount(candidates, requiredDate, allowOpenAiPair) === void 0;
+    }
+    async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false, focusDate = false) {
       if (!config || !config.openaiApiKey || !content || !content.length) return void 0;
       const primaryModel = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
-      const model = focusAmount ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
+      const model = focusAmount || focusDate ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
       const imageUrl = `data:${receiptImageMimeType(file)};base64,${bytesToBase64(content)}`;
-      const amountFocusPrompt = (focusAmount ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА: не копируй предыдущий ответ. Изображение может быть повёрнуто на 90, 180 или 270 градусов — мысленно разверни его и проверь все ориентации. Сначала найди на самом чеке подписи даты, статуса и итоговой суммы, затем верни JSON. Внимательно увеличь область с итогом и обязательно перечитай сумму операции. Ищи подписи ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания. Верни amount числом без пробелов и знака валюты. Не используй комиссию, баланс, время, номер карты, документа или квитанции. " : "Изображение чека может быть снято боком или вверх ногами. Перед чтением определи ориентацию и мысленно поверни его на 90, 180 или 270 градусов. Сначала прочитай видимые подписи даты, статуса и итоговой суммы на самом чеке; не делай вывод по имени файла или окружающей обстановке. ") + "ВАЖНО: официальная надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод; для неё верни status=success. Оплата SberPay со статусом «Исполнено» также является успешной операцией. Не путай их с отдельным промежуточным статусом «Отправлен». ";
+      const focusedPrompt = focusDate ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ: не копируй предыдущий ответ и не подставляй дату загрузки. Документ может занимать небольшую часть фотографии и быть открыт на экране другого телефона. Сначала найди границы экрана телефона и область банковского документа внутри него, мысленно приблизь её и проверь верхнюю часть чека и строки Дата, Дата операции, Операция совершена, Чек по операции или Сформировано. Перепиши только реально видимую календарную дату операции в формате YYYY-MM-DD. Не принимай время в строке состояния телефона, дату сообщения или номер документа за дату чека. Остальные поля прочитай как обычно. " : focusAmount ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА: не копируй предыдущий ответ. Изображение может быть повёрнуто на 90, 180 или 270 градусов — мысленно разверни его и проверь все ориентации. Сначала найди на самом чеке подписи даты, статуса и итоговой суммы, затем верни JSON. Внимательно увеличь область с итогом и обязательно перечитай сумму операции. Ищи подписи ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания. Верни amount числом без пробелов и знака валюты. Не используй комиссию, баланс, время, номер карты, документа или квитанции. " : "Изображение чека может быть снято боком или вверх ногами. Перед чтением определи ориентацию и мысленно поверни его на 90, 180 или 270 градусов. Сначала прочитай видимые подписи даты, статуса и итоговой суммы на самом чеке; не делай вывод по имени файла или окружающей обстановке. ";
+      const amountFocusPrompt = focusedPrompt + "ВАЖНО: официальная надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод; для неё верни status=success. Оплата SberPay со статусом «Исполнено» также является успешной операцией. Не путай их с отдельным промежуточным статусом «Отправлен». ";
       let response;
       try {
         response = await http.post("https://api.openai.com/v1/responses", {
@@ -3411,14 +3558,14 @@ var require_upload_duplicate_guard = __commonJS({
       } catch (networkError) {
         if (retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount);
+          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate);
         }
         throw networkError;
       }
       if (!response || response.statusCode < 2e2 || response.statusCode >= 3e2) {
         if (response && (response.statusCode >= 500 || response.statusCode === 429) && retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount);
+          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate);
         }
         throw new Error(`OpenAI receipt HTTP ${response && response.statusCode || "unknown"}`);
       }
@@ -3981,8 +4128,8 @@ var require_upload_duplicate_guard = __commonJS({
         };
       };
       const returnAccepted = () => {
-        if (receiptAmountsDisagree(candidates, requiredDate)) return void 0;
-        const accepted = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate && !receiptStatusBlocks(candidate.statusRejection) && (!candidate.aiReceipt || aiCandidateStronglyAcceptsReceipt(candidate, requiredDate)) && (!hasOpenAi || receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate))));
+        if (receiptAmountsDisagree(candidates, requiredDate, !hasYandex)) return void 0;
+        const accepted = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate && !receiptStatusBlocks(candidate.statusRejection) && (!candidate.aiReceipt || aiCandidateStronglyAcceptsReceipt(candidate, requiredDate)) && (!hasOpenAi || receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate, !hasYandex))));
         if (!accepted || !isValidReceiptAmount(accepted.receiptAmount) || receiptStatusBlocks(accepted.statusRejection)) return void 0;
         return {
           ok: true,
@@ -4031,6 +4178,10 @@ var require_upload_duplicate_guard = __commonJS({
             if (aiCandidate) candidates.push(aiCandidate);
             const amountCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, true);
             if (amountCandidate) candidates.push(amountCandidate);
+            if (!candidates.some((candidate) => candidate && candidate.receiptDate === requiredDate)) {
+              const dateCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, false, true);
+              if (dateCandidate) candidates.push(dateCandidate);
+            }
           } catch (aiError) {
             failures.push(String(aiError && aiError.message || aiError));
             if (logger) logger.warn(`OpenAI receipt double-check failed: ${aiError && aiError.message || aiError}`);
@@ -4039,7 +4190,7 @@ var require_upload_duplicate_guard = __commonJS({
         }
         const hardContainer = returnContainer();
         if (hardContainer) return hardContainer;
-        const strongOpenAiAccepted = !receiptAmountsDisagree(candidates, requiredDate) && candidates.find((candidate) => aiCandidateStronglyAcceptsReceipt(candidate, requiredDate) && receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate));
+        const strongOpenAiAccepted = !receiptAmountsDisagree(candidates, requiredDate, !hasYandex) && candidates.find((candidate) => aiCandidateStronglyAcceptsReceipt(candidate, requiredDate) && receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate, !hasYandex));
         if (strongOpenAiAccepted) return {
           ok: true,
           receiptDate: strongOpenAiAccepted.receiptDate,
@@ -4051,7 +4202,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (hardStatus) return hardStatus;
         const accepted = returnAccepted();
         if (accepted) return accepted;
-        if (receiptAmountsDisagree(candidates, requiredDate)) {
+        if (receiptAmountsDisagree(candidates, requiredDate, !hasYandex)) {
           const conflicting = candidates.find((candidate) => candidate && !candidate.combinedReceipt && candidate.receiptDate === requiredDate && isValidReceiptAmount(candidate.receiptAmount));
           return {
             ok: false,
@@ -4102,7 +4253,18 @@ var require_upload_duplicate_guard = __commonJS({
       const key = `${expectedReceiptDate(config)}:${exactHash(content)}`;
       const cached = strictReceiptValidationCache.get(key);
       if (cached && Date.now() - cached.createdAt < 10 * 60 * 1e3) return cached.promise;
-      const promise = validateReceiptDate(file, content, http, config, logger, 0);
+      const promise = (async () => {
+        const first = await validateReceiptDate(file, content, http, config, logger, 0);
+        const reason = String(first && first.reason || "");
+        const transientOcrFailure = !first.ok && /(?:СУММА ЧЕКА НЕ РАСПОЗНАНА|ДАТА ЧЕКА НЕ РАСПОЗНАНА|НЕ УДАЛОСЬ ПРОВЕРИТЬ ДАТУ ЧЕКА)/i.test(reason);
+        if (!transientOcrFailure) return first;
+        // OCR providers occasionally return an incomplete first response for
+        // a large mobile photo. Retry only inconclusive reads before sending a
+        // valid receipt to control; date/status conflicts remain strict.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const retried = await validateReceiptDate(file, content, http, config, logger, 0);
+        return retried && retried.ok ? retried : first;
+      })();
       strictReceiptValidationCache.set(key, { createdAt: Date.now(), promise });
       if (strictReceiptValidationCache.size > 200) strictReceiptValidationCache.delete(strictReceiptValidationCache.keys().next().value);
       try {
@@ -5377,6 +5539,24 @@ var require_upload_duplicate_guard = __commonJS({
     async function confirmedTransferSummaryForUser(read, config, userId, targetDate, nameCandidates, currentValidatedReceipts, sourceRoomId = "") {
       const index = await readIndex(read, PROTECTED_ROOMS.kassa.index);
       const workday = targetDate || expectedReceiptDate(config);
+      const confirmedReceiptKeys = {};
+      const confirmedReceiptEntries = [];
+      for (const entry of index.photos) {
+        if (!entry || !acceptedReceiptEntry(entry)) continue;
+        const key = receiptLedgerEntryKey(entry);
+        if (key) confirmedReceiptKeys[key] = true;
+        confirmedReceiptEntries.push(entry);
+      }
+      if (userId) {
+        try {
+          const ledger = await read.getPersistenceReader().readByAssociation(masterTransferLedgerAssociation(userId, workday));
+          for (const record of ledger || []) {
+            const key = String(record && record.receiptKey || "");
+            if (key) confirmedReceiptKeys[key] = true;
+          }
+        } catch (_7) {
+        }
+      }
       const pendingSeen = {};
       let pendingReview = 0;
       for (const entry of index.photos) {
@@ -5384,7 +5564,9 @@ var require_upload_duplicate_guard = __commonJS({
         if (userId && entry.userId !== userId && !(sourceRoomId && String(entry.roomId || "") === String(sourceRoomId))) continue;
         if (!userId && Array.isArray(nameCandidates) && nameCandidates.length && !transferEntryMatchesCandidates(entry, nameCandidates)) continue;
         if (dateFromEntry(entry, config) !== workday) continue;
-        const pendingKey = String(entry.exact || entry.uploadId || entry.messageId || "");
+        const acceptedKey = receiptLedgerEntryKey(entry);
+        if ((acceptedKey && confirmedReceiptKeys[acceptedKey]) || confirmedReceiptEntries.some((confirmed) => sameReceiptMessageImage(confirmed, entry))) continue;
+        const pendingKey = acceptedKey || String(entry.uploadId || entry.messageId || "");
         if (pendingKey && pendingSeen[pendingKey]) continue;
         if (pendingKey) pendingSeen[pendingKey] = true;
         pendingReview += 1;
@@ -5397,11 +5579,13 @@ var require_upload_duplicate_guard = __commonJS({
       let count = 0;
       let total = 0;
       let missing = 0;
+      const countedReceiptEntries = [];
       for (const entry of index.photos) {
         if (!entry || entry.source === "pre" || entry.source === "invalid" || entry.source === "rejected" || entry.source === "archive_failed" || entry.source === "duplicate") continue;
         if (userId && entry.userId !== userId && !(sourceRoomId && String(entry.roomId || "") === String(sourceRoomId))) continue;
         if (!userId && candidates.length && !transferEntryMatchesCandidates(entry, candidates)) continue;
         if (dateFromEntry(entry, config) !== workday) continue;
+        if (countedReceiptEntries.some((counted) => sameReceiptMessageImage(counted, entry))) continue;
         const key = normalizedReceiptIdentityKey(entry.receiptIdentity) || String(entry.exact || "");
         if (key && seen[key]) continue;
         if (key) seen[key] = true;
@@ -5410,6 +5594,7 @@ var require_upload_duplicate_guard = __commonJS({
           missing += 1;
           continue;
         }
+        countedReceiptEntries.push(entry);
         count += 1;
         total += amount;
       }
@@ -5417,8 +5602,10 @@ var require_upload_duplicate_guard = __commonJS({
       for (const currentValidatedReceipt of currentReceipts) {
         const currentMatchesUser = userId ? currentValidatedReceipt.userId === userId : !candidates.length || transferEntryMatchesCandidates(currentValidatedReceipt, candidates);
         const currentKey = normalizedReceiptIdentityKey(currentValidatedReceipt.receiptIdentity) || String(currentValidatedReceipt.exact || "");
-        if (currentMatchesUser && dateFromEntry(currentValidatedReceipt, config) === workday && (!currentKey || !seen[currentKey])) {
+        const sameCountedImage = countedReceiptEntries.some((counted) => sameReceiptMessageImage(counted, currentValidatedReceipt));
+        if (currentMatchesUser && dateFromEntry(currentValidatedReceipt, config) === workday && !sameCountedImage && (!currentKey || !seen[currentKey])) {
           if (currentKey) seen[currentKey] = true;
+          countedReceiptEntries.push(currentValidatedReceipt);
           const currentAmount = amountFromEntry(currentValidatedReceipt);
           if (currentAmount === void 0) missing += 1;
           else {
@@ -5451,12 +5638,14 @@ var require_upload_duplicate_guard = __commonJS({
       const targetDate = String(entry && entry.receiptDate || expectedReceiptDate(config));
       const association = masterTransferLedgerAssociation(userId, targetDate);
       const rows = /* @__PURE__ */ new Map();
+      const accountedReceipts = [];
       let missing = 0;
       const index = await readIndex(read, PROTECTED_ROOMS.kassa.index);
       for (const receipt of index.photos || []) {
         if (!acceptedReceiptEntry(receipt)) continue;
         const sameOwner = String(receipt.userId || "") === userId || sourceRoomId && String(receipt.roomId || "") === String(sourceRoomId);
         if (!sameOwner || dateFromEntry(receipt, config) !== targetDate) continue;
+        if (accountedReceipts.some((accounted) => sameReceiptMessageImage(accounted, receipt))) continue;
         const receiptKey = receiptLedgerEntryKey(receipt);
         if (!receiptKey || rows.has(receiptKey)) continue;
         const amount = amountFromEntry(receipt);
@@ -5464,6 +5653,7 @@ var require_upload_duplicate_guard = __commonJS({
           missing += 1;
           continue;
         }
+        accountedReceipts.push(receipt);
         rows.set(receiptKey, amount);
       }
       const currentReceipts = Array.isArray(currentValidatedReceipts) ? currentValidatedReceipts : currentValidatedReceipts ? [currentValidatedReceipts] : entry ? [entry] : [];
@@ -5471,12 +5661,14 @@ var require_upload_duplicate_guard = __commonJS({
         if (!receipt || dateFromEntry(receipt, config) !== targetDate) continue;
         const sameOwner = String(receipt.userId || "") === userId || sourceRoomId && String(receipt.roomId || "") === String(sourceRoomId);
         if (!sameOwner) continue;
+        if (accountedReceipts.some((accounted) => sameReceiptMessageImage(accounted, receipt))) continue;
         const amount = amountFromEntry(receipt);
         // Duplicate protection has already accepted this receipt. The ledger
         // must not merge two different accepted photos just because OCR
         // produced the same incomplete transaction text (common for Gazprom).
         const receiptKey = receiptLedgerEntryKey(receipt);
         if (!receiptKey || rows.has(receiptKey)) continue;
+        accountedReceipts.push(receipt);
         if (amount === void 0) {
           missing += 1;
           continue;
@@ -6289,7 +6481,7 @@ var C = class extends j.App {
     if (await G.isKnownArchiveRoom(e && e.room, n)) return;
     const appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();
     if (G.isTarsAppMessage(e, appUser)) return;
-    const messageId = e && e.id ? String(e.id) : "";
+    let messageId = e && e.id ? String(e.id) : "";
     const originalEvent = e;
     const hasInitialMediaSignal = Boolean(G.messageImageFiles(e).length || G.messageLooksLikePendingImageUpload(e) || e && e.file || e && Array.isArray(e.files) && e.files.length || e && Array.isArray(e.attachments) && e.attachments.length || !String(e && e.text || "").trim());
     if (G.isPersonalTarsRoom(e && e.room)) {
@@ -6300,17 +6492,24 @@ var C = class extends j.App {
       // media signals keep the longer window; ordinary text is delayed at most
       // about two seconds and remains fully functional.
       const settledMessage = await G.resolvePersonalImageMessageV2(e, n, this.getLogger(), hasInitialMediaSignal ? 16 : 6, hasInitialMediaSignal ? 750 : 400, hasInitialMediaSignal);
-      // Preserve authoritative sender/room/id from the event. MessageReader and
-      // RoomReader may return a narrower object containing only stored media.
+      const settledHasImages = Boolean(G.messageImageFiles(settledMessage).length);
+      // Preserve authoritative sender/room from the event. When Rocket.Chat
+      // finishes a mobile upload in a sibling message, use that settled message
+      // id as the canonical id so its preview and original share one claim.
       e = {
         ...settledMessage,
         ...originalEvent,
+        id: settledHasImages ? settledMessage && settledMessage.id || originalEvent && originalEvent.id : originalEvent && originalEvent.id || settledMessage && settledMessage.id,
+        createdAt: settledHasImages ? settledMessage && settledMessage.createdAt || originalEvent && originalEvent.createdAt : originalEvent && originalEvent.createdAt || settledMessage && settledMessage.createdAt,
         file: settledMessage && settledMessage.file || originalEvent && originalEvent.file,
         files: settledMessage && Array.isArray(settledMessage.files) && settledMessage.files.length ? settledMessage.files : originalEvent && originalEvent.files || settledMessage && settledMessage.files,
         attachments: settledMessage && Array.isArray(settledMessage.attachments) && settledMessage.attachments.length ? settledMessage.attachments : originalEvent && originalEvent.attachments || settledMessage && settledMessage.attachments,
         text: String(G.messageImageFiles(settledMessage).length ? settledMessage && settledMessage.text || originalEvent && originalEvent.text || "" : originalEvent && originalEvent.text || settledMessage && settledMessage.text || ""),
-        __mediaV2NotSettled: Boolean(settledMessage && settledMessage.__mediaV2NotSettled)
+        __mediaV2NotSettled: Boolean(settledMessage && settledMessage.__mediaV2NotSettled),
+        __mediaV2PreviewOnly: Boolean(settledMessage && settledMessage.__mediaV2PreviewOnly),
+        __mediaV2OriginMessageId: originalEvent && originalEvent.id || ""
       };
+      messageId = e && e.id ? String(e.id) : messageId;
     }
     const uploadIds = [];
     const rememberUploadId = (file) => {
@@ -6361,6 +6560,14 @@ var C = class extends j.App {
           }
         }
         const hasPersonalImageUpload = G.isPersonalTarsRoom(e && e.room) && resolvedImages.length > 0;
+        if (e && e.__mediaV2PreviewOnly) {
+          // Some Rocket.Chat mobile/external-storage combinations expose the
+          // only readable upload through imageUrl. After the resolver has
+          // waited for an original, process that image as a fallback instead
+          // of silently losing the receipt or work photo. A later canonical
+          // upload is reconciled by the message/image duplicate guards.
+          this.getLogger().warn(`POST_PROBE_PREVIEW_FALLBACK invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
+        }
         if (e && e.__mediaV2NotSettled && !hasPersonalImageUpload) {
           if (appUser && e.room) {
             await r.getCreator().finish(r.getCreator().startMessage().setSender(appUser).setRoom(e.room).setText("⚠️ ФАЙЛ НЕ ОБРАБОТАН\nRocket.Chat не завершил загрузку изображения. Отправьте файл ещё раз."));
@@ -7332,7 +7539,7 @@ var C = class extends j.App {
   preliminaryReportIssues(e, n, t, s) {
     const r = [];
     if (!(e && Number(e.count) > 0)) r.push("фото отчёта");
-    if (t && !t.limit.met && !(n && Number(n.count) > 0)) r.push("рассылки");
+    if (t && !t.limit.met && !t.proofOk) r.push(`рассылки ${t.proofCount}/${t.proofRequired}`);
     if (s && Number(s.missing) > 0) r.push(`чеки без суммы: ${Number(s.missing)}`);
     if (s && Number.isFinite(Number(s.total)) && Number.isFinite(Number(s.reported)) && Math.abs(Number(s.total) - Number(s.reported)) > 0.005) r.push("переводы и чеки не совпадают");
     return r;
@@ -7346,13 +7553,13 @@ var C = class extends j.App {
       await this.deletePreliminaryReportAnalysis(e, n, previousMessageId);
       const photoStatus = a && Number(a.count) > 0 ? "✅" : "❌";
       const mailingRequired = Boolean(o && o.limit && !o.limit.met);
-      const mailingStatus = !mailingRequired ? "➖" : o && Number(o.proofCount || o.count) > 0 ? "✅" : "❌";
+      const mailingStatus = !mailingRequired ? "➖" : o && o.proofOk ? "✅" : "❌";
       const receiptCount = Math.max(0, Number(r && r.count) || 0);
       const receiptTotal = this.formatRubles(Math.max(0, Number(r && r.total) || 0));
       const pendingReceiptCount = Math.max(0, Number(r && r.pendingReview) || 0);
       const visibleIssues = m.filter((issue) => issue !== "фото отчёта");
       const statusParts = [`Фото ${photoStatus}`];
-      if (mailingRequired) statusParts.push(`Рассылка ${mailingStatus}`);
+      if (mailingRequired) statusParts.push(`Рассылки ${o.proofCount}/${o.proofRequired} ${mailingStatus}`);
       statusParts.push(`Чеки ${receiptCount} — ${receiptTotal}`, "Отчёт ✅");
       if (pendingReceiptCount) statusParts.push(`На проверке ${pendingReceiptCount}`);
       const u = `📋 СТАТУС ДНЯ\n${statusParts.join(" | ")}${visibleIssues.length ? `\n⚠️ ${visibleIssues.join(", ")}` : ""}`;
@@ -9016,7 +9223,8 @@ var C = class extends j.App {
     }
     if (p === "female") {
       const counts = this.femaleServiceCountsFromRows(s);
-      const met = counts.complex >= 1 && counts.other >= 2 || counts.simple >= 1 && counts.other >= 4;
+      const noColoringMet = counts.simple === 0 && counts.complex === 0 && counts.other >= 6;
+      const met = noColoringMet || counts.complex >= 1 && counts.other >= 2 || counts.simple >= 1 && counts.other >= 4;
       return { met, value: counts.simple + counts.complex + counts.other, label: `простых ${counts.simple}, сложных ${counts.complex}, других ${counts.other}` };
     }
     if (p === "brow") {
@@ -9031,11 +9239,11 @@ var C = class extends j.App {
     return { met: true, value: count, label: `услуг ${count}` };
   }
   payrollRule(p = "male", s = [], mailings = 0, mailingProof = null) {
-    const limit = this.dailyLimitStatus(p, s), mailingCount = Math.max(0, Math.floor(Number(mailings) || 0)), proofCount = Math.max(0, Math.floor(Number(mailingProof && mailingProof.count) || 0)), proofOk = proofCount > 0, mailingOk = proofOk, rate = limit.met || mailingOk ? 0.5 : 0.4;
-    return { limit, mailings: mailingCount, proofCount, proofOk, roomFound: !mailingProof || mailingProof.roomFound !== false, mailingOk, serviceRate: rate, servicePercent: Math.round(rate * 100) };
+    const limit = this.dailyLimitStatus(p, s), mailingCount = Math.max(0, Math.floor(Number(mailings) || 0)), proofCount = Math.max(0, Math.floor(Number(mailingProof && mailingProof.count) || 0)), proofRequired = 10, proofOk = proofCount >= proofRequired, mailingOk = proofOk, rate = limit.met || mailingOk ? 0.5 : 0.4;
+    return { limit, mailings: mailingCount, proofCount, proofRequired, proofRemaining: Math.max(0, proofRequired - proofCount), proofOk, roomFound: !mailingProof || mailingProof.roomFound !== false, mailingOk, serviceRate: rate, servicePercent: Math.round(rate * 100) };
   }
   async sendReport(e, n, t, s, r, a, p = "male", i = "", transferVerification = null, reportOwner = null, mailings = 0, mailingProof = null, timeCorrection = null, penalties = null, finalAnalysis = true) {
-    const effectiveMailingProof = finalAnalysis ? mailingProof : { roomFound: true, count: 1 };
+    const effectiveMailingProof = finalAnalysis ? mailingProof : { roomFound: true, count: 10 };
     let payroll = this.payrollRule(p, s, mailings, effectiveMailingProof), correction = timeCorrection || { applied: false, amount: 0, label: "👍 до 21:00" }, correctionAmount = correction && correction.applied ? Math.min(300, Number(correction.amount) || 300) : 0, o = s.filter((i) => i.kind === "service").reduce((i, p) => i + p.amount, 0), x = s.filter((i) => i.kind === "service").reduce((i, p) => i + (p.expense || 0), 0), v = o - x, c = s.filter((i) => i.kind === "sale").reduce((i, p) => i + p.amount, 0), tipRows = s.filter((i) => i.kind === "tip"), tipTotal = tipRows.reduce((i, p) => i + p.amount, 0), tipDeduction = tipRows.reduce((i, p) => i + (p.expense || 0), 0), tipSalary = tipRows.reduce((i, p) => i + (p.netAmount || 0), 0), d = o + c + tipTotal, baseSalary = v * payroll.serviceRate + c + tipSalary, m = Math.max(0, baseSalary - correctionAmount), penaltyTotal = Math.max(0, Number(penalties && penalties.total) || 0), penaltyCount = Math.max(0, Number(penalties && penalties.count) || 0), salaryPayable = Math.max(0, m - penaltyTotal), verified = !!transferVerification && Number.isFinite(Number(transferVerification.total)), pendingReceiptCount = Math.max(0, Number(transferVerification && transferVerification.pendingReview) || 0), pendingReceiptReview = pendingReceiptCount > 0, confirmedTransfers = verified ? Number(transferVerification.total) : a, transferDifference = confirmedTransfers - a, u = r + confirmedTransfers, I = u - d, shortage = I < -0.005, surplus = I > 0.005, f = (i) => this.formatRubles(i).replace(" \u20BD", ""), h = (i, p, R = false) => {
       let w = i.length > p ? i.slice(0, p) : i;
       return R ? w.padStart(p) : w.padEnd(p);
@@ -9072,7 +9280,7 @@ var C = class extends j.App {
       ...p === "brow" ? [`Оценка результата: *${browRating}*`] : [],
       ...p === "manicure" ? [`Оценка результата: *${manicureRating}*`] : [],
       `Дневной лимит: *${payroll.limit.met ? "выполнен" : "не выполнен"}* (${payroll.limit.label})`,
-      ...finalAnalysis && !payroll.limit.met && !payroll.proofOk ? ["Пересчёт: *нет рассылок*"] : [],
+      ...finalAnalysis && !payroll.limit.met && !payroll.proofOk ? [`Пересчёт: *рассылки ${payroll.proofCount}/${payroll.proofRequired}*`] : [],
       `Процент услуг: *${payroll.servicePercent}%*`,
       `Время отчёта: *${correction.label || "👍 до 21:00"}*`,
       "```",
@@ -9118,7 +9326,7 @@ var C = class extends j.App {
         Math.abs(transferDifference) > 0.005 ? `\u26A0\uFE0F \u041F\u0435\u0440\u0435\u0432\u043E\u0434\u044B \u0432 \u043E\u0442\u0447\u0451\u0442\u0435 \u0438 \u0447\u0435\u043A\u0430\u0445 \u043D\u0435 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u044E\u0442 \u043D\u0430 *${this.formatRubles(Math.abs(transferDifference))}*` : ""
       ].filter(Boolean) : [],
       finalAnalysis && !payroll.limit.met && !payroll.roomFound ? "⚠️ Чат rasblLki не найден: подтверждение рассылок не засчитано." : "",
-      finalAnalysis && !payroll.limit.met && !payroll.proofOk ? "⚠️ Пересчёт: нет рассылок. Услуги пересчитаны по 40%." : "",
+      finalAnalysis && !payroll.limit.met && !payroll.proofOk ? `⚠️ Пересчёт: рассылки ${payroll.proofCount}/${payroll.proofRequired}. Для сохранения 50% нужно минимум ${payroll.proofRequired} скриншотов.` : "",
       correctionAmount > 0 ? "😔 Отчёт сдан после 21:00: корректировка начисления 300 ₽." : "",
       penaltyTotal > 0 ? `⚠️ Штрафы за день: *${this.formatRubles(penaltyTotal)}* (${penaltyCount})` : "",
       penaltyTotal > 0 && penalties && penalties.entries && penalties.entries.length ? `Штрафы: ${penalties.entries.map((R) => `${R.penaltyTitle || "Опоздание"} ${this.formatRubles(Math.max(0, Number(R.amount) || 0))}`).join("; ")}` : "",
@@ -9142,9 +9350,9 @@ var C = class extends j.App {
     try {
       const config = await this.receiptOcrConfig(n), appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser(), ownerUsernames = ["teimur", "shura", config && config.ownerUsername, config && config.adminUsername].map((value) => String(value || "").replace(/^@/, "").trim()).filter(Boolean).filter((value, index, values) => values.indexOf(value) === index);
       if (!appUser || !appUser.username || !ownerUsernames.length) return previousMessageId || "";
-      const effectiveMailingProof = finalAnalysis ? mailingProof : { roomFound: true, count: 1 }, payroll = this.payrollRule(reportType, rows, mailings, effectiveMailingProof), correction = timeCorrection || { applied: false, amount: 0 }, correctionAmount = correction && correction.applied ? Math.min(300, Number(correction.amount) || 300) : 0, serviceTotal = rows.filter((row) => row.kind === "service").reduce((sum, row) => sum + row.amount, 0), expenseTotal = rows.filter((row) => row.kind === "service").reduce((sum, row) => sum + (row.expense || 0), 0), salesTotal = rows.filter((row) => row.kind === "sale").reduce((sum, row) => sum + row.amount, 0), tipSalary = rows.filter((row) => row.kind === "tip").reduce((sum, row) => sum + (row.netAmount || 0), 0), penaltyTotal = Math.max(0, Number(penalties && penalties.total) || 0), salaryPayable = Math.max(0, (serviceTotal - expenseTotal) * payroll.serviceRate + salesTotal + tipSalary - correctionAmount - penaltyTotal), verified = !!transferVerification && Number.isFinite(Number(transferVerification.total)), pendingReceiptCount = Math.max(0, Number(transferVerification && transferVerification.pendingReview) || 0), pendingReceiptReview = pendingReceiptCount > 0, confirmedTransfers = verified ? Number(transferVerification.total) : transfers, transferDifference = confirmedTransfers - transfers, revenue = rows.reduce((sum, row) => sum + (Number(row.amount) || 0), 0), cashDifference = Number(cash || 0) + confirmedTransfers - revenue;
+      const effectiveMailingProof = finalAnalysis ? mailingProof : { roomFound: true, count: 10 }, payroll = this.payrollRule(reportType, rows, mailings, effectiveMailingProof), correction = timeCorrection || { applied: false, amount: 0 }, correctionAmount = correction && correction.applied ? Math.min(300, Number(correction.amount) || 300) : 0, serviceTotal = rows.filter((row) => row.kind === "service").reduce((sum, row) => sum + row.amount, 0), expenseTotal = rows.filter((row) => row.kind === "service").reduce((sum, row) => sum + (row.expense || 0), 0), salesTotal = rows.filter((row) => row.kind === "sale").reduce((sum, row) => sum + row.amount, 0), tipSalary = rows.filter((row) => row.kind === "tip").reduce((sum, row) => sum + (row.netAmount || 0), 0), penaltyTotal = Math.max(0, Number(penalties && penalties.total) || 0), salaryPayable = Math.max(0, (serviceTotal - expenseTotal) * payroll.serviceRate + salesTotal + tipSalary - correctionAmount - penaltyTotal), verified = !!transferVerification && Number.isFinite(Number(transferVerification.total)), pendingReceiptCount = Math.max(0, Number(transferVerification && transferVerification.pendingReview) || 0), pendingReceiptReview = pendingReceiptCount > 0, confirmedTransfers = verified ? Number(transferVerification.total) : transfers, transferDifference = confirmedTransfers - transfers, revenue = rows.reduce((sum, row) => sum + (Number(row.amount) || 0), 0), cashDifference = Number(cash || 0) + confirmedTransfers - revenue;
       const femaleCounts = reportType === "female" ? this.femaleServiceCountsFromRows(rows) : null, clientCount = reportType === "male" ? this.maleClientCountFromRows(rows) : femaleCounts ? femaleCounts.simple + femaleCounts.complex + femaleCounts.other : this.serviceCountFromRows(rows), violations = [];
-      if (finalAnalysis && !payroll.limit.met && !payroll.proofOk) violations.push("нет рассылок — 40%");
+      if (finalAnalysis && !payroll.limit.met && !payroll.proofOk) violations.push(`рассылки ${payroll.proofCount}/${payroll.proofRequired} — 40%`);
       if (correctionAmount > 0) violations.push("отчёт после 21:00");
       if (penalties && Array.isArray(penalties.entries)) for (const entry of penalties.entries) violations.push(`${entry.penaltyTitle || "штраф"} ${this.formatRubles(Math.max(0, Number(entry.amount) || 0))}`);
       if (verified && Number(transferVerification.missing) > 0) violations.push(`чеки без суммы: ${Number(transferVerification.missing)}`);
@@ -9351,8 +9559,9 @@ var S = class extends A.ApiEndpoint {
       servicePercent: payroll.servicePercent,
       mailingProofOk: !!payroll.proofOk,
       mailingProofCount: payroll.proofCount,
+      mailingProofRequired: payroll.proofRequired,
       mailingRecalc,
-      mailingRecalcText: mailingRecalc ? "Пересчёт: нет рассылок" : "",
+      mailingRecalcText: mailingRecalc ? `Пересчёт: рассылки ${payroll.proofCount}/${payroll.proofRequired}` : "",
       violationDeduction,
       violationDeductionLabel: violationDeduction > 0 ? "Вычет за нарушение: нет фото отчёта" : ""
     });

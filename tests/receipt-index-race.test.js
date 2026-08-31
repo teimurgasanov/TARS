@@ -43,4 +43,23 @@ assert.strictEqual(
   1300
 );
 
-console.log('PASS: concurrent receipt index writes preserve both confirmed receipts');
+const recoveredReceipt = {
+  exact: 'recovered',
+  source: 'confirmed',
+  receiptAmount: 800,
+  uploadedAt: 300,
+  postProcessedAt: 500
+};
+const staleRejection = {
+  exact: 'recovered',
+  source: 'rejected',
+  uploadedAt: 300,
+  postProcessedAt: 400,
+  invalidReason: 'amount missing'
+};
+const recoveredMerge = mergeConcurrentReceiptIndex([recoveredReceipt], [staleRejection], 600);
+assert.strictEqual(recoveredMerge.length, 1);
+assert.strictEqual(recoveredMerge[0].source, 'confirmed');
+assert.strictEqual(recoveredMerge[0].receiptAmount, 800);
+
+console.log('PASS: concurrent receipt index writes preserve confirmed and OCR-recovered receipts');

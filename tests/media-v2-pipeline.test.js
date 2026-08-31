@@ -21,6 +21,7 @@ assert(block.includes("messageImageFiles(roomMessage).length"), "media-v2 must o
 assert(block.includes("MEDIA_V2_NOT_SETTLED"), "media-v2 must log a terminal settle failure instead of silently losing the image");
 assert(block.includes("__mediaV2NotSettled: Boolean(expectMedia)"), "only a message with an actual media signal may report a terminal upload failure");
 assert(block.includes("source=sibling-message"), "a mobile upload finalized under a second message id must still be recoverable");
+assert(block.includes("__mediaV2PreviewOnly: isPreviewOnlyMessage(bestMessage)"), "an imageUrl-only preview must be marked instead of entering OCR independently");
 
 const controllerStart = source.indexOf("async function processPersonalMediaV2");
 const controllerEnd = source.indexOf("function isTodayTransferSumRequest", controllerStart);
@@ -40,12 +41,15 @@ assert(handler.includes("G.messageLooksLikePendingImageUpload(e)"), "a filename-
 assert(handler.includes("if (G.isPersonalTarsRoom(e && e.room))"), "opaque mobile upload placeholders must still enter the short settle loop");
 assert(handler.includes("hasInitialMediaSignal ? 16 : 6"), "explicit uploads need the long settle window and opaque placeholders need the former short fallback");
 assert(handler.includes("...settledMessage,\n        ...originalEvent"), "settled media must be merged without losing authoritative sender and room fields");
+assert(handler.includes("id: settledHasImages ? settledMessage && settledMessage.id"), "a sibling upload must use its canonical settled message id");
 assert(handler.includes("settledMessage.files.length ? settledMessage.files : originalEvent"), "empty settled arrays must not overwrite media from the original event");
 assert(handler.includes("hasInitialMediaSignal ? 750 : 400, hasInitialMediaSignal"), "the resolver must distinguish a real upload failure from an opaque text probe");
 assert(handler.includes("G.isPersonalTarsRoom(e && e.room) && resolvedImages.length > 0"), "every branch must use messageImageFiles as the single image detector");
 assert(handler.includes("!G.messageImageFiles(e).length && recentPostMessageIds.has(messageId)"), "an attachment-only image event must never be suppressed by message-id deduplication");
 assert(handler.includes("await this.clearTransferReportIntent(s, e.room)"), "receipt intent must be cleared after successful processing");
 assert(handler.includes("ФАЙЛ НЕ ОБРАБОТАН"), "a terminal upload failure must be visible to the master");
+assert(handler.includes("POST_PROBE_PREVIEW_FALLBACK"), "an imageUrl-only upload must enter guarded fallback processing after the original wait");
+assert(!handler.includes("POST_PROBE_SKIP_PREVIEW_ONLY"), "an imageUrl-only upload must not be silently discarded");
 assert(handler.includes("recentPostUploadIds.delete(uploadEventKey)"), "failed processing must release local upload deduplication immediately");
 
 const checkStart = source.indexOf("async checkPostMessageSent");

@@ -22,6 +22,7 @@ const requiredDate = '2026-08-27';
 const yandexCandidate = {
   receiptDate: requiredDate,
   receiptAmount: 300,
+  receiptAmountSource: 'yandex:page',
   text: 'Сумма в валюте операции 300 руб.'
 };
 const openAiCandidate = {
@@ -43,11 +44,21 @@ assert.strictEqual(
 const focusedOpenAiCandidate = { ...openAiCandidate, receiptAmountSource: 'openai:gpt-4.1' };
 assert.strictEqual(
   receiptAmountsDisagree([yandexCandidate, openAiCandidate, focusedOpenAiCandidate], requiredDate),
-  true
+  true,
+  'two correlated OpenAI models must not override a conflicting Yandex amount'
+);
+assert.strictEqual(
+  receiptAmountsDisagree([
+    yandexCandidate,
+    openAiCandidate,
+    { ...focusedOpenAiCandidate, receiptAmount: 1900 }
+  ], requiredDate),
+  true,
+  'three different readings without a consensus must remain in control'
 );
 assert.match(
   source,
-  /!receiptAmountsDisagree\(candidates, requiredDate\) && candidates\.find/
+  /!receiptAmountsDisagree\(candidates, requiredDate, !hasYandex\) && candidates\.find/
 );
 
-console.log('PASS: conflicting OCR and vision amounts cannot be auto-accepted');
+console.log('PASS: cross-provider consensus resolves amounts and keeps correlated conflicts in control');

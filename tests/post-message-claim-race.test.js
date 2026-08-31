@@ -59,6 +59,14 @@ const message = { id: 'message-1', files: [{ _id: 'upload-7000', type: 'image/jp
   await context.completePostMessageClaim(message, winners[0], persistence, logger);
   const afterComplete = await context.claimPostMessage(message, read, persistence, logger);
   assert.strictEqual(afterComplete, '', 'completed upload must never be claimed again');
+
+  const originalVariant = { id: 'message-preview-pair', files: [{ _id: 'original-upload', type: 'image/jpeg' }] };
+  const previewVariant = { id: 'message-preview-pair', files: [{ _id: 'preview-upload', type: 'image/jpeg' }] };
+  const originalToken = await context.claimPostMessage(originalVariant, read, persistence, logger);
+  assert.ok(originalToken, 'original representation must acquire a claim');
+  await context.completePostMessageClaim(originalVariant, originalToken, persistence, logger);
+  const previewToken = await context.claimPostMessage(previewVariant, read, persistence, logger);
+  assert.strictEqual(previewToken, '', 'preview and original ids of one message must share a completed claim');
   console.log('PASS: concurrent post-message claim allows one financial processor');
 })().catch((error) => {
   console.error(error);

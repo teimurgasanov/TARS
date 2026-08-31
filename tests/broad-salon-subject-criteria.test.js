@@ -6,8 +6,9 @@ const start = source.indexOf('const WORK_PHOTO_VISUAL_CRITERIA');
 const end = source.indexOf('async function requestOpenAiWorkPhotoCheckUncached', start);
 const criteria = source.slice(start, end);
 
-assert.match(criteria, /Не требуй доказательства изменения до\/после/);
-assert.match(criteria, /одного чёткого кадра клиента или соответствующей зоны достаточно/);
-assert.match(criteria, /человек или релевантная зона салонной услуги — фото работы/);
+assert.match(criteria, /Не требуй коллаж до\/после/);
+assert.match(criteria, /человек и релевантная зона услуги должны быть реально видимы/);
+assert.match(criteria, /При сомнении не подтверждай фото работы/);
+assert.match(criteria, /читаемый документ или экран с банковскими реквизитами/);
 
-console.log('PASS: a person or relevant salon body area is accepted without before/after proof');
+console.log('PASS: work photos require a visible client and salon service area');

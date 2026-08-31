@@ -27,12 +27,32 @@ assert.strictEqual(receiptAmountHasIndependentConfirmation([first, secondMatchin
 assert.strictEqual(receiptAmountsDisagree([first, secondWrong], date), true);
 assert.strictEqual(receiptAmountsDisagree([first, secondMatching], date), false);
 
+const yandexOutlier = { receiptDate: date, receiptAmount: 1300, receiptAmountSource: 'yandex:page' };
+assert.strictEqual(
+  receiptAmountsDisagree([first, secondMatching, yandexOutlier], date),
+  true,
+  'two correlated OpenAI reads must not override a conflicting Yandex amount'
+);
+
+assert.strictEqual(
+  receiptAmountHasIndependentConfirmation([first, secondMatching], first, date, false),
+  false,
+  'when Yandex is configured, an unavailable OCR response must not allow two OpenAI models to confirm a wrong amount'
+);
+
+const yandexMatching = { receiptDate: date, receiptAmount: 2900, receiptAmountSource: 'yandex:page' };
+assert.strictEqual(
+  receiptAmountsDisagree([first, secondWrong, yandexMatching], date),
+  false,
+  'matching Yandex and OpenAI reads form cross-provider confirmation'
+);
+
 const validationStart = source.indexOf('async function validateReceiptDate');
 const validationEnd = source.indexOf('async function validateReceiptStrict', validationStart);
 const validation = source.slice(validationStart, validationEnd);
 assert.doesNotMatch(validation, /if \(!aiCandidate \|\| !aiCandidateStronglyAcceptsReceipt/);
 assert.match(validation, /const amountCandidate = await requestOpenAiReceiptCheck/);
 assert.match(validation, /СУММЫ ЧЕКА НЕ СОВПАЛИ/);
-assert.match(validation, /if \(receiptAmountsDisagree\(candidates, requiredDate\)\) return void 0/);
+assert.match(validation, /if \(receiptAmountsDisagree\(candidates, requiredDate, !hasYandex\)\) return void 0/);
 
-console.log('PASS: every receipt amount needs an independent matching read, without amount thresholds');
+console.log('PASS: receipt amounts use independent consensus without amount thresholds');

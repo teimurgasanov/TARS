@@ -6,6 +6,10 @@ const summaryStart = source.indexOf('async function confirmedTransferSummaryForU
 const summaryEnd = source.indexOf('function masterTransferSummaryAssociation', summaryStart);
 const summary = source.slice(summaryStart, summaryEnd);
 assert.match(summary, /entry\.source !== "rejected"/);
+assert.match(summary, /confirmedReceiptKeys/);
+assert.match(summary, /masterTransferLedgerAssociation\(userId, workday\)/);
+assert.match(summary, /acceptedKey && confirmedReceiptKeys\[acceptedKey\]/);
+assert.match(summary, /sameReceiptMessageImage\(confirmed, entry\)/);
 assert.match(summary, /pendingReview \+= 1/);
 assert.match(summary, /pendingReview \}/);
 

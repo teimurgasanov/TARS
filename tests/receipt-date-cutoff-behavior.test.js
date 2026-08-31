@@ -15,7 +15,8 @@ function block(name){
 assert(block('dateFromEntry').includes('receiptCalendarDateForTimestamp(entry && entry.uploadedAt, config)'));
 assert(block('confirmedTransferSummaryForUser').includes('targetDate || expectedReceiptDate(config)'));
 assert(block('confirmedTransferSummaryForUser').includes('const index = await readIndex(read, PROTECTED_ROOMS.kassa.index)'));
-assert(!block('confirmedTransferSummaryForUser').includes('masterTransferLedgerAssociation(userId, workday)'));
+assert(block('confirmedTransferSummaryForUser').includes('masterTransferLedgerAssociation(userId, workday)'));
+assert(block('confirmedTransferSummaryForUser').includes('for (const entry of index.photos)'));
 assert(block('publishMasterTransferSummaryUnlocked').includes('expectedReceiptDate(config)'));
 assert(block('resolveTransferSummaryUser').includes('expectedReceiptDate(config || {})'));
 assert(block('sendMasterTransferSummaryRequest').includes('const targetDate = expectedReceiptDate(config);'));
