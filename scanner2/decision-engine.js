@@ -79,21 +79,23 @@ function makeDecision(resolved, context = {}) {
     return makeResult(resolved, identity, Decision.REVIEW, ReasonCode.STATUS_UNKNOWN);
   }
   if (resolved.date === null) {
+    const internallyAmbiguousDate = resolved.internalAmbiguities.some((item) => item.field === "date");
     const lowQualityDate = resolved.candidateCounts.date > 0 && resolved.materialCounts.date === 0;
     return makeResult(
       resolved,
       identity,
       Decision.REVIEW,
-      lowQualityDate ? ReasonCode.INSUFFICIENT_EVIDENCE : ReasonCode.DATE_MISSING
+      internallyAmbiguousDate || lowQualityDate ? ReasonCode.INSUFFICIENT_EVIDENCE : ReasonCode.DATE_MISSING
     );
   }
   if (resolved.amount === null) {
+    const internallyAmbiguousAmount = resolved.internalAmbiguities.some((item) => item.field === "amount");
     const lowQualityAmount = resolved.candidateCounts.amount > 0 && resolved.materialCounts.amount === 0;
     return makeResult(
       resolved,
       identity,
       Decision.REVIEW,
-      lowQualityAmount ? ReasonCode.INSUFFICIENT_EVIDENCE : ReasonCode.AMOUNT_MISSING
+      internallyAmbiguousAmount || lowQualityAmount ? ReasonCode.INSUFFICIENT_EVIDENCE : ReasonCode.AMOUNT_MISSING
     );
   }
 
