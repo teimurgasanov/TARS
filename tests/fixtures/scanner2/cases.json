@@ -1,0 +1,154 @@
+[
+  {
+    "name": "normal receipt without durable identity",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 80000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.88, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 80000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.91, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": {},
+    "expected": { "decision": "ACCEPT", "reasonCode": "RECEIPT_CONFIRMED", "date": "2026-08-30", "amount": { "minorUnits": 80000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "identity": null, "conflicts": [] }
+  },
+  {
+    "name": "confirmed bank transfer",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_TRANSFER", "date": "2026-08-30", "amount": { "minorUnits": 150000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.86, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_TRANSFER", "date": "2026-08-30", "amount": { "minorUnits": 150000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.9, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": { "transactionId": "TX-9001", "date": "2026-08-30", "amount": { "minorUnits": 150000, "currency": "RUB" } },
+    "expected": { "decision": "ACCEPT", "reasonCode": "BANK_TRANSFER_CONFIRMED", "date": "2026-08-30", "amount": { "minorUnits": 150000, "currency": "RUB" }, "documentType": "BANK_TRANSFER", "identity": "scanner2:v1:txn:tx9001|2026-08-30|150000", "conflicts": [] }
+  },
+  {
+    "name": "conflicting amount 300 versus 3",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 30000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.87, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 300, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.93, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": {},
+    "expected": { "decision": "REVIEW", "reasonCode": "AMOUNT_CONFLICT", "date": "2026-08-30", "amount": null, "documentType": "BANK_RECEIPT", "identity": null, "conflicts": ["AMOUNT_CONFLICT"] }
+  },
+  {
+    "name": "conflicting dates",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_RECEIPT", "date": "2026-08-29", "amount": { "minorUnits": 120000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.86, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 120000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.9, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": {},
+    "expected": { "decision": "REVIEW", "reasonCode": "DATE_CONFLICT", "date": null, "amount": { "minorUnits": 120000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "identity": null, "conflicts": ["DATE_CONFLICT"] }
+  },
+  {
+    "name": "confirmed document from yesterday",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_RECEIPT", "date": "2026-08-29", "amount": { "minorUnits": 120000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.88, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_RECEIPT", "date": "2026-08-29", "amount": { "minorUnits": 120000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.9, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": {},
+    "expected": { "decision": "REJECT", "reasonCode": "DATE_OUTSIDE_ALLOWED_PERIOD", "date": "2026-08-29", "amount": { "minorUnits": 120000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "identity": null, "conflicts": [] }
+  },
+  {
+    "name": "operation is still pending",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_TRANSFER", "date": "2026-08-30", "amount": { "minorUnits": 60000, "currency": "RUB" }, "status": "PENDING", "confidence": 0.89, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_TRANSFER", "date": "2026-08-30", "amount": { "minorUnits": 60000, "currency": "RUB" }, "status": "PENDING", "confidence": 0.9, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": { "transactionId": "PENDING-101", "date": "2026-08-30", "amount": { "minorUnits": 60000, "currency": "RUB" } },
+    "expected": { "decision": "REVIEW", "reasonCode": "OPERATION_PENDING", "date": "2026-08-30", "amount": { "minorUnits": 60000, "currency": "RUB" }, "documentType": "BANK_TRANSFER", "identity": "scanner2:v1:txn:pending101|2026-08-30|60000", "conflicts": [] }
+  },
+  {
+    "name": "unknown image",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "VISION", "providerGroup": "openai", "documentType": "UNKNOWN", "date": null, "amount": null, "status": "UNKNOWN", "confidence": 0.76, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": {},
+    "expected": { "decision": "REVIEW", "reasonCode": "DOCUMENT_TYPE_AMBIGUOUS", "date": null, "amount": null, "documentType": "UNKNOWN", "identity": null, "conflicts": [] }
+  },
+  {
+    "name": "bad OCR with low quality critical fields",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 700, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.85, "fieldConfidence": { "date": 0.35, "amount": 0.3 }, "reference": "ocr-noisy" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": {},
+    "expected": { "decision": "REVIEW", "reasonCode": "INSUFFICIENT_EVIDENCE", "date": null, "amount": null, "documentType": "BANK_RECEIPT", "identity": null, "conflicts": [] }
+  },
+  {
+    "name": "same document from independent sources",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 130000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.9, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 130000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.88, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": { "documentId": "SYNTHETIC-42", "date": "2026-08-30", "amount": { "minorUnits": 130000, "currency": "RUB" } },
+    "expected": { "decision": "ACCEPT", "reasonCode": "RECEIPT_CONFIRMED", "date": "2026-08-30", "amount": { "minorUnits": 130000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "identity": "scanner2:v1:id:synthetic42|2026-08-30|130000", "conflicts": [] }
+  },
+  {
+    "name": "potential duplicate without durable identity",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 90000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.85, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 90000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.88, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "POSSIBLE", "reference": "synthetic-match" },
+    "identityInput": {},
+    "expected": { "decision": "REVIEW", "reasonCode": "IDENTITY_INCOMPLETE", "date": "2026-08-30", "amount": { "minorUnits": 90000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "identity": null, "conflicts": [] }
+  },
+  {
+    "name": "confirmed identity duplicate",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_TRANSFER", "date": "2026-08-30", "amount": { "minorUnits": 180000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.9, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_TRANSFER", "date": "2026-08-30", "amount": { "minorUnits": 180000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.91, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "CONFIRMED", "reference": "receipt-index-entry" },
+    "identityInput": { "transactionId": "DUP-202", "date": "2026-08-30", "amount": { "minorUnits": 180000, "currency": "RUB" } },
+    "expected": { "decision": "REJECT", "reasonCode": "DUPLICATE_CONFIRMED", "date": "2026-08-30", "amount": { "minorUnits": 180000, "currency": "RUB" }, "documentType": "BANK_TRANSFER", "identity": "scanner2:v1:txn:dup202|2026-08-30|180000", "conflicts": [] }
+  },
+  {
+    "name": "failed operation",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_TRANSFER", "date": "2026-08-30", "amount": { "minorUnits": 100000, "currency": "RUB" }, "status": "FAILED", "confidence": 0.87, "reference": "ocr-page" },
+      { "source": "VISION", "providerGroup": "openai", "documentType": "BANK_TRANSFER", "date": "2026-08-30", "amount": { "minorUnits": 100000, "currency": "RUB" }, "status": "FAILED", "confidence": 0.89, "reference": "vision-primary" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": {},
+    "expected": { "decision": "REJECT", "reasonCode": "OPERATION_FAILED", "date": "2026-08-30", "amount": { "minorUnits": 100000, "currency": "RUB" }, "documentType": "BANK_TRANSFER", "identity": null, "conflicts": [] }
+  },
+  {
+    "name": "correlated OCR passes are not independent confirmation",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 280000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.95, "reference": "ocr-page" },
+      { "source": "OCR", "providerGroup": "yandex", "documentType": "BANK_RECEIPT", "date": "2026-08-30", "amount": { "minorUnits": 280000, "currency": "RUB" }, "status": "SUCCESS", "confidence": 0.97, "reference": "ocr-table" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": {},
+    "expected": { "decision": "REVIEW", "reasonCode": "INSUFFICIENT_EVIDENCE", "date": "2026-08-30", "amount": { "minorUnits": 280000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "identity": null, "conflicts": [] }
+  },
+  {
+    "name": "clearly non financial image",
+    "acceptedDates": ["2026-08-30"],
+    "observations": [
+      { "source": "VISION", "providerGroup": "openai", "documentType": "NON_FINANCIAL_IMAGE", "date": null, "amount": null, "status": "UNKNOWN", "confidence": 0.93, "reference": "vision-primary" },
+      { "source": "MANUAL", "providerGroup": "fixture-review", "documentType": "NON_FINANCIAL_IMAGE", "date": null, "amount": null, "status": "UNKNOWN", "confidence": 1, "reference": "fixture-label" }
+    ],
+    "duplicateEvidence": { "state": "NONE", "reference": null },
+    "identityInput": {},
+    "expected": { "decision": "REJECT", "reasonCode": "NOT_FINANCIAL_DOCUMENT", "date": null, "amount": null, "documentType": "NON_FINANCIAL_IMAGE", "identity": null, "conflicts": [] }
+  }
+]
