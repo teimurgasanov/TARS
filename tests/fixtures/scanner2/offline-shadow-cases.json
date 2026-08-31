@@ -1,0 +1,89 @@
+{
+  "schemaVersion": "scanner2-shadow-v1",
+  "datasetId": "synthetic-shadow-001",
+  "provenance": "SYNTHETIC",
+  "cases": [
+    {
+      "caseId": "case-match-accept",
+      "acceptedDates": ["2026-08-30"],
+      "legacyOcrResults": [
+        { "passId": "ocr-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 80000, "currency": "RUB" }, "documentType": "bank_receipt", "status": "success", "qualitySignal": 0.86 }
+      ],
+      "legacyVisionResults": [
+        { "passId": "vision-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 80000, "currency": "RUB" }, "documentType": "receipt_on_phone", "status": "success", "qualitySignal": 0.9 }
+      ],
+      "duplicateEvidence": { "state": "none", "referenceToken": null },
+      "scannerIdentityEvidence": null,
+      "legacyDecision": { "decision": "ACCEPT", "reasonCode": "RECEIPT_CONFIRMED", "date": "2026-08-30", "amount": { "minorUnits": 80000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "duplicateState": "NONE", "strongIdentityEvidence": null },
+      "groundTruth": { "decision": "ACCEPT", "date": "2026-08-30", "amount": { "minorUnits": 80000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "duplicateState": "NONE" }
+    },
+    {
+      "caseId": "case-accept-review",
+      "acceptedDates": ["2026-08-30"],
+      "legacyOcrResults": [
+        { "passId": "ocr-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 90000, "currency": "RUB" }, "documentType": "bank_receipt", "status": "success", "qualitySignal": 0.92 }
+      ],
+      "legacyVisionResults": [],
+      "duplicateEvidence": { "state": "NONE", "referenceToken": null },
+      "scannerIdentityEvidence": null,
+      "legacyDecision": { "decision": "ACCEPT", "reasonCode": "RECEIPT_CONFIRMED", "date": "2026-08-30", "amount": { "minorUnits": 90000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "duplicateState": "NONE", "strongIdentityEvidence": null },
+      "groundTruth": null
+    },
+    {
+      "caseId": "case-accept-reject",
+      "acceptedDates": ["2026-08-30"],
+      "legacyOcrResults": [
+        { "passId": "ocr-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 100000, "currency": "RUB" }, "documentType": "bank_transfer", "status": "failed", "qualitySignal": 0.88 }
+      ],
+      "legacyVisionResults": [
+        { "passId": "vision-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 100000, "currency": "RUB" }, "documentType": "bank_transfer", "status": "failed", "qualitySignal": 0.91 }
+      ],
+      "duplicateEvidence": { "state": "NONE", "referenceToken": null },
+      "scannerIdentityEvidence": null,
+      "legacyDecision": { "decision": "ACCEPT", "reasonCode": "LEGACY_ACCEPTED", "date": "2026-08-30", "amount": { "minorUnits": 100000, "currency": "RUB" }, "documentType": "BANK_TRANSFER", "duplicateState": "NONE", "strongIdentityEvidence": null },
+      "groundTruth": null
+    },
+    {
+      "caseId": "case-reject-accept",
+      "acceptedDates": ["2026-08-30"],
+      "legacyOcrResults": [
+        { "passId": "ocr-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 130000, "currency": "RUB" }, "documentType": "bank_transfer", "status": "success", "qualitySignal": 0.89 }
+      ],
+      "legacyVisionResults": [
+        { "passId": "vision-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 130000, "currency": "RUB" }, "documentType": "bank_transfer", "status": "success", "qualitySignal": 0.9 }
+      ],
+      "duplicateEvidence": { "state": "NONE", "referenceToken": null },
+      "scannerIdentityEvidence": { "kind": "TRANSACTION_ID_TOKEN", "token": "anon-txn-a" },
+      "legacyDecision": { "decision": "REJECT", "reasonCode": "LEGACY_REJECTED", "date": "2026-08-30", "amount": { "minorUnits": 130000, "currency": "RUB" }, "documentType": "BANK_TRANSFER", "duplicateState": "NONE", "strongIdentityEvidence": { "kind": "TRANSACTION_ID_TOKEN", "token": "anon-txn-a" } },
+      "groundTruth": { "decision": "ACCEPT", "date": "2026-08-30", "amount": { "minorUnits": 130000, "currency": "RUB" }, "documentType": "BANK_TRANSFER", "duplicateState": "NONE" }
+    },
+    {
+      "caseId": "case-review-accept",
+      "acceptedDates": ["2026-08-30"],
+      "legacyOcrResults": [
+        { "passId": "ocr-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 150000, "currency": "RUB" }, "documentType": "bank_receipt", "status": "success", "qualitySignal": 0.85 }
+      ],
+      "legacyVisionResults": [
+        { "passId": "vision-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 150000, "currency": "RUB" }, "documentType": "bank_receipt", "status": "success", "qualitySignal": 0.88 }
+      ],
+      "duplicateEvidence": { "state": "NONE", "referenceToken": null },
+      "scannerIdentityEvidence": null,
+      "legacyDecision": { "decision": "REVIEW", "reasonCode": "LEGACY_REVIEW", "date": "2026-08-30", "amount": { "minorUnits": 150000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "duplicateState": "NONE", "strongIdentityEvidence": null },
+      "groundTruth": null
+    },
+    {
+      "caseId": "case-duplicate-difference",
+      "acceptedDates": ["2026-08-30"],
+      "legacyOcrResults": [
+        { "passId": "ocr-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 180000, "currency": "RUB" }, "documentType": "bank_receipt", "status": "success", "qualitySignal": 0.86 }
+      ],
+      "legacyVisionResults": [
+        { "passId": "vision-pass-1", "date": "2026-08-30", "amount": { "minorUnits": 180000, "currency": "RUB" }, "documentType": "bank_receipt", "status": "success", "qualitySignal": 0.89 }
+      ],
+      "duplicateEvidence": { "state": "POSSIBLE", "referenceToken": "anon-match-a" },
+      "scannerIdentityEvidence": null,
+      "legacyDecision": { "decision": "REVIEW", "reasonCode": "IDENTITY_INCOMPLETE", "date": "2026-08-30", "amount": { "minorUnits": 180000, "currency": "RUB" }, "documentType": "BANK_RECEIPT", "duplicateState": "NONE", "strongIdentityEvidence": null },
+      "groundTruth": null
+    }
+  ]
+}

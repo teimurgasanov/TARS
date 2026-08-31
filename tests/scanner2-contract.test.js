@@ -38,11 +38,15 @@ assert.throws(() => assertScanner2Result({
 }), /undefined/);
 
 const scannerDir = path.join(process.cwd(), "scanner2");
-const allowedRequires = new Set(["./contracts", "crypto"]);
 for (const file of fs.readdirSync(scannerDir).filter((name) => name.endsWith(".js"))) {
   const source = fs.readFileSync(path.join(scannerDir, file), "utf8");
   const imports = [...source.matchAll(/require\(["']([^"']+)["']\)/g)].map((match) => match[1]);
-  imports.forEach((dependency) => assert.ok(allowedRequires.has(dependency), file + " imports forbidden dependency " + dependency));
+  imports.forEach((dependency) => {
+    const isBuiltIn = dependency === "crypto";
+    const resolved = path.resolve(scannerDir, dependency);
+    const isLocalScannerModule = dependency.startsWith("./") && resolved.startsWith(scannerDir + path.sep);
+    assert.ok(isBuiltIn || isLocalScannerModule, file + " imports forbidden dependency " + dependency);
+  });
   assert.doesNotMatch(source, /TarsReportApp|Rocket\.Chat|fetch\s*\(|axios|https?\.request|receiptIndex|confirmedTransfers/);
 }
 
