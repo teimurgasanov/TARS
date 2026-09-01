@@ -77,6 +77,49 @@ The workflow now installs `zsh` explicitly through Ubuntu's package manager
 before syntax validation. This is a CI-environment correction only; it does not
 alter the canonical build command or any application source.
 
+## Successful GitHub Actions confirmation
+
+The corrected workflow completed successfully for commit
+`693ee72a2a4853cd63136ce789f019e37ef88007`:
+
+- workflow: `Scanner 2.0 Packaging CI`;
+- run ID: `33471730799`;
+- run number: `2`;
+- event: `push`;
+- status: `completed`;
+- conclusion: `success`;
+- run URL:
+  `https://github.com/teimurgasanov/TARS/actions/runs/33471730799`.
+
+The single job `Verify deterministic package` completed successfully. Its
+steps were:
+
+1. Set up job — success.
+2. Checkout reviewed commit — success.
+3. Set up Node.js 20 — success.
+4. Install required shell — success.
+5. Capture protected source hashes — success.
+6. Install pinned build dependency — success.
+7. Validate scripts and working tree — success.
+8. Run Scanner 2.0 tests — success.
+9. Run 77 legacy TARS tests — success.
+10. Build canonical package — success.
+11. Verify package and source integrity — success.
+12. Write verification summary — success.
+13. Upload verification artifact — success.
+14. Post Set up Node.js 20 — success.
+15. Post Checkout reviewed commit — success.
+16. Complete job — success.
+
+GitHub Actions reported:
+
+- Scanner 2.0 test files: `15`;
+- legacy TARS test files: `77`;
+- bundled `TarsReportApp.js` SHA-256:
+  `1c55207d44e4a5875a0d07f32d2a1d522e440e3437796e4cc348e4ff346a0747`;
+- ZIP SHA-256:
+  `47baaf92d560dd6ebdd1701634fdb0a7e735270e1f5f921c880481debbe749d5`.
+
 ## Package verification
 
 ZIP contents were exactly:
@@ -135,10 +178,8 @@ unchanged at SHA-256
 
 ## Next step
 
-After this report and workflow are committed and pushed, wait for the dedicated
-`Scanner 2.0 Packaging CI` run. If it passes, Stage 3B-1.5 is complete. Do not
-merge, deploy, modify `develop`/`main`, or begin runtime Shadow Recorder
-integration without separate authorization.
+Stage 3B-1.5 is complete. Do not merge, deploy, modify `develop`/`main`, or
+begin runtime Shadow Recorder integration without separate authorization.
 
 The immutable implementation commit SHA is reported by Git after commit and in
 the GitHub Actions summary; a report cannot embed its own SHA without changing
