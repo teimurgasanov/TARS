@@ -9,6 +9,7 @@ on:
       - fix/personal-rejected-receipt-control-route
       - fix/receipt-date-early-mismatch
       - integration/date-mismatch-on-current-develop
+      - perf/receipt-primary-reuse-status
   pull_request:
   workflow_dispatch:
 
@@ -36,6 +37,8 @@ jobs:
       github.base_ref == 'fix/receipt-date-early-mismatch' ||
       github.head_ref == 'integration/date-mismatch-on-current-develop' ||
       github.base_ref == 'integration/date-mismatch-on-current-develop'
+      || github.head_ref == 'perf/receipt-primary-reuse-status'
+      || github.base_ref == 'perf/receipt-primary-reuse-status'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

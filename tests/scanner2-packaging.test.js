@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "009a5c0090f63e5eb7739d23530c6ed1f691d9f0678659c31a42743d53bc0f25";
+const expectedSourceSha = "1297f47189532ad68a9e4afae01ee838010605d74ad9e1980f08099b36b6ae3d";
 const expectedManifestSha = "e1c6e5f99bac1d47fb8a5fc5bdc48ac29829145c0144b77cfd85dd21ce19a236";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
@@ -106,6 +106,11 @@ execFileSync(process.execPath, [path.join(root, "tests", "scanner2-personal-reje
   stdio: "pipe"
 });
 execFileSync(process.execPath, [path.join(root, "tests", "receipt-date-early-mismatch.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "receipt-primary-reuse-status.runtime.js")], {
   cwd: root,
   encoding: "utf8",
   stdio: "pipe"

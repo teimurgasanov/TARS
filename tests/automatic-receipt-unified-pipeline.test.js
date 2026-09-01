@@ -14,7 +14,7 @@ assert.match(rejectBlock, /for \(const messageFile of imageFiles\)/, 'every atta
 assert.match(rejectBlock, /protectedRoomForPersonalFile/, 'automatic content classification remains enabled');
 assert.match(rejectBlock, /return acceptedEntries\.length \? "processed" : false/, 'accepted receipts stop fallback prompts');
 assert.doesNotMatch(executeBlock, /fastForwardPersonalReportPhotos/, 'largest-only photo pre-pass cannot consume receipt batches');
-assert.match(executeBlock, /processPersonalMediaV2\(e, n, s, r, this\.getLogger\(\), t, i, explicitTransferIntent \? "receipt" : explicitPhotoIntent \? "photo" : ""\)/, 'all personal images enter media-v2');
+assert.match(executeBlock, /processPersonalMediaV2\(e, n, s, r, this\.getLogger\(\), t, i, explicitTransferIntent \? "receipt" : explicitPhotoIntent \? "photo" : "", Boolean\(postMessageClaimToken\)\)/, 'all personal images enter media-v2 and only the claim winner may publish processing status');
 assert.doesNotMatch(executeBlock, /G\.rejectDuplicateMessage/, 'the event handler cannot bypass media-v2');
 
 console.log('PASS: receipts and photos are automatically processed through one all-file pipeline');

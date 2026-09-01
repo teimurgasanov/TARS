@@ -248,9 +248,10 @@ function onlyRecord(harness) {
     assert.ok(!JSON.stringify(snapshot).includes("private-existing-identity"));
   }
 
-  // F. Cache hits return the original promise, including its sanitized sidecar.
+  // F. Cache hits await the original promise, including its sanitized sidecar;
+  // instrumentation may observe the result but must not call providers again.
   const cacheBlock = source.slice(source.indexOf("const strictReceiptValidationCache"), source.indexOf("const shadowRuntimeCircuitBreaker"));
-  assert.match(cacheBlock, /return cached\.promise/);
+  assert.match(cacheBlock, /const result = await cached\.promise;[\s\S]*return result;/);
   assert.doesNotMatch(cacheBlock, /cached[\s\S]{0,180}requestReceiptOcr|cached[\s\S]{0,180}requestOpenAiReceiptCheck/);
   assert.match(source, /shadowEvidence:\s*\{[\s\S]*legacyOcrResults:[\s\S]*legacyVisionResults:/);
 

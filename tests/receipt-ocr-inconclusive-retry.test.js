@@ -10,7 +10,7 @@ assert.match(block, /transientOcrFailure/);
 assert.match(block, /СУММА ЧЕКА НЕ РАСПОЗНАНА/);
 assert.match(block, /ДАТА ЧЕКА НЕ РАСПОЗНАНА/);
 assert.match(block, /setTimeout\(resolve, 1500\)/);
-assert.match(block, /await validateReceiptDate\(file, content, http, config, logger, 0\)/g);
+assert.match(block, /await validateReceiptDate\(file, content, http, config, logger, 0, stageContext\)/g);
 assert.match(block, /retried && retried\.ok \? retried : first/);
 
 console.log('PASS: inconclusive receipt OCR is retried before control');

@@ -146,6 +146,7 @@ function runtimeScenario(guard, mode, suffix) {
     }
   };
   const publishedMessages = [];
+  const publishedMessageById = new Map();
   const deletedMessages = [];
   const controlUploads = [];
   let latestControlUploadId = "";
@@ -219,8 +220,8 @@ function runtimeScenario(guard, mode, suffix) {
         newPlainTextObject(text) { return { text }; }
       };
     },
-    startMessage() {
-      const state = {};
+    startMessage(initial = {}) {
+      const state = { ...initial };
       return {
         setSender(value) { state.sender = value; return this; },
         setRoom(value) { state.room = value; return this; },
@@ -230,8 +231,11 @@ function runtimeScenario(guard, mode, suffix) {
       };
     },
     async finish(builder) {
-      publishedMessages.push(builder.__state || {});
-      return `published-${publishedMessages.length}`;
+      const id = `published-${publishedMessages.length + 1}`;
+      const published = { id, ...(builder.__state || {}) };
+      publishedMessages.push(published);
+      publishedMessageById.set(id, published);
+      return id;
     }
   };
   const modify = {
@@ -268,8 +272,8 @@ function runtimeScenario(guard, mode, suffix) {
     },
     getUpdater() {
       return {
-        async message() {
-          return { getMessage() { return undefined; } };
+        async message(id) {
+          return { getMessage() { return publishedMessageById.get(String(id)); } };
         }
       };
     }
@@ -323,8 +327,11 @@ async function receiptIndex(guard, scenario) {
   );
   assert.strictEqual(rejectedSummary.count, 0);
   assert.strictEqual(rejectedSummary.total, 0);
-  assert.strictEqual(rejected.receiptCalls(), 4, "one classifier call plus one strict three-pass read is expected");
+  assert.strictEqual(rejected.receiptCalls(), 4, "an inconclusive classifier must preserve the legacy strict primary plus focused checks");
   assert.strictEqual(rejected.dedicatedCalls(), 2);
+  const rejectedStatuses = rejected.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…");
+  assert.strictEqual(rejectedStatuses.length, 1, "rejected receipt must publish one processing status");
+  assert.ok(rejected.deletedMessages.includes(rejectedStatuses[0].id), "rejected result must clear its processing status");
 
   // D. A repeated event for the same rejected message must be idempotent.
   await rejectedGuard.processPersonalMediaV2(
@@ -335,6 +342,7 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(index.photos.length, 1);
   assert.strictEqual(rejected.controlUploads.length, 1, "the same rejected receipt must not be republished");
   assert.strictEqual(rejected.receiptCalls(), 4, "repeat event must not call providers again");
+  assert.strictEqual(rejected.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…").length, 1, "repeat event must not duplicate the status");
 
   // Combined integration. The initial classifier remains unknown, then
   // independent Yandex and primary OpenAI agree on the previous date. The
@@ -355,9 +363,9 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(consensus.controlUploads.length, 1);
   assert.strictEqual(consensus.controlUploads[0].room.id, consensus.controlRoom.id);
   assert.ok(consensus.deletedMessages.includes(consensus.message.id), "existing rejected route must preserve source-chat deletion behavior");
-  assert(!consensus.providerCalls.includes("openai:amount-focus"));
-  assert(!consensus.providerCalls.includes("openai:date-focus"));
-  assert.strictEqual(consensus.receiptCalls(), 2, "one initial classifier and one primary OpenAI validation call are expected");
+  assert(!consensus.providerCalls.includes("openai:amount-focus"), `unexpected provider calls: ${consensus.providerCalls.join(", ")}`);
+  assert(!consensus.providerCalls.includes("openai:date-focus"), `unexpected provider calls: ${consensus.providerCalls.join(", ")}`);
+  assert.strictEqual(consensus.receiptCalls(), 2, "inconclusive classifier must not replace the positive primary used by early mismatch");
   const consensusSummary = await consensusGuard.confirmedTransferSummaryForUser(
     consensus.read, consensus.config, consensus.owner.id, consensus.requiredDate, [], undefined, consensus.message.room.id
   );
@@ -376,6 +384,7 @@ async function receiptIndex(guard, scenario) {
   index = await receiptIndex(unknownGuard, unknown);
   assert.strictEqual(index.photos.length, 0);
   assert.strictEqual(unknown.controlUploads.length, 0);
+  assert.strictEqual(unknown.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…").length, 0, "ordinary unknown images must not publish receipt status");
 
   // C. A valid receipt through the same fallback keeps the existing accepted
   // index and 1 / 1200 RUB running-total path.
@@ -395,6 +404,9 @@ async function receiptIndex(guard, scenario) {
   assert.ok(summaryMessages.some((text) => /Чеков: 1/.test(text) && /Общая сумма чеков: 1 200 ₽/.test(text)));
   assert.strictEqual(accepted.receiptCalls(), 3, "valid fallback must reuse its strict two-pass result");
   assert.strictEqual(accepted.dedicatedCalls(), 2);
+  const acceptedStatuses = accepted.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…");
+  assert.strictEqual(acceptedStatuses.length, 1, "accepted receipt must publish one processing status");
+  assert.ok(accepted.deletedMessages.includes(acceptedStatuses[0].id), "accepted result must clear its processing status");
 
   console.log("PASS: personal fallback routes confirmed rejected receipts once to control without affecting unknown images or accepted totals");
 })().catch((error) => {

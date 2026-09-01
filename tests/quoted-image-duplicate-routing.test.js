@@ -70,6 +70,7 @@ const processPersonalMediaV2 = new Function(
   'messageImageFiles',
   'fastForwardPersonalReportPhotos',
   'rejectDuplicateMessage',
+  'createReceiptProcessingStatusManager',
   `${controllerBlock}; return processPersonalMediaV2;`
 )(
   () => true,
@@ -79,7 +80,8 @@ const processPersonalMediaV2 = new Function(
     duplicateChecks += 1;
     duplicateImageIds = messageImageFiles(message).map((file) => file._id);
     return 'processed';
-  }
+  },
+  () => ({ markAll() {}, async clearAll() {} })
 );
 
 (async () => {
