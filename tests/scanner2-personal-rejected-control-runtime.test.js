@@ -18,6 +18,7 @@ function openAiResponse(payload) {
 }
 
 function runtimeScenario(guard, mode, suffix) {
+  const consensusMode = mode === "rejected-consensus";
   const records = new Map();
   const sourceContent = Buffer.from(`personal-receipt-control-${mode}-${suffix}`);
   const personalRoom = { id: `personal-${suffix}`, type: "d", slugifiedName: `tars-master-${suffix}` };
@@ -37,8 +38,8 @@ function runtimeScenario(guard, mode, suffix) {
     createdAt: new Date()
   };
   const config = {
-    apiKey: "",
-    folderId: "",
+    apiKey: consensusMode ? "test-yandex-key" : "",
+    folderId: consensusMode ? "test-folder" : "",
     openaiApiKey: "test-openai-key",
     openaiReceiptModel: "gpt-4.1-mini",
     scanner2ShadowMode: "OFF",
@@ -55,14 +56,33 @@ function runtimeScenario(guard, mode, suffix) {
     archiveEnabled: false
   };
   const requiredDate = guard.expectedReceiptDate(config);
-  const observedDate = mode === "rejected" ? previousCalendarDate(requiredDate) : requiredDate;
+  const observedDate = mode === "rejected" || consensusMode ? previousCalendarDate(requiredDate) : requiredDate;
   let receiptCalls = 0;
   let dedicatedCalls = 0;
+  let yandexCalls = 0;
+  const providerCalls = [];
   const http = {
-    async post(_url, options) {
+    async post(url, options) {
+      if (String(url).includes("ocr.api.cloud.yandex.net")) {
+        yandexCalls += 1;
+        const model = String(options && options.data && options.data.model || "unknown");
+        providerCalls.push(`yandex:${model}`);
+        const initialClassifierPass = consensusMode && yandexCalls <= 2;
+        const text = initialClassifierPass
+          ? "человек волосы лицо затылок"
+          : [
+              "Сбербанк",
+              "Чек по операции",
+              `Дата операции ${observedDate.split("-").reverse().join(".")}`,
+              "Сумма 1200 ₽",
+              "Статус операции Исполнено"
+            ].join("\n");
+        return { statusCode: 200, data: { result: { textAnnotation: { fullText: text, blocks: [] } } } };
+      }
       const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
       if (prompt.includes("строгую классификацию изображения")) {
         dedicatedCalls += 1;
+        providerCalls.push("openai:work-photo");
         return openAiResponse({
           is_work_photo: false,
           is_document_or_screen: false,
@@ -75,6 +95,7 @@ function runtimeScenario(guard, mode, suffix) {
         });
       }
       receiptCalls += 1;
+      providerCalls.push(prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ") ? "openai:date-focus" : prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:") ? "openai:amount-focus" : "openai:primary");
       if (receiptCalls === 1 || mode === "unknown") {
         return openAiResponse({
           is_receipt: false,
@@ -265,6 +286,7 @@ function runtimeScenario(guard, mode, suffix) {
     modify,
     owner,
     persistence,
+    providerCalls,
     publishedMessages,
     read,
     receiptCalls: () => receiptCalls,
@@ -313,6 +335,34 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(index.photos.length, 1);
   assert.strictEqual(rejected.controlUploads.length, 1, "the same rejected receipt must not be republished");
   assert.strictEqual(rejected.receiptCalls(), 4, "repeat event must not call providers again");
+
+  // Combined integration. The initial classifier remains unknown, then
+  // independent Yandex and primary OpenAI agree on the previous date. The
+  // early mismatch must retain financial evidence and enter the same existing
+  // rejected-control route without focused OpenAI passes.
+  const consensusGuard = loadTrackedAppWithGuard().__testGuard;
+  const consensus = runtimeScenario(consensusGuard, "rejected-consensus", "consensus-date-reject");
+  const consensusResult = await consensusGuard.processPersonalMediaV2(
+    consensus.message, consensus.read, consensus.persistence, consensus.modify,
+    { info() {}, warn() {}, error() {} }, consensus.http, consensus.config
+  );
+  assert.strictEqual(consensusResult.handled, true);
+  index = await receiptIndex(consensusGuard, consensus);
+  assert.strictEqual(index.photos.length, 1);
+  assert.strictEqual(index.photos[0].source, "rejected");
+  assert.match(index.photos[0].invalidReason, /ДАТА ЧЕКА/);
+  assert.strictEqual(index.photos.filter((entry) => entry.source === "confirmed").length, 0);
+  assert.strictEqual(consensus.controlUploads.length, 1);
+  assert.strictEqual(consensus.controlUploads[0].room.id, consensus.controlRoom.id);
+  assert.ok(consensus.deletedMessages.includes(consensus.message.id), "existing rejected route must preserve source-chat deletion behavior");
+  assert(!consensus.providerCalls.includes("openai:amount-focus"));
+  assert(!consensus.providerCalls.includes("openai:date-focus"));
+  assert.strictEqual(consensus.receiptCalls(), 2, "one initial classifier and one primary OpenAI validation call are expected");
+  const consensusSummary = await consensusGuard.confirmedTransferSummaryForUser(
+    consensus.read, consensus.config, consensus.owner.id, consensus.requiredDate, [], undefined, consensus.message.room.id
+  );
+  assert.strictEqual(consensusSummary.count, 0);
+  assert.strictEqual(consensusSummary.total, 0);
 
   // B. A normal unknown image has no financial evidence and stays outside the
   // rejected receipt index and review room.

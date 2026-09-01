@@ -143,6 +143,7 @@ function assertDateMismatch(result, date) {
     openai: () => openAiResult("2026-08-31")
   });
   assertDateMismatch(agreedMismatch.result, "2026-08-31");
+  assert.strictEqual(agreedMismatch.result.financialDocumentConfirmed, true, "early mismatch must retain evidence required by the rejected-control route");
   assert.deepStrictEqual(agreedMismatch.calls, [
     "yandex:page",
     "yandex:page-column-sort",
