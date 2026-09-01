@@ -13,6 +13,7 @@ on:
       - diagnostics/work-photo-classification-v1
       - diagnostic/personal-image-source-mime-v2
       - feature/manual-image-type-selection
+      - integration/manual-selection-current-develop
   pull_request:
   workflow_dispatch:
 
@@ -48,6 +49,8 @@ jobs:
       || github.base_ref == 'diagnostic/personal-image-source-mime-v2'
       || github.head_ref == 'feature/manual-image-type-selection'
       || github.base_ref == 'feature/manual-image-type-selection'
+      || github.head_ref == 'integration/manual-selection-current-develop'
+      || github.base_ref == 'integration/manual-selection-current-develop'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
