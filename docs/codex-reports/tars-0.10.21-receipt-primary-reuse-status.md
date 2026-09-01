@@ -4,6 +4,7 @@
 
 - Parent commit: `8110315572025cf4200366dc6369528366b36793`.
 - Branch: `perf/receipt-primary-reuse-status`.
+- Implementation commit: `336f252c8c6579a55827e9589cc96563270bc13d`.
 - Application version remains `0.10.21`.
 - Deploy performed: **NO**.
 - Production settings changed: **NO**.
@@ -100,6 +101,9 @@ secret, or provider payload is logged by the new instrumentation.
   externals `0`.
 - ZIP contents: exactly `app.json`, `TarsReportApp.js`, `en.json`, `ru.json`,
   and `icon.png`.
+- GitHub Actions `Scanner 2.0 Packaging CI` run `33521188574`: **SUCCESS**
+  (`22` Scanner/runtime tests, `77` legacy tests, canonical bundle/package
+  policy passed).
 
 ## Hashes
 
