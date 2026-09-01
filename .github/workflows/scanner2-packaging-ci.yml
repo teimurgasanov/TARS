@@ -8,6 +8,7 @@ on:
       - fix/scanner2-shadow-config-scope
       - fix/personal-rejected-receipt-control-route
       - fix/receipt-date-early-mismatch
+      - integration/date-mismatch-on-current-develop
   pull_request:
   workflow_dispatch:
 
@@ -32,7 +33,9 @@ jobs:
       github.head_ref == 'fix/personal-rejected-receipt-control-route' ||
       github.base_ref == 'fix/personal-rejected-receipt-control-route' ||
       github.head_ref == 'fix/receipt-date-early-mismatch' ||
-      github.base_ref == 'fix/receipt-date-early-mismatch'
+      github.base_ref == 'fix/receipt-date-early-mismatch' ||
+      github.head_ref == 'integration/date-mismatch-on-current-develop' ||
+      github.base_ref == 'integration/date-mismatch-on-current-develop'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
