@@ -27,6 +27,7 @@ The workflow:
   `feature/scanner-2.0`;
 - supports input-free `workflow_dispatch`;
 - uses `actions/checkout@v4`, `actions/setup-node@v4`, and Node.js 20;
+- installs the required `zsh` shell explicitly on the Ubuntu runner;
 - installs dependencies with `npm ci` and fails unless esbuild is exactly
   `0.12.29`;
 - runs the packaging test, all 15 Scanner 2.0 test files, and all 77 legacy
@@ -63,6 +64,18 @@ The following checks passed locally:
 
 Local validation used Node.js `v24.19.0`; the GitHub Actions run is the required
 proof for the requested Node.js 20 environment.
+
+## First GitHub Actions run
+
+Run `33471571713` for commit
+`a777251fa21f23d54e444f2e0ecc88502829b62b` failed before tests at
+`Validate scripts and working tree`. The exact error was
+`zsh: command not found` (exit 127). The runner had successfully installed
+Node.js `v20.20.2` and esbuild `0.12.29` before that failure.
+
+The workflow now installs `zsh` explicitly through Ubuntu's package manager
+before syntax validation. This is a CI-environment correction only; it does not
+alter the canonical build command or any application source.
 
 ## Package verification
 
@@ -109,6 +122,9 @@ unchanged at SHA-256
 
 - Local validation cannot fully emulate the GitHub-hosted Node.js 20 runner;
   the first pushed Actions run is therefore part of this stage's acceptance.
+- Installing `zsh` adds an Ubuntu package-repository dependency and a small
+  amount of CI latency. It is required because both the requested syntax check
+  and canonical build script use zsh.
 - The intentionally pinned esbuild `0.12.29` is old and npm reports a moderate
   advisory. Changing it is outside this stage and must be reviewed separately
   because the exact version is part of the approved packaging path.
