@@ -85,7 +85,7 @@ jobs:
             node "$test_file"
             scanner_count=$((scanner_count + 1))
           done
-          test "$scanner_count" -eq 16
+          test "$scanner_count" -eq 17
           echo "SCANNER2_TEST_COUNT=$scanner_count" >> "$GITHUB_ENV"
 
       - name: Run 77 legacy TARS tests

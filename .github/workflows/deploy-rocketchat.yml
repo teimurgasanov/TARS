@@ -1,4 +1,4 @@
-name: Deploy TARS to Rocket.Chat
+name: Validate TARS and manually deploy to Rocket.Chat
 
 on:
   push:
@@ -22,13 +22,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Validate and deploy develop commit
+  validate:
+    name: Validate canonical package and optionally deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
-      - name: Resolve deployment target
+      - name: Resolve reviewed target
         id: target
         shell: bash
         run: |
@@ -39,19 +39,49 @@ jobs:
               exit 1
             fi
             TARGET_SHA="${{ inputs.commit_sha }}"
+            [[ "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
+              echo "Deployment blocked: commit_sha must be a full 40-character SHA."
+              exit 1
+            }
             SOURCE="manual"
           else
             TARGET_SHA="${{ github.sha }}"
-            SOURCE="develop-push"
+            SOURCE="develop-push-validation-only"
           fi
           echo "sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
           echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout deployment target
+      - name: Checkout reviewed target
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.target.outputs.sha }}
           fetch-depth: 0
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install required shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends zsh
+          zsh --version
+
+      - name: Install pinned build dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          NODE_VERSION="$(node --version)"
+          ESBUILD_VERSION="$(node -p 'require("esbuild/package.json").version')"
+          test "${NODE_VERSION%%.*}" = "v20"
+          test "$ESBUILD_VERSION" = "0.12.29"
+          echo "NODE_VERSION=$NODE_VERSION" >> "$GITHUB_ENV"
+          echo "ESBUILD_VERSION=$ESBUILD_VERSION" >> "$GITHUB_ENV"
 
       - name: Verify exact develop commit
         shell: bash
@@ -60,10 +90,16 @@ jobs:
           git fetch origin develop main --no-tags
           TARGET_SHA="$(git rev-parse HEAD)"
           REQUESTED_SHA="$(git rev-parse '${{ steps.target.outputs.sha }}^{commit}')"
-          test "$TARGET_SHA" = "$REQUESTED_SHA" || { echo "Deployment blocked: SHA mismatch"; exit 1; }
-          git merge-base --is-ancestor "$TARGET_SHA" origin/develop || { echo "Deployment blocked: target is not in develop"; exit 1; }
+          test "$TARGET_SHA" = "$REQUESTED_SHA" || {
+            echo "Deployment blocked: checked-out SHA does not match requested SHA."
+            exit 1
+          }
+          git merge-base --is-ancestor "$TARGET_SHA" origin/develop || {
+            echo "Deployment blocked: target is not a commit of develop."
+            exit 1
+          }
           if [ "${{ github.event_name }}" = "push" ] && [ "$TARGET_SHA" != "$(git rev-parse origin/develop)" ]; then
-            echo "Deployment blocked: automatic deploy only installs current develop HEAD."
+            echo "Validation blocked: push commit is no longer current develop HEAD."
             exit 1
           fi
           echo "Develop commit verified: $TARGET_SHA"
@@ -73,7 +109,6 @@ jobs:
         run: |
           set -euo pipefail
           test -z "$(git status --porcelain)"
-          node --check TarsReportApp.js
           git show origin/main:app.json > /tmp/stable-app.json
           python3 - <<'PY'
           import json
@@ -82,9 +117,9 @@ jobs:
           with open('/tmp/stable-app.json', encoding='utf-8') as f:
               stable = json.load(f)
           required = ['id', 'version', 'nameSlug', 'classFile', 'permissions']
-          missing = [k for k in required if not app.get(k)]
+          missing = [key for key in required if not app.get(key)]
           if missing:
-              raise SystemExit(f"app.json missing required fields: {missing}")
+              raise SystemExit(f'app.json missing required fields: {missing}')
           if app['classFile'] != 'TarsReportApp.js':
               raise SystemExit('Unexpected classFile; deployment blocked')
           for key in ('id', 'nameSlug', 'classFile'):
@@ -96,30 +131,128 @@ jobs:
           print(f"Permissions unchanged from stable main: {len(app['permissions'])}")
           PY
 
-      - name: Run full regression tests
+      - name: Validate scripts and working tree
         shell: bash
         run: |
           set -euo pipefail
-          for test_file in tests/*.test.js; do
+          zsh -n build-tars.sh
+          node --check tools/tars-build-entry.js
+          node --check tools/verify-tars-bundle.js
+          node --check tests/scanner2-packaging.test.js
+          node --check tests/scanner2-safe-deploy-workflow.test.js
+          git diff --check
+
+      - name: Run all Scanner 2.0 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          scanner_count=0
+          for test_file in tests/scanner2-*.test.js; do
             echo "==> $test_file"
             node "$test_file"
+            scanner_count=$((scanner_count + 1))
           done
+          test "$scanner_count" -eq 17
+          echo "SCANNER2_TEST_COUNT=$scanner_count" >> "$GITHUB_ENV"
 
-      - name: Build private-app ZIP
+      - name: Run 77 legacy TARS tests
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="$(python3 -c 'import json; print(json.load(open("app.json"))["version"])')"
-          ZIP_PATH="$RUNNER_TEMP/tars-report_${VERSION}.zip"
-          rm -f "$ZIP_PATH"
-          zip -q -j "$ZIP_PATH" app.json TarsReportApp.js en.json ru.json icon.png
+          legacy_count=0
+          while IFS= read -r test_file; do
+            echo "==> $test_file"
+            node "$test_file"
+            legacy_count=$((legacy_count + 1))
+          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' | sort)
+          test "$legacy_count" -eq 77
+          echo "LEGACY_TEST_COUNT=$legacy_count" >> "$GITHUB_ENV"
+
+      - name: Capture protected source hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SOURCE_SHA_BEFORE=$(sha256sum TarsReportApp.js | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "MANIFEST_SHA_BEFORE=$(sha256sum app.json | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Build canonical single-file package
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build-tars.sh
+
+      - name: Verify canonical package gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p 'require("./app.json").version')"
+          ZIP_PATH="$PWD/tars-report_${VERSION}.zip"
+          test -f "$ZIP_PATH"
           unzip -t "$ZIP_PATH"
+
+          EXPECTED_CONTENTS="$(printf '%s\n' app.json TarsReportApp.js en.json ru.json icon.png)"
+          ZIP_CONTENTS="$(unzip -Z1 "$ZIP_PATH")"
+          test "$ZIP_CONTENTS" = "$EXPECTED_CONTENTS"
+
+          BUNDLE_PATH="$RUNNER_TEMP/TarsReportApp.js"
+          unzip -p "$ZIP_PATH" TarsReportApp.js > "$BUNDLE_PATH"
+          node --check "$BUNDLE_PATH"
+          node tools/verify-tars-bundle.js "$BUNDLE_PATH"
+
+          grep -Fq 'scanner2-shadow-recorder-v1' "$BUNDLE_PATH"
+          grep -Fq 'WRITE_TIMEOUT' "$BUNDLE_PATH"
+          grep -Fq 'scanner2-shadow:v1:' "$BUNDLE_PATH"
+          if grep -Eq '(evaluateRules|resolveConflicts|makeDecision|runOfflineComparison|runOfflineDataset)[[:space:]]*\(' "$BUNDLE_PATH"; then
+            echo "Runtime Scanner 2.0 decision call detected in production bundle."
+            exit 1
+          fi
+
+          test "$(sha256sum TarsReportApp.js | awk '{print $1}')" = "$SOURCE_SHA_BEFORE"
+          test "$(sha256sum app.json | awk '{print $1}')" = "$MANIFEST_SHA_BEFORE"
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+
           echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+          echo "BUNDLE_SHA256=$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
           echo "ZIP_SHA256=$(sha256sum "$ZIP_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
-          echo "Built: $ZIP_PATH"
-          unzip -l "$ZIP_PATH"
+          {
+            echo "ZIP_CONTENTS<<EOF"
+            printf '%s\n' "$ZIP_CONTENTS"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload canonical validation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tars-canonical-package-${{ steps.target.outputs.sha }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Validation summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## TARS canonical package validation"
+            echo
+            echo "- Commit: \`$(git rev-parse HEAD)\`"
+            echo "- Source: \`${{ steps.target.outputs.source }}\`"
+            echo "- Node.js: \`$NODE_VERSION\`"
+            echo "- esbuild: \`$ESBUILD_VERSION\`"
+            echo "- Scanner 2.0 tests: $SCANNER2_TEST_COUNT"
+            echo "- Legacy tests: $LEGACY_TEST_COUNT"
+            echo "- Bundle SHA-256: \`$BUNDLE_SHA256\`"
+            echo "- ZIP SHA-256: \`$ZIP_SHA256\`"
+            echo
+            if [ "${{ github.event_name }}" = "push" ]; then
+              echo "Validation-only develop push completed. No Rocket.Chat deployment was attempted."
+            else
+              echo "Manual deployment gate passed; guarded deployment steps may continue."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Validate Rocket.Chat deployment secrets
+        if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY'
         shell: bash
         env:
           ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
@@ -136,6 +269,7 @@ jobs:
           esac
 
       - name: Authenticate to Rocket.Chat
+        if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY'
         shell: bash
         env:
           ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
@@ -151,8 +285,8 @@ jobs:
           PY
           )" \
             "$ROCKETCHAT_URL/api/v1/login")
-          AUTH_TOKEN=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("data",{}).get("authToken", ""))' <<<"$LOGIN_JSON")
-          USER_ID=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("data",{}).get("userId", ""))' <<<"$LOGIN_JSON")
+          AUTH_TOKEN=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("data",{}).get("authToken", ""))' <<<"$LOGIN_JSON")
+          USER_ID=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("data",{}).get("userId", ""))' <<<"$LOGIN_JSON")
           test -n "$AUTH_TOKEN" || { echo 'Login succeeded without authToken; deployment blocked'; exit 1; }
           test -n "$USER_ID" || { echo 'Login succeeded without userId; deployment blocked'; exit 1; }
           echo "AUTH_TOKEN=$AUTH_TOKEN" >> "$GITHUB_ENV"
@@ -160,6 +294,7 @@ jobs:
           echo 'Rocket.Chat authentication: OK'
 
       - name: Update private app through Rocket.Chat upload API
+        if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY'
         shell: bash
         env:
           ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
@@ -208,12 +343,13 @@ jobs:
                       print('Installed status:', app.get('status'))
           PY
 
-      - name: Deployment summary
-        if: success()
+      - name: Manual deployment summary
+        if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY' && success()
         shell: bash
         run: |
           echo "Rocket.Chat private-app update completed."
           echo "Commit: $(git rev-parse HEAD)"
           echo "Source: ${{ steps.target.outputs.source }}"
           python3 -c 'import json; print("Version:", json.load(open("app.json"))["version"])'
+          echo "Bundle SHA-256: $BUNDLE_SHA256"
           echo "ZIP SHA-256: $ZIP_SHA256"
