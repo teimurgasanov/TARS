@@ -11,8 +11,8 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "29bbbe3717cbf3366acb16d71238fd493aeb1051cfd22b3db79be17e08978f23";
-const expectedManifestSha = "ec0eecd7f7de18234cd39e2cd51d67c8a04c5f1fe6f328490ab73bc3a03ca7d0";
+const expectedSourceSha = "3a6318848e69741a492326ea57312c19d4c313270ea4a33d05660c13ac30da29";
+const expectedManifestSha = "e1c6e5f99bac1d47fb8a5fc5bdc48ac29829145c0144b77cfd85dd21ce19a236";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
 function sha256(value) {
@@ -96,6 +96,11 @@ execFileSync(process.execPath, [path.join(root, "tests", "scanner2-shadow-config
   stdio: "pipe"
 });
 execFileSync(process.execPath, [path.join(root, "tests", "scanner2-receipt-running-total-runtime.test.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "scanner2-personal-rejected-control-runtime.test.js")], {
   cwd: root,
   encoding: "utf8",
   stdio: "pipe"

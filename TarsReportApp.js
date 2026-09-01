@@ -2967,9 +2967,12 @@ var require_upload_duplicate_guard = __commonJS({
         // of the receipt ledger while allowing readable bank documents to be
         // counted even when their visual type was not recognized up front.
         const receiptCheck = await validateReceiptStrict(file, content, http, config, logger);
-        if (receiptCheck && receiptCheck.ok) {
-          if (logger) logger.info(`Personal upload confirmed as receipt by strict post-upload check: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
-          return PROTECTED_ROOMS.kassa;
+        if (receiptCheck && (receiptCheck.ok || receiptCheck.financialDocumentConfirmed)) {
+          if (logger) logger.info(`Personal upload confirmed as ${receiptCheck.ok ? "accepted" : "rejected"} receipt by strict post-upload check: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
+          // Carry the already completed strict result into the existing receipt
+          // handler. Rejected financial documents must use the same index/control
+          // route as every other receipt, without repeating OCR or Vision.
+          return { ...PROTECTED_ROOMS.kassa, prevalidatedReceiptCheck: receiptCheck };
         }
         if (logger) logger.info(`Personal upload classification unknown after strict receipt check; keeping in personal chat for control: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
         return void 0;
@@ -4139,8 +4142,15 @@ var require_upload_duplicate_guard = __commonJS({
       const failures = [];
       const legacyOcrResults = [];
       const legacyVisionResults = [];
+      const candidateConfirmsFinancialDocument = (candidate) => {
+        if (!candidate || candidate.combinedReceipt) return false;
+        const text = String(candidate.text || "");
+        if (candidate.aiReceipt) return /"is_receipt"\s*:\s*true/i.test(text);
+        return looksLikeBankReceiptText(text);
+      };
       const withShadowEvidence = (legacyResult) => ({
         ...legacyResult,
+        financialDocumentConfirmed: candidates.some(candidateConfirmsFinancialDocument),
         shadowEvidence: {
           acceptedDates: requiredDate ? [requiredDate] : [],
           legacyOcrResults: legacyOcrResults.map((item) => ({ ...item, amount: item.amount ? { ...item.amount } : null })),
@@ -5302,6 +5312,7 @@ var require_upload_duplicate_guard = __commonJS({
           }
           protectedRoom = preclassifiedRoom || await protectedRoomForPersonalFile(message, messageFile, content, intent, fallbackProtectedRoom, http, ocrConfig, logger);
           if (!protectedRoom) continue;
+          const prevalidatedReceiptCheck = protectedRoom.prevalidatedReceiptCheck;
           const index = await getScopedIndex(protectedRoom);
           if (!index) continue;
           if (message.id && index.photos.some((entry) => entry && entry.messageId === message.id && entry.uploadId === messageFileId && entry.postProcessedAt)) {
@@ -5399,7 +5410,7 @@ var require_upload_duplicate_guard = __commonJS({
                 receiptDate: exactMatch.receiptDate,
                 receiptAmount: amountFromEntry(exactMatch),
                 receiptWarning: exactMatch.receiptWarning || ""
-              } : await validateReceiptStrict(messageFile, content, http, ocrConfig, logger);
+              } : prevalidatedReceiptCheck || await validateReceiptStrict(messageFile, content, http, ocrConfig, logger);
               if (!receiptCheck.ok) {
                 // Keep the exact photo fingerprint even when validation
                 // fails. The rejected message is deleted before any archive
@@ -5551,7 +5562,7 @@ var require_upload_duplicate_guard = __commonJS({
           let receiptWarning = "";
           let receiptShadowEvidence;
           if (protectedRoom.kind === "receipt") {
-            const receiptCheck = await validateReceiptStrict(messageFile, content, http, ocrConfig, logger);
+            const receiptCheck = prevalidatedReceiptCheck || await validateReceiptStrict(messageFile, content, http, ocrConfig, logger);
             if (!receiptCheck.ok) {
               const rejectedEntry = {
                 exact,
