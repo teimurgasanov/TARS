@@ -7,7 +7,9 @@ const b = source.indexOf('async function detectPersonalMailingProof', a);
 assert(a >= 0 && b > a, 'dedicated helper must exist');
 const h = source.slice(a, b);
 assert.strictEqual((h.match(/personalImageKindForPreUpload\(/g) || []).length, 1, 'work-photo helper must make one classification decision');
-assert(!h.includes('requestOpenAiReceiptCheck'), 'work-photo helper must not call OpenAI a second time');
+assert.strictEqual((h.match(/requestOpenAiReceiptCheck\(/g) || []).length, 1, 'manual safety mode must make one primary Vision request');
+assert.match(h, /if \(options\.manualPhotoSafetyOnly\)[\s\S]*requestOpenAiReceiptCheck[\s\S]*\} else \{[\s\S]*personalImageKindForPreUpload/,
+  'manual safety and automatic classification must be mutually exclusive so the primary request is not duplicated');
 assert(h.includes('requestOpenAiWorkPhotoCheck'), 'unknown images must receive a dedicated work-photo check');
 assert(!source.includes('parsed.kind === "hair" ? 0.7 : 0.8'), 'confirmed work photos must not be rejected by an extra confidence threshold');
 assert(source.includes('parsed.is_work_photo === true && parsed.has_visible_client === true && parsed.has_visible_service_area === true && knownServiceArea'), 'work photos must require a visible client and a known salon service area');

@@ -1,10 +1,17 @@
-// Recognized mailing screenshots must be recorded without a button press.
+// The detector remains reusable, but a new personal image may enter mailing
+// accounting only after the explicit compact type selection.
 const fs = require('fs');
 const assert = require('assert');
 const source = fs.readFileSync('TarsReportApp.js', 'utf8');
+const handlerStart = source.indexOf('async handleManualImageTypeSelection');
+const handlerEnd = source.indexOf('async removeUploadTypeMenu', handlerStart);
+const handler = source.slice(handlerStart, handlerEnd);
 assert(source.includes('async function detectPersonalMailingProof'), 'automatic mailing detector must exist');
-assert(source.includes('personalImageKindForPreUpload(file, content, http, config, logger) === "mailing"'), 'only classified mailing proofs may be recorded');
-assert(source.includes('source: "automatic-mailing-proof"'), 'automatic proof must be persisted in the daily mailing index');
-assert(source.includes('await G.detectPersonalMailingProof(e, n, t, i, this.getLogger())'), 'personal image events must run automatic mailing accounting');
-assert(source.includes('if (!alreadyRecorded)'), 'repeated events must not duplicate mailing records or confirmations');
-console.log('PASS: mailing proofs are accounted automatically without a button');
+assert.match(handler, /selectedType === "mailing"/);
+assert.match(handler, /await G\.detectPersonalMailingProof\(sourceMessage/);
+assert.match(handler, /source: "manual-image-selection"/);
+assert.match(handler, /const duplicate = [\s\S]*if \(!duplicate\) await persistence\.createWithAssociation/);
+const mailingBranch = handler.slice(handler.indexOf('selectedType === "mailing"'));
+assert.doesNotMatch(mailingBranch, /processPersonalMediaV2\(sourceMessage/);
+assert.doesNotMatch(mailingBranch, /fastForwardPersonalReportPhotos\(sourceMessage/);
+console.log('PASS: mailing accounting is entered explicitly and remains idempotent');

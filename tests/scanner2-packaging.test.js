@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "94c9615ff5098714a7d9188fb33ed08cfd3a77a28474f9a349b6dfd43047c231";
+const expectedSourceSha = "e60e4b2206c44e19b7c8e28e2e073900553ae6ccba27c01e20382117184ac1f5";
 const expectedManifestSha = "5342d8959b46202a21e06dc929f910515adae4a7dc4a280848373b2c72bc54c3";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
@@ -122,6 +122,11 @@ execFileSync(process.execPath, [path.join(root, "tests", "work-photo-diagnostics
   stdio: "pipe"
 });
 execFileSync(process.execPath, [path.join(root, "tests", "work-photo-source-mime-telemetry.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "manual-image-type-selection.runtime.js")], {
   cwd: root,
   encoding: "utf8",
   stdio: "pipe"

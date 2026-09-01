@@ -1258,6 +1258,22 @@ var require_upload_duplicate_guard = __commonJS({
       const claimKey = postMessageClaimKey(message);
       return claimKey ? new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `tars-post-event:${claimKey}`) : void 0;
     }
+    function manualImageSelectionAssociation(selectionKey) {
+      const key = String(selectionKey || "");
+      return key ? new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `manual-image-selection-v1:${key}`) : void 0;
+    }
+    async function readManualImageSelection(read, selectionKey) {
+      const association = manualImageSelectionAssociation(selectionKey);
+      if (!read || !association) return void 0;
+      const records = await read.getPersistenceReader().readByAssociation(association);
+      return (records || []).filter((record) => record && record.selectionKey === selectionKey).sort((left, right) => Number(right.updatedAt || right.createdAt || 0) - Number(left.updatedAt || left.createdAt || 0))[0];
+    }
+    async function writeManualImageSelection(persistence, record) {
+      const association = manualImageSelectionAssociation(record && record.selectionKey);
+      if (!persistence || !association || !record) return false;
+      await persistence.updateByAssociation(association, record, true);
+      return true;
+    }
     async function claimPostMessage(message, read, persistence, logger) {
       const claimKey = postMessageClaimKey(message);
       const association = postMessageClaimAssociation(message);
@@ -2048,11 +2064,27 @@ var require_upload_duplicate_guard = __commonJS({
         throw error;
       }
     }
-    async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger, explicitPhotoIntent = false, diagnostic) {
-      const finalKind = await personalImageKindForPreUpload(file, content, http, config, logger, diagnostic);
+    async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger, explicitPhotoIntent = false, diagnostic, options = {}) {
+      const activeDiagnostic = diagnostic || options.manualPhotoSafetyOnly && createPersonalImageClassificationDiagnostic() || void 0;
+      let finalKind;
+      if (options.manualPhotoSafetyOnly) {
+        let primaryCandidate;
+        if (config && config.openaiApiKey) {
+          try {
+            primaryCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger, 0, false, false, activeDiagnostic, "primary");
+            if (primaryCandidate) capturePrimaryPersonalImageDiagnostic(activeDiagnostic, primaryCandidate);
+          } catch (error) {
+            if (logger) logger.warn(`Manual work-photo primary safety check failed: ${error && error.message || error}`);
+          }
+        }
+        finalKind = primaryCandidate && aiCandidateMarksMailing(primaryCandidate) ? "mailing" : primaryCandidate && aiCandidateMarksReceipt(primaryCandidate) ? "receipt" : primaryCandidate && aiCandidateMarksReportPhoto(primaryCandidate) ? "photo" : "unknown";
+        if (activeDiagnostic && (activeDiagnostic.primary_is_document === true || activeDiagnostic.primary_normalized_result === "document")) return { forward: false, reason: "document-or-screen" };
+      } else {
+        finalKind = await personalImageKindForPreUpload(file, content, http, config, logger, activeDiagnostic);
+      }
       if (finalKind === "receipt") return { forward: false, reason: "receipt" };
       if (finalKind === "mailing") return { forward: false, reason: "mailing" };
-      const dedicatedPhotoKind = finalKind === "photo" || finalKind === "unknown" || !finalKind ? await requestOpenAiWorkPhotoCheck(file, content, http, config, logger, diagnostic) : "";
+      const dedicatedPhotoKind = finalKind === "photo" || finalKind === "unknown" || !finalKind ? await requestOpenAiWorkPhotoCheck(file, content, http, config, logger, activeDiagnostic) : "";
       if (dedicatedPhotoKind === "work") {
         return { forward: true, reason: "dedicated-work-photo-check" };
       }
@@ -2063,6 +2095,25 @@ var require_upload_duplicate_guard = __commonJS({
         return { forward: false, reason: "document-or-screen" };
       }
       if (finalKind === "photo" || finalKind === "unknown" || !finalKind) {
+        if (options.manualPhotoSafetyOnly) {
+          const safetyChecksComplete = Boolean(
+            activeDiagnostic &&
+            activeDiagnostic.primary_transport === "2xx" &&
+            activeDiagnostic.primary_parser === "parsed" &&
+            activeDiagnostic.dedicated_transport === "2xx" &&
+            activeDiagnostic.dedicated_parser === "parsed"
+          );
+          const financialBlock = Boolean(activeDiagnostic && (
+            activeDiagnostic.primary_is_receipt === true ||
+            activeDiagnostic.primary_is_document === true ||
+            activeDiagnostic.primary_is_mailing === true ||
+            activeDiagnostic.dedicated_document_block === true ||
+            activeDiagnostic.dedicated_banking_block === true
+          ));
+          if (safetyChecksComplete && !financialBlock) return { forward: true, reason: "manual-photo-safety-clean" };
+          return { forward: false, reason: financialBlock ? "document-or-screen" : "manual-photo-safety-inconclusive" };
+        }
+        if (options.skipStrictReceiptFallback) return { forward: false, reason: "manual-work-photo-not-strictly-confirmed" };
         // A failed or inconclusive image check must never become a work photo
         // by exclusion. Run the receipt validator only to preserve the block
         // reason; forwarding still requires a positive dedicated Vision result.
@@ -2103,7 +2154,7 @@ var require_upload_duplicate_guard = __commonJS({
       }
       return void 0;
     }
-    async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config, explicitPhotoIntent = false, diagnostic) {
+    async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config, explicitPhotoIntent = false, diagnostic, options = {}) {
       if (!message || !isPersonalTarsRoom(message.room)) return false;
       const intent = directFileIntent(message);
       if (intent === "mailing" || intent === "receipt") return false;
@@ -2174,7 +2225,7 @@ var require_upload_duplicate_guard = __commonJS({
         }
         return false;
       }
-      const workPhotoDecision = await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger, explicitPhotoIntent, diagnostic);
+      const workPhotoDecision = await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger, explicitPhotoIntent, diagnostic, options);
       if (diagnostic) {
         const diagnosticClassification = workPhotoDecision.forward ? "work_photo" : workPhotoDecision.reason === "receipt" || workPhotoDecision.reason === "strict-receipt-check" ? "receipt" : workPhotoDecision.reason === "mailing" ? "mailing" : workPhotoDecision.reason === "document-or-screen" ? "document" : "unknown";
         setPersonalImageFinalDiagnostic(diagnostic, diagnosticClassification, workPhotoDecision.reason || "unknown", "dedicated");
@@ -7130,6 +7181,9 @@ var require_upload_duplicate_guard = __commonJS({
       seedExistingPhotos,
       claimPostMessage,
       completePostMessageClaim,
+      postMessageClaimKey,
+      readManualImageSelection,
+      writeManualImageSelection,
       cleanupDuplicateReportForwardsInOtchet,
       cleanupMailingProofForwardsInOtchet,
       detectPersonalMailingProof,
@@ -7151,6 +7205,7 @@ var require_upload_duplicate_guard = __commonJS({
       safePersonalImagePipelineTelemetryPayload,
       emitPersonalImagePipelineTelemetry,
       fastForwardPersonalReportPhotos,
+      notifyWorkPhotoAccepted,
       publishPendingReportPhotos,
       resetInvisiblePermalinkForwards,
       resetStaleReportPhotoForwards,
@@ -7213,6 +7268,10 @@ var UPLOAD_MENU_ACTION = "open-upload-type-menu";
 var PHOTO_REPORT_ACTION = "start-photo-report-upload";
 var RECEIPT_UPLOAD_ACTION = "start-receipt-upload";
 var MAILING_UPLOAD_ACTION = "start-mailing-upload";
+var MANUAL_IMAGE_RECEIPT_ACTION = "manual-image-type-receipt-v1";
+var MANUAL_IMAGE_PHOTO_ACTION = "manual-image-type-photo-v1";
+var MANUAL_IMAGE_MAILING_ACTION = "manual-image-type-mailing-v1";
+var manualImageSelectionPromptQueue = Promise.resolve();
 var REPORT_MEDIA_RETENTION_MS = 60 * 24 * 60 * 60 * 1e3;
 var personalReportButtonRefreshQueue = Promise.resolve();
 var P = "hairdresser-report:";
@@ -7663,6 +7722,10 @@ var C = class extends j.App {
           }
           return;
         }
+        if (hasPersonalImageUpload) {
+          await this.ensureManualImageSelection(n, s, r, e);
+          return;
+        }
         const explicitTransferIntent = hasPersonalImageUpload && await this.activeTransferReportIntent(n, e.room);
         const explicitMailingIntent = hasPersonalImageUpload && await this.activeMailingReportIntent(n, e.room);
         if (explicitMailingIntent) {
@@ -8011,6 +8074,184 @@ var C = class extends j.App {
   async clearTransferReportIntent(persistence, room) {
     if (persistence && room && room.id) await persistence.removeByAssociation(this.transferReportIntentAssociation(room.id));
   }
+  async ensureManualImageSelection(read, persistence, modify, message) {
+    const run = async () => {
+      if (!read || !persistence || !modify || !message || !message.room || !message.sender) return false;
+      const selectionKey = G.postMessageClaimKey(message);
+      if (!selectionKey) return false;
+      const now = Date.now();
+      const existing = await G.readManualImageSelection(read, selectionKey);
+      if (existing && Number(existing.expiresAt || 0) > now && ["pending", "processing", "completed"].includes(String(existing.status || ""))) return existing;
+      const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
+      if (!appUser) return false;
+      const blocks = modify.getCreator().getBlockBuilder();
+      blocks.addSectionBlock({ text: blocks.newMarkdownTextObject("Что вы отправили?") });
+      blocks.addActionsBlock({ elements: [
+        blocks.newButtonElement({ actionId: MANUAL_IMAGE_RECEIPT_ACTION, text: blocks.newPlainTextObject("Чек"), value: selectionKey }),
+        blocks.newButtonElement({ actionId: MANUAL_IMAGE_PHOTO_ACTION, text: blocks.newPlainTextObject("Фото работы"), value: selectionKey }),
+        blocks.newButtonElement({ actionId: MANUAL_IMAGE_MAILING_ACTION, text: blocks.newPlainTextObject("Рассылка"), value: selectionKey })
+      ] });
+      const promptMessageId = await modify.getCreator().finish(
+        modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("Что вы отправили?").setBlocks(blocks)
+      );
+      const record = {
+        selectionKey,
+        sourceMessageId: String(message.id || ""),
+        roomId: String(message.room.id || ""),
+        requestedBy: String(message.sender.id || ""),
+        promptMessageId: String(promptMessageId || ""),
+        status: "pending",
+        selectedType: "",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: now + 30 * 60 * 1e3
+      };
+      await G.writeManualImageSelection(persistence, record);
+      return record;
+    };
+    const result = manualImageSelectionPromptQueue.then(run, run);
+    manualImageSelectionPromptQueue = result.then(() => void 0, () => void 0);
+    return result;
+  }
+  async removeManualImageSelectionPrompt(read, modify, data, record) {
+    const candidates = [];
+    if (data && data.message) candidates.push(data.message);
+    if (record && record.promptMessageId && read && read.getMessageReader) {
+      try {
+        const stored = await read.getMessageReader().getById(record.promptMessageId);
+        if (stored) candidates.push(stored);
+      } catch (_2) {
+      }
+    }
+    const seen = {};
+    for (const message of candidates) {
+      const id = String(message && message.id || "");
+      if (!message || !id || seen[id]) continue;
+      seen[id] = true;
+      try {
+        await modify.getDeleter().deleteMessage(message, message.sender);
+      } catch (error) {
+        this.getLogger().warn(`Could not remove manual image selection prompt: ${error && error.message || error}`);
+      }
+    }
+  }
+  async publishManualImageSelectionText(read, modify, room, text) {
+    const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
+    if (!appUser || !room) return "";
+    return String(await modify.getCreator().finish(modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text)) || "");
+  }
+  async deleteManualImageSelectionStatus(read, modify, statusMessageId) {
+    if (!statusMessageId) return;
+    try {
+      const message = await read.getMessageReader().getById(statusMessageId);
+      if (message) await modify.getDeleter().deleteMessage(message, message.sender);
+    } catch (error) {
+      this.getLogger().warn(`Could not remove manual image processing status: ${error && error.message || error}`);
+    }
+  }
+  async handleManualImageTypeSelection(read, http, persistence, modify, data, selectedType) {
+    if (!read || !persistence || !modify || !data || !data.room || !data.user) return false;
+    const selectionKey = String(data.value || "");
+    const record = await G.readManualImageSelection(read, selectionKey);
+    if (!record || String(record.roomId || "") !== String(data.room.id || "") || String(record.requestedBy || "") !== String(data.user.id || "")) return false;
+    if (record.status === "completed" || record.status === "processing") {
+      await this.removeManualImageSelectionPrompt(read, modify, data, record);
+      return true;
+    }
+    let sourceMessage;
+    try {
+      sourceMessage = await read.getMessageReader().getById(record.sourceMessageId);
+    } catch (_2) {
+      sourceMessage = void 0;
+    }
+    if (sourceMessage && !G.isPersonalTarsRoom(sourceMessage.room) && record.roomId) {
+      try {
+        const sourceRoom = await read.getRoomReader().getById(record.roomId);
+        if (sourceRoom) sourceMessage = { ...sourceMessage, room: sourceRoom };
+      } catch (_2) {
+      }
+    }
+    if (!sourceMessage || !G.messageImageFiles(sourceMessage).length || !G.isPersonalTarsRoom(sourceMessage.room)) {
+      record.status = "completed";
+      record.selectedType = selectedType;
+      record.outcome = "source-unavailable";
+      record.updatedAt = Date.now();
+      await G.writeManualImageSelection(persistence, record);
+      await this.removeManualImageSelectionPrompt(read, modify, data, record);
+      await this.publishManualImageSelectionText(read, modify, data.room, "⚠️ Не удалось получить исходное изображение. Отправьте его ещё раз.");
+      return true;
+    }
+    const claimToken = await G.claimPostMessage(sourceMessage, read, persistence, this.getLogger());
+    if (!claimToken) return true;
+    record.status = "processing";
+    record.selectedType = selectedType;
+    record.updatedAt = Date.now();
+    await G.writeManualImageSelection(persistence, record);
+    await this.removeManualImageSelectionPrompt(read, modify, data, record);
+    const config = await this.receiptOcrConfig(read);
+    let statusMessageId = "";
+    let outcome = "failed";
+    try {
+      if (selectedType === "receipt") {
+        const result = await G.processPersonalMediaV2(sourceMessage, read, persistence, modify, this.getLogger(), http, config, "receipt", true);
+        outcome = result && result.handled ? "receipt-processed" : "not-receipt";
+        if (!result || !result.handled) await this.publishManualImageSelectionText(read, modify, data.room, "⚠️ Это изображение не подтверждено как финансовый чек.");
+      } else if (selectedType === "photo") {
+        statusMessageId = await this.publishManualImageSelectionText(read, modify, data.room, "⏳ Обрабатываю фото…");
+        const diagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(sourceMessage));
+        const result = await G.fastForwardPersonalReportPhotos(sourceMessage, read, persistence, modify, this.getLogger(), http, config, true, diagnostic, { skipStrictReceiptFallback: true, manualPhotoSafetyOnly: true });
+        if (result === true) {
+          await G.notifyWorkPhotoAccepted(sourceMessage, read, modify);
+          outcome = "work-photo-forwarded";
+        } else if (result === "already-published") {
+          outcome = "work-photo-already-published";
+        } else {
+          outcome = "work-photo-blocked";
+          await this.publishManualImageSelectionText(read, modify, data.room, "⚠️ Фото работы не принято: изображение похоже на чек, банковский экран или документ либо работа не подтверждена.");
+        }
+      } else if (selectedType === "mailing") {
+        statusMessageId = await this.publishManualImageSelectionText(read, modify, data.room, "⏳ Проверяю рассылку…");
+        const proof = await G.detectPersonalMailingProof(sourceMessage, read, http, config, this.getLogger());
+        if (proof && proof.uploadId) {
+          const workday = this.reportWorkday();
+          const existing = await read.getPersistenceReader().readByAssociation(this.mailingProofIndexAssociation(workday));
+          const duplicate = (existing || []).some((entry) => entry && entry.roomId === sourceMessage.room.id && String(entry.uploadId || "") === String(proof.uploadId));
+          if (!duplicate) await persistence.createWithAssociation({
+            userId: sourceMessage.sender && sourceMessage.sender.id || "",
+            username: sourceMessage.sender && sourceMessage.sender.username || "",
+            userName: sourceMessage.sender && sourceMessage.sender.name || "",
+            roomId: sourceMessage.room.id,
+            uploadId: proof.uploadId,
+            workday,
+            source: "manual-image-selection",
+            createdAt: Date.now()
+          }, this.mailingProofIndexAssociation(workday));
+          outcome = duplicate ? "mailing-already-recorded" : "mailing-recorded";
+          await this.publishManualImageSelectionText(read, modify, data.room, "✅ РАССЫЛКА ПРИНЯТА");
+        } else {
+          outcome = "mailing-blocked";
+          await this.publishManualImageSelectionText(read, modify, data.room, "⚠️ Изображение не подтверждено как скриншот рассылки.");
+        }
+      }
+      try {
+        await this.refreshPreliminaryReportAnalysis(read, persistence, modify, sourceMessage.sender, sourceMessage.room);
+      } catch (error) {
+        this.getLogger().warn(`Could not refresh report after manual image selection: ${error && error.message || error}`);
+      }
+    } catch (error) {
+      this.getLogger().warn(`Manual image selection failed: ${error && error.message || error}`);
+      await this.publishManualImageSelectionText(read, modify, data.room, "⚠️ Не удалось обработать изображение. Повторная кнопка не запустит второй pipeline; отправьте файл ещё раз.");
+      outcome = "processing-error";
+    } finally {
+      await this.deleteManualImageSelectionStatus(read, modify, statusMessageId);
+      record.status = "completed";
+      record.outcome = outcome;
+      record.updatedAt = Date.now();
+      await G.writeManualImageSelection(persistence, record);
+      await G.completePostMessageClaim(sourceMessage, claimToken, persistence, this.getLogger());
+    }
+    return true;
+  }
   async removeUploadTypeMenu(modify, data) {
     const message = data && data.message;
     if (!modify || !message || !message.sender) return;
@@ -8131,6 +8372,11 @@ var C = class extends j.App {
       await this.handleApproveReceiptButton(n, r, s, a);
       return e.getInteractionResponder().successResponse();
     }
+    if (a.actionId === MANUAL_IMAGE_RECEIPT_ACTION || a.actionId === MANUAL_IMAGE_PHOTO_ACTION || a.actionId === MANUAL_IMAGE_MAILING_ACTION) {
+      const selectedType = a.actionId === MANUAL_IMAGE_RECEIPT_ACTION ? "receipt" : a.actionId === MANUAL_IMAGE_PHOTO_ACTION ? "photo" : "mailing";
+      await this.handleManualImageTypeSelection(n, t, s, r, a, selectedType);
+      return e.getInteractionResponder().successResponse();
+    }
     if (a.actionId === UPLOAD_MENU_ACTION) {
       await this.handleUploadMenuButton(n, r, a);
       return e.getInteractionResponder().successResponse();
@@ -8160,6 +8406,11 @@ var C = class extends j.App {
     let a = e.getInteractionData();
     if (a.actionId === K) {
       await this.handleApproveReceiptButton(n, r, s, a);
+      return e.getInteractionResponder().successResponse();
+    }
+    if (a.actionId === MANUAL_IMAGE_RECEIPT_ACTION || a.actionId === MANUAL_IMAGE_PHOTO_ACTION || a.actionId === MANUAL_IMAGE_MAILING_ACTION) {
+      const selectedType = a.actionId === MANUAL_IMAGE_RECEIPT_ACTION ? "receipt" : a.actionId === MANUAL_IMAGE_PHOTO_ACTION ? "photo" : "mailing";
+      await this.handleManualImageTypeSelection(n, t, s, r, a, selectedType);
       return e.getInteractionResponder().successResponse();
     }
     if (a.actionId === UPLOAD_MENU_ACTION) {
