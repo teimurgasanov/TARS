@@ -11,6 +11,7 @@ on:
       - integration/date-mismatch-on-current-develop
       - perf/receipt-primary-reuse-status
       - diagnostics/work-photo-classification-v1
+      - diagnostic/personal-image-source-mime-v2
   pull_request:
   workflow_dispatch:
 
@@ -42,6 +43,8 @@ jobs:
       || github.base_ref == 'perf/receipt-primary-reuse-status'
       || github.head_ref == 'diagnostics/work-photo-classification-v1'
       || github.base_ref == 'diagnostics/work-photo-classification-v1'
+      || github.head_ref == 'diagnostic/personal-image-source-mime-v2'
+      || github.base_ref == 'diagnostic/personal-image-source-mime-v2'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
