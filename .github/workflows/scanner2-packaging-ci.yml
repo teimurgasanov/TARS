@@ -12,6 +12,7 @@ on:
       - perf/receipt-primary-reuse-status
       - diagnostics/work-photo-classification-v1
       - diagnostic/personal-image-source-mime-v2
+      - feature/manual-image-type-selection
   pull_request:
   workflow_dispatch:
 
@@ -45,6 +46,8 @@ jobs:
       || github.base_ref == 'diagnostics/work-photo-classification-v1'
       || github.head_ref == 'diagnostic/personal-image-source-mime-v2'
       || github.base_ref == 'diagnostic/personal-image-source-mime-v2'
+      || github.head_ref == 'feature/manual-image-type-selection'
+      || github.base_ref == 'feature/manual-image-type-selection'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
