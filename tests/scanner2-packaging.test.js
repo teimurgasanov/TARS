@@ -12,7 +12,7 @@ const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
 const expectedSourceSha = "1db768134ac846cb9cd909c10abbc3aa7867c399bbff9fd7c830ffa8770aa9f6";
-const expectedManifestSha = "8c93b34e8339027896c94872af55f656511c0b338d813bde2c25a0cddfeca963";
+const expectedManifestSha = "609ccd4712ebe10c5bc533a2d5e4982b457877f07c8a14c9240a07a4c436b87e";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
 function sha256(value) {

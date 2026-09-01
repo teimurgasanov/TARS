@@ -9,6 +9,14 @@ const shadowTokenizer = require("../scanner2/shadow-tokenizer");
 const shadowRecorder = require("../scanner2/shadow-recorder");
 
 const source = fs.readFileSync(path.resolve(__dirname, "..", "TarsReportApp.js"), "utf8");
+const appManifest = require("../app.json");
+const packageManifest = require("../package.json");
+const packageLock = require("../package-lock.json");
+const baselinePermissions = Object.freeze([
+  "ui.registerButtons", "ui.interact", "slashcommand", "message.write", "message.read",
+  "room.read", "room.write", "user.read", "upload.read", "upload.write", "persistence",
+  "scheduler", "api", "networking"
+]);
 
 class AssociationRecord {
   constructor(model, key) {
@@ -227,6 +235,13 @@ function onlyRecord(harness) {
 
   assert.match(source, /scanner2-shadow:v1:/);
   assert.match(source, /id:\s*"scanner2_shadow_mode"[\s\S]*packageValue:\s*"OFF"/);
+
+  // Release candidate metadata is synchronized and preserves the 0.10.17 permission boundary.
+  assert.strictEqual(appManifest.version, "0.10.18");
+  assert.strictEqual(packageManifest.version, "0.10.18");
+  assert.strictEqual(packageLock.version, "0.10.18");
+  assert.strictEqual(packageLock.packages[""].version, "0.10.18");
+  assert.deepStrictEqual(appManifest.permissions.map(({ name }) => name), baselinePermissions);
   console.log("PASS: Scanner 2.0 runtime recorder is privacy-gated, fail-open, and RECORD_ONLY");
 })().catch((error) => {
   console.error(error);
