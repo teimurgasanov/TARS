@@ -5,6 +5,7 @@ on:
     branches:
       - feature/scanner-2.0
       - feature/scanner2-shadow-sampling
+      - fix/scanner2-shadow-config-scope
   pull_request:
   workflow_dispatch:
 
@@ -23,7 +24,9 @@ jobs:
       github.head_ref == 'feature/scanner-2.0' ||
       github.base_ref == 'feature/scanner-2.0' ||
       github.head_ref == 'feature/scanner2-shadow-sampling' ||
-      github.base_ref == 'feature/scanner2-shadow-sampling'
+      github.base_ref == 'feature/scanner2-shadow-sampling' ||
+      github.head_ref == 'fix/scanner2-shadow-config-scope' ||
+      github.base_ref == 'fix/scanner2-shadow-config-scope'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
