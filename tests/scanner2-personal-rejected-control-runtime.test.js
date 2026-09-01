@@ -17,21 +17,22 @@ function openAiResponse(payload) {
   return { statusCode: 200, data: { output_text: JSON.stringify(payload) } };
 }
 
-function runtimeScenario(guard, mode, suffix) {
+function runtimeScenario(guard, mode, suffix, options = {}) {
   const consensusMode = mode === "rejected-consensus";
   const records = new Map();
   const sourceContent = Buffer.from(`personal-receipt-control-${mode}-${suffix}`);
-  const personalRoom = { id: `personal-${suffix}`, type: "d", slugifiedName: `tars-master-${suffix}` };
+  const personalRoom = { id: `personal-${suffix}`, type: "d", slugifiedName: options.unresolvedOwner ? `tars-unresolved-${suffix}` : `tars-master-${suffix}` };
   const controlRoom = { id: "control-room", type: "p", slugifiedName: "cheki-kontrol", displayName: "Контроль чеков" };
   const owner = { id: `owner-${suffix}`, username: `master-${suffix}`, name: `Master ${suffix}` };
   const appUser = { id: "tars-id", username: "tars", name: "TARS" };
   const teimur = { id: "teimur-id", username: "teimur", name: "Teimur" };
   const shura = { id: "shura-id", username: "shura", name: "Shura" };
   const messageFile = { _id: `upload-${suffix}`, id: `upload-${suffix}`, name: `image-${suffix}.jpg`, type: "image/jpeg" };
+  const uploader = options.uploader === "teimur" ? teimur : options.uploader === "shura" ? shura : owner;
   const message = {
     id: `message-${suffix}`,
     room: personalRoom,
-    sender: owner,
+    sender: uploader,
     file: messageFile,
     files: [messageFile],
     text: "",
@@ -189,7 +190,8 @@ function runtimeScenario(guard, mode, suffix) {
           return undefined;
         },
         async getMembers(roomId) {
-          return roomId === controlRoom.id ? [appUser, owner, teimur, shura] : [appUser, owner];
+          if (roomId === controlRoom.id) return [appUser, owner, teimur, shura];
+          return options.unresolvedOwner ? [appUser, teimur, shura] : [appUser, owner, teimur, shura];
         },
         async getMessages(roomId) {
           if (roomId === controlRoom.id && latestControlUploadId) {
@@ -280,6 +282,7 @@ function runtimeScenario(guard, mode, suffix) {
   };
   const logger = { info() {}, warn() {}, error() {} };
   return {
+    appUser,
     config,
     controlRoom,
     controlUploads,
@@ -295,7 +298,10 @@ function runtimeScenario(guard, mode, suffix) {
     read,
     receiptCalls: () => receiptCalls,
     records,
-    requiredDate
+    requiredDate,
+    shura,
+    teimur,
+    uploader
   };
 }
 
@@ -407,6 +413,96 @@ async function receiptIndex(guard, scenario) {
   const acceptedStatuses = accepted.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…");
   assert.strictEqual(acceptedStatuses.length, 1, "accepted receipt must publish one processing status");
   assert.ok(accepted.deletedMessages.includes(acceptedStatuses[0].id), "accepted result must clear its processing status");
+
+  const assertRejectedOwner = async (uploader, suffix) => {
+    const loaded = loadTrackedAppWithGuard();
+    const guard = loaded.__testGuard;
+    const scenario = runtimeScenario(guard, "rejected", suffix, { uploader });
+    const result = await guard.processPersonalMediaV2(
+      scenario.message, scenario.read, scenario.persistence, scenario.modify,
+      { info() {}, warn() {}, error() {} }, scenario.http, scenario.config
+    );
+    assert.strictEqual(result.handled, true);
+    const ownerIndex = await receiptIndex(guard, scenario);
+    assert.strictEqual(ownerIndex.photos.length, 1);
+    assert.strictEqual(ownerIndex.photos[0].source, "rejected");
+    assert.strictEqual(ownerIndex.photos[0].userId, scenario.owner.id, `${uploader} upload must be indexed for the room owner`);
+    assert.strictEqual(ownerIndex.photos[0].username, scenario.owner.username);
+    const controlText = scenario.publishedMessages.map((item) => String(item.text || "")).find((text) => text.startsWith("👁️ ЧЕК НА КОНТРОЛЬ"));
+    assert.ok(controlText && controlText.includes(`Мастер: @${scenario.owner.username}`), `${uploader} upload must name the room owner in control`);
+    if (scenario.uploader.id !== scenario.owner.id) {
+      assert.ok(!controlText.includes(`Мастер: @${scenario.uploader.username}`), "control must not name an admin uploader as master");
+    }
+    assert.ok(scenario.deletedMessages.includes(scenario.message.id), "owner attribution must preserve source-message deletion after the control copy");
+    return { loaded, guard, scenario, ownerIndex };
+  };
+
+  // Owner attribution A-C. Admin uploads are credited to the personal-room
+  // owner, while a master's own upload remains unchanged.
+  const teimurRejected = await assertRejectedOwner("teimur", "owner-teimur");
+  await assertRejectedOwner("shura", "owner-shura");
+  await assertRejectedOwner("owner", "owner-self");
+
+  // D. Approving the rejected record keeps the normalized room owner and
+  // refreshes that owner's running total.
+  const approvalApp = Object.create(teimurRejected.loaded.TarsReportApp.prototype);
+  approvalApp.receiptOcrConfig = async () => teimurRejected.scenario.config;
+  approvalApp.getLogger = () => ({ info() {}, warn() {}, error() {} });
+  const rejectedEntry = teimurRejected.ownerIndex.photos[0];
+  await approvalApp.handleApproveReceiptButton(
+    teimurRejected.scenario.read,
+    teimurRejected.scenario.modify,
+    teimurRejected.scenario.persistence,
+    {
+      user: teimurRejected.scenario.teimur,
+      room: teimurRejected.scenario.controlRoom,
+      value: rejectedEntry.exact
+    }
+  );
+  const approvedIndex = await receiptIndex(teimurRejected.guard, teimurRejected.scenario);
+  assert.strictEqual(approvedIndex.photos[0].source, "confirmed");
+  assert.strictEqual(approvedIndex.photos[0].userId, teimurRejected.scenario.owner.id);
+  assert.strictEqual(approvedIndex.photos[0].username, teimurRejected.scenario.owner.username);
+  const approvedSummary = await teimurRejected.guard.confirmedTransferSummaryForUser(
+    teimurRejected.scenario.read,
+    teimurRejected.scenario.config,
+    teimurRejected.scenario.owner.id,
+    approvedIndex.photos[0].receiptDate,
+    [],
+    undefined,
+    teimurRejected.scenario.message.room.id
+  );
+  assert.strictEqual(approvedSummary.count, 1);
+  assert.strictEqual(approvedSummary.total, 1200);
+
+  // E. An unresolved room owner stays on review without silently inheriting
+  // the uploader identity.
+  const unresolvedLoaded = loadTrackedAppWithGuard();
+  const unresolvedGuard = unresolvedLoaded.__testGuard;
+  const unresolved = runtimeScenario(unresolvedGuard, "rejected", "owner-unresolved", { uploader: "teimur", unresolvedOwner: true });
+  await unresolvedGuard.processPersonalMediaV2(
+    unresolved.message, unresolved.read, unresolved.persistence, unresolved.modify,
+    { info() {}, warn() {}, error() {} }, unresolved.http, unresolved.config
+  );
+  const unresolvedIndex = await receiptIndex(unresolvedGuard, unresolved);
+  assert.strictEqual(unresolvedIndex.photos[0].source, "rejected");
+  assert.strictEqual(unresolvedIndex.photos[0].userId, "");
+  assert.strictEqual(unresolvedIndex.photos[0].username, "");
+  const unresolvedControlText = unresolved.publishedMessages.map((item) => String(item.text || "")).find((text) => text.startsWith("👁️ ЧЕК НА КОНТРОЛЬ"));
+  assert.ok(unresolvedControlText && unresolvedControlText.includes("Мастер: мастер"));
+  assert.ok(!unresolvedControlText.includes("@teimur"));
+  const unresolvedApp = Object.create(unresolvedLoaded.TarsReportApp.prototype);
+  unresolvedApp.receiptOcrConfig = async () => unresolved.config;
+  unresolvedApp.getLogger = () => ({ info() {}, warn() {}, error() {} });
+  await unresolvedApp.handleApproveReceiptButton(
+    unresolved.read,
+    unresolved.modify,
+    unresolved.persistence,
+    { user: unresolved.teimur, room: unresolved.controlRoom, value: unresolvedIndex.photos[0].exact }
+  );
+  const unresolvedAfterApprove = await receiptIndex(unresolvedGuard, unresolved);
+  assert.strictEqual(unresolvedAfterApprove.photos[0].source, "rejected", "unresolved owner must fail closed during approval");
+  assert.strictEqual(unresolvedAfterApprove.photos[0].userId, "");
 
   console.log("PASS: personal fallback routes confirmed rejected receipts once to control without affecting unknown images or accepted totals");
 })().catch((error) => {

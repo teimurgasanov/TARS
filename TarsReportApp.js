@@ -2521,7 +2521,8 @@ var require_upload_duplicate_guard = __commonJS({
       if (!file || !content || !content.length || !config || !config.reviewRejectedReceipts) return "";
       try {
         let user = details && details.user;
-        if (!user && file && file.userId) {
+        const explicitUser = Boolean(details && Object.prototype.hasOwnProperty.call(details, "user"));
+        if (!explicitUser && !user && file && file.userId) {
           try {
             user = await read.getUserReader().getById(file.userId);
         } catch (_6) {
@@ -5585,7 +5586,7 @@ var require_upload_duplicate_guard = __commonJS({
       const match = /^tars-([a-z0-9._-]+)$/.exec(slug);
       return match ? match[1] : "";
     }
-    async function receiptOwnerForMessage(message, read) {
+    async function receiptOwnerForMessage(message, read, fallbackToSender = true) {
       const username = receiptOwnerUsernameForRoom(message && message.room);
       if (username) {
         try {
@@ -5605,7 +5606,29 @@ var require_upload_duplicate_guard = __commonJS({
         } catch (_7) {
         }
       }
-      return message && message.sender;
+      return fallbackToSender ? message && message.sender : void 0;
+    }
+    function applyReceiptOwner(entry, owner) {
+      if (!entry) return entry;
+      entry.userId = owner && owner.id || "";
+      entry.username = owner && owner.username || "";
+      entry.userName = owner && owner.name || "";
+      return entry;
+    }
+    async function normalizeIndexedReceiptOwner(entry, read) {
+      if (!entry || !entry.roomId) return { personal: false, resolved: false, room: void 0, owner: void 0 };
+      let room;
+      try {
+        room = await read.getRoomReader().getById(entry.roomId);
+      } catch (_7) {
+        room = void 0;
+      }
+      if (!room) return { personal: false, resolved: false, room: void 0, owner: void 0 };
+      if (!isPersonalTarsRoom(room)) return { personal: false, resolved: true, room, owner: void 0 };
+      const owner = await receiptOwnerForMessage({ room }, read, false);
+      if (!owner) return { personal: true, resolved: false, room, owner: void 0 };
+      applyReceiptOwner(entry, owner);
+      return { personal: true, resolved: true, room, owner };
     }
     async function publishAcceptedReceipt(entry, message, read, modify, config, logger) {
       if (!entry || entry.resultMessageId || !message || !message.sender) return false;
@@ -5883,6 +5906,16 @@ var require_upload_duplicate_guard = __commonJS({
       const seenFileIds = {};
       const imageFiles = messageImageFiles(message);
       const personalRoom = isPersonalTarsRoom(message && message.room);
+      let personalReceiptOwnerResolved = false;
+      let personalReceiptOwner;
+      const receiptOwnerForRejectedRoute = async () => {
+        if (!personalRoom) return message && message.sender;
+        if (!personalReceiptOwnerResolved) {
+          personalReceiptOwner = await receiptOwnerForMessage(message, read, false);
+          personalReceiptOwnerResolved = true;
+        }
+        return personalReceiptOwner;
+      };
       // Run the workday cleanup for ANY message in a personal master room,
       // not only ones carrying a photo/receipt, so a text-only message (or
       // a "quiet" room with no photo activity that day) still triggers it.
@@ -5995,11 +6028,14 @@ var require_upload_duplicate_guard = __commonJS({
           if (protectedRoom.kind === "receipt" && exactMatch && exactMatch.source !== "pre") {
             if (exactMatch.source === "rejected") {
               const reason = receiptRejectionMessage(exactMatch.invalidReason || "receipt validation failed");
+              const receiptOwner = await receiptOwnerForRejectedRoute();
+              applyReceiptOwner(exactMatch, receiptOwner);
+              await writeIndex(persistence, protectedRoom.index, index);
               if (message.id && message.sender) {
                 await publishRejectedReceiptReview(messageFile, content, {
                   reason,
                   sourceRoom: message.room,
-                  user: message.sender,
+                  user: receiptOwner || null,
                   exact,
                   receiptDate: exactMatch.receiptDate,
                   receiptAmount: exactMatch.receiptAmount
@@ -6078,9 +6114,7 @@ var require_upload_duplicate_guard = __commonJS({
                 exactMatch.invalidReason = receiptRejectionMessage(receiptCheck.reason || "receipt validation failed");
                 exactMatch.validationVersion = 11;
                 exactMatch.roomId = message.room && message.room.id || exactMatch.roomId;
-                exactMatch.userId = message.sender && message.sender.id || exactMatch.userId || "";
-                exactMatch.username = message.sender && message.sender.username || exactMatch.username || "";
-                exactMatch.userName = message.sender && message.sender.name || exactMatch.userName || "";
+                applyReceiptOwner(exactMatch, await receiptOwnerForRejectedRoute());
                 exactMatch.messageId = message.id || exactMatch.messageId || "";
                 exactMatch.uploadId = messageFileId;
                 exactMatch.postProcessedAt = Date.now();
@@ -6121,6 +6155,8 @@ var require_upload_duplicate_guard = __commonJS({
                 exactMatch.source = "duplicate";
                 exactMatch.invalidReason = "🚫 ПОВТОР ЧЕКА";
                 exactMatch.validationVersion = 10;
+                const receiptOwner = await receiptOwnerForRejectedRoute();
+                applyReceiptOwner(exactMatch, receiptOwner);
                 exactMatch.messageId = message.id || exactMatch.messageId || "";
                 exactMatch.uploadId = messageFileId;
                 exactMatch.postProcessedAt = Date.now();
@@ -6128,7 +6164,7 @@ var require_upload_duplicate_guard = __commonJS({
                 await publishRejectedReceiptReview(messageFile, content, {
                   reason: exactMatch.invalidReason,
                   sourceRoom: message.room,
-                  user: message.sender,
+                  user: receiptOwner || null,
                   exact,
                   receiptDate: receiptCheck.receiptDate,
                   receiptAmount: receiptCheck.receiptAmount
@@ -6191,10 +6227,11 @@ var require_upload_duplicate_guard = __commonJS({
             exactMatch.source = "confirmed";
             exactMatch.postProcessedAt = Date.now();
             if (protectedRoom.kind === "receipt" && exactMatch.receiptWarning && !exactMatch.receiptWarningPublishedAt) {
+              const receiptOwner = await receiptOwnerForRejectedRoute();
               await publishRejectedReceiptReview(messageFile, content, {
                 reason: exactMatch.receiptWarning,
                 sourceRoom: message.room,
-                user: message.sender,
+                user: receiptOwner || null,
                 exact,
                 receiptDate: exactMatch.receiptDate,
                 receiptAmount: exactMatch.receiptAmount
@@ -6218,6 +6255,7 @@ var require_upload_duplicate_guard = __commonJS({
           if (protectedRoom.kind === "receipt") {
             const receiptCheck = prevalidatedReceiptCheck || await validateReceiptStrict(messageFile, content, http, ocrConfig, logger, receiptValidationContext, personalImageDiagnostic);
             if (!receiptCheck.ok) {
+              const receiptOwner = await receiptOwnerForRejectedRoute();
               const rejectedEntry = {
                 exact,
                 visual,
@@ -6228,9 +6266,9 @@ var require_upload_duplicate_guard = __commonJS({
                 invalidReason: receiptRejectionMessage(receiptCheck.reason || "receipt validation failed"),
                 validationVersion: 11,
                 uploadedAt: Date.now(),
-                userId: message.sender && message.sender.id || "",
-                username: message.sender && message.sender.username || "",
-                userName: message.sender && message.sender.name || "",
+                userId: receiptOwner && receiptOwner.id || "",
+                username: receiptOwner && receiptOwner.username || "",
+                userName: receiptOwner && receiptOwner.name || "",
                 roomId: message.room && message.room.id || "",
                 messageId: message.id || "",
                 uploadId: messageFileId,
@@ -6241,7 +6279,7 @@ var require_upload_duplicate_guard = __commonJS({
               await publishRejectedReceiptReview(messageFile, content, {
                 reason: rejectedEntry.invalidReason,
                 sourceRoom: message.room,
-                user: message.sender,
+                user: receiptOwner || null,
                 exact,
                 receiptDate: receiptCheck.receiptDate,
                 receiptAmount: receiptCheck.receiptAmount
@@ -6374,10 +6412,11 @@ var require_upload_duplicate_guard = __commonJS({
             postProcessedAt: Date.now()
           };
           if (protectedRoom.kind === "receipt" && receiptWarning) {
+            const receiptOwner = await receiptOwnerForRejectedRoute();
             await publishRejectedReceiptReview(messageFile, content, {
               reason: receiptWarning,
               sourceRoom: message.room,
-              user: message.sender,
+              user: receiptOwner || null,
               exact,
               receiptDate,
               receiptAmount
@@ -7160,6 +7199,7 @@ var require_upload_duplicate_guard = __commonJS({
       sendTodayTransferSummary,
       confirmedTransferSummaryForUser,
       publishMasterTransferSummary,
+      normalizeIndexedReceiptOwner,
       readIndex,
       writeIndex,
       PROTECTED_ROOMS,
@@ -7895,6 +7935,11 @@ var C = class extends j.App {
       await notify(`Не найден отклонённый чек @${targetUsername} на сумму ${this.formatRubles(targetAmount)} за ${displayDateText}.\nПроверьте логин, сумму и дату.`);
       return;
     }
+    const attribution = await G.normalizeIndexedReceiptOwner(entry, e);
+    if (!attribution.resolved) {
+      await notify("⚠️ Не удалось определить владельца исходного личного чата. Чек оставлен на контроле и не принят.");
+      return;
+    }
     const originalReason = entry.invalidReason || "";
     entry.source = "confirmed";
     entry.invalidReason = "";
@@ -7905,7 +7950,7 @@ var C = class extends j.App {
     await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
     if (entry.roomId) {
       try {
-        const masterRoom = await e.getRoomReader().getById(entry.roomId);
+        const masterRoom = attribution.room || await e.getRoomReader().getById(entry.roomId);
         if (masterRoom) {
           await G.publishMasterTransferSummary({
             userId: entry.userId || "",
@@ -7919,7 +7964,7 @@ var C = class extends j.App {
         this.getLogger().warn(`Could not refresh master transfer summary after manual approval: ${error && error.message || error}`);
       }
     }
-    await notify(`✅ ЧЕК ПРИНЯТ ВРУЧНУЮ\nМастер: @${targetUsername}\nСумма: ${this.formatRubles(targetAmount)}\nДата: ${displayDateText}\nБыла причина отказа: ${originalReason || "—"}\nПринял: @${currentUsername}`);
+    await notify(`✅ ЧЕК ПРИНЯТ ВРУЧНУЮ\nМастер: @${entry.username || targetUsername}\nСумма: ${this.formatRubles(targetAmount)}\nДата: ${displayDateText}\nБыла причина отказа: ${originalReason || "—"}\nПринял: @${currentUsername}`);
   }
   async handleApproveReceiptButton(e, n, t, a) {
     if (!e || !n || !t || !a || !a.user || !a.room) return;
@@ -7950,6 +7995,11 @@ var C = class extends j.App {
       await notify("⚠️ Чек нельзя зачесть одной кнопкой: сумма или дата не распознана. Используйте /prinyat @логин сумма ДД.ММ.ГГГГ.");
       return;
     }
+    const attribution = await G.normalizeIndexedReceiptOwner(entry, e);
+    if (!attribution.resolved) {
+      await notify("⚠️ Не удалось определить владельца исходного личного чата. Чек оставлен на контроле и не принят.");
+      return;
+    }
     const originalReason = entry.invalidReason || "";
     entry.source = "confirmed";
     entry.invalidReason = "";
@@ -7960,7 +8010,7 @@ var C = class extends j.App {
     await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
     if (entry.roomId) {
       try {
-        const masterRoom = await e.getRoomReader().getById(entry.roomId);
+        const masterRoom = attribution.room || await e.getRoomReader().getById(entry.roomId);
         if (masterRoom) {
           await G.publishMasterTransferSummary({
             userId: entry.userId || "",
