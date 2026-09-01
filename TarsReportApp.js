@@ -6469,6 +6469,9 @@ var require_upload_duplicate_guard = __commonJS({
       cleanupExpiredReceiptArchive,
       readArchivedReceipts,
       createArchiveDownloadUrl,
+      parseShadowSamplePercent,
+      parseShadowRetentionDays,
+      parseShadowMaxRecords,
       APPROVE_REJECTED_RECEIPT_ACTION
     };
   }
@@ -7056,9 +7059,9 @@ var C = class extends j.App {
       scanner2ShadowMode: String(await n.getValueById("scanner2_shadow_mode") || "OFF").toUpperCase() === "RECORD_ONLY" ? "RECORD_ONLY" : "OFF",
       scanner2ShadowHmacSecret: String(await n.getValueById("scanner2_shadow_hmac_secret") || ""),
       scanner2ShadowTokenKeyVersion: String(await n.getValueById("scanner2_shadow_token_key_version") || "k1").trim() || "k1",
-      scanner2ShadowSamplePercent: parseShadowSamplePercent(await n.getValueById("scanner2_shadow_sample_percent")),
-      scanner2ShadowRetentionDays: parseShadowRetentionDays(await n.getValueById("scanner2_shadow_retention_days")),
-      scanner2ShadowMaxRecords: parseShadowMaxRecords(await n.getValueById("scanner2_shadow_max_records")),
+      scanner2ShadowSamplePercent: G.parseShadowSamplePercent(await n.getValueById("scanner2_shadow_sample_percent")),
+      scanner2ShadowRetentionDays: G.parseShadowRetentionDays(await n.getValueById("scanner2_shadow_retention_days")),
+      scanner2ShadowMaxRecords: G.parseShadowMaxRecords(await n.getValueById("scanner2_shadow_max_records")),
       timeZone: !t || t === "Europe/Moscow" ? "Europe/Astrakhan" : t,
       cutoffHour: Number(cutoffSetting === void 0 || cutoffSetting === null || cutoffSetting === "" ? 0 : cutoffSetting),
       ownerUsername: String(await n.getValueById("receipt_owner_username") || "teimur"),

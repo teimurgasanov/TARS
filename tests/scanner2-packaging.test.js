@@ -11,8 +11,8 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "c47cbed1ba3b1185b5d4cb42763e0d4cd91470ef27b94b096b26ba2a093d3f04";
-const expectedManifestSha = "d25e109b8b299e1dd1d0dd0dfda95568d722fe0512d396d9bf1a9472a2466220";
+const expectedSourceSha = "29bbbe3717cbf3366acb16d71238fd493aeb1051cfd22b3db79be17e08978f23";
+const expectedManifestSha = "ec0eecd7f7de18234cd39e2cd51d67c8a04c5f1fe6f328490ab73bc3a03ca7d0";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
 function sha256(value) {
@@ -89,6 +89,17 @@ assert.strictEqual(sha256(first.manifest), manifestBefore, "packaged app.json mu
 const firstInspection = assertBundlePolicy(first.bundle);
 assert.deepStrictEqual(firstInspection.relativeRequires, [], "bundle must not contain unresolved relative imports");
 assert.deepStrictEqual(firstInspection.invalidExternals, [], "bundle must contain only approved externals");
+
+execFileSync(process.execPath, [path.join(root, "tests", "scanner2-shadow-config-runtime.test.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "scanner2-receipt-running-total-runtime.test.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
 
 const firstBundleSha = sha256(first.bundle);
 const secondZip = runBuild();
