@@ -7,6 +7,7 @@ const contracts = require("../scanner2/contracts");
 const shadowContract = require("../scanner2/shadow-contract");
 const shadowTokenizer = require("../scanner2/shadow-tokenizer");
 const shadowRecorder = require("../scanner2/shadow-recorder");
+const shadowSampling = require("../scanner2/shadow-sampling");
 
 const source = fs.readFileSync(path.resolve(__dirname, "..", "TarsReportApp.js"), "utf8");
 const appManifest = require("../app.json");
@@ -36,7 +37,9 @@ function runtimeHarness(options = {}) {
       createCircuitBreaker, RocketChatAssociationRecord, RocketChatAssociationModel,
       createShadowTokenizer, ShadowDecision, ShadowDocumentType, ShadowDuplicateState,
       SHADOW_SCHEMA_VERSION, SHADOW_PROVENANCE, validateShadowSnapshot,
-      safeShadowRecord, shadowAmountFromRubles
+      safeShadowRecord, shadowAmountFromRubles, parseShadowSamplePercent,
+      parseShadowRetentionDays, parseShadowMaxRecords, shouldSampleShadowCase,
+      safeShadowRetentionCleanup
     } = dependencies;\n${helperSource}\nreturn { recordShadowReceiptOutcome };`
   );
   const api = factory({
@@ -51,6 +54,11 @@ function runtimeHarness(options = {}) {
     SHADOW_PROVENANCE: shadowContract.SHADOW_PROVENANCE,
     validateShadowSnapshot: shadowContract.validateShadowSnapshot,
     safeShadowRecord: shadowRecorder.safeShadowRecord,
+    parseShadowSamplePercent: shadowSampling.parseShadowSamplePercent,
+    parseShadowRetentionDays: shadowSampling.parseShadowRetentionDays,
+    parseShadowMaxRecords: shadowSampling.parseShadowMaxRecords,
+    shouldSampleShadowCase: shadowSampling.shouldSampleShadowCase,
+    safeShadowRetentionCleanup: shadowSampling.safeShadowRetentionCleanup,
     shadowAmountFromRubles(value) {
       const rubles = Number(value);
       const minorUnits = Math.round(rubles * 100);
@@ -59,7 +67,7 @@ function runtimeHarness(options = {}) {
     }
   });
   const records = new Map();
-  let writes = 0;
+  let recordWrites = 0;
   const read = {
     getPersistenceReader() {
       return {
@@ -72,20 +80,26 @@ function runtimeHarness(options = {}) {
   };
   const persistence = {
     async updateByAssociation(association, value) {
-      writes += 1;
+      if (association.key !== "scanner2-shadow:v1:index") recordWrites += 1;
       if (options.throwOnWrite) throw new Error("persistence unavailable");
       if (options.timeoutOnWrite) return new Promise(() => {});
       records.set(association.key, value);
+    },
+    async removeByAssociation(association) {
+      records.delete(association.key);
     }
   };
-  return { ...api, read, persistence, records, writes: () => writes };
+  return { ...api, read, persistence, records, writes: () => recordWrites };
 }
 
 const validSecret = "scanner2-runtime-test-secret-32-bytes-minimum";
 const baseConfig = Object.freeze({
   scanner2ShadowMode: "RECORD_ONLY",
   scanner2ShadowHmacSecret: validSecret,
-  scanner2ShadowTokenKeyVersion: "k1"
+  scanner2ShadowTokenKeyVersion: "k1",
+  scanner2ShadowSamplePercent: 100,
+  scanner2ShadowRetentionDays: 30,
+  scanner2ShadowMaxRecords: 5000
 });
 const evidence = Object.freeze({
   acceptedDates: ["2026-09-01"],
@@ -124,8 +138,11 @@ function baseInput(overrides = {}) {
 }
 
 function onlyRecord(harness) {
-  assert.strictEqual(harness.records.size, 1, "one logical FINAL shadow record is expected");
-  return Array.from(harness.records.values())[0];
+  const records = Array.from(harness.records.entries())
+    .filter(([key]) => key.startsWith("scanner2-shadow:v1:anon-"))
+    .map(([, value]) => value);
+  assert.strictEqual(records.length, 1, "one logical FINAL shadow record is expected");
+  return records[0];
 }
 
 (async () => {
@@ -135,6 +152,19 @@ function onlyRecord(harness) {
     const input = baseInput();
     const before = JSON.stringify(input);
     await harness.recordShadowReceiptOutcome(input, harness.read, harness.persistence, { ...baseConfig, scanner2ShadowMode: "OFF" });
+    assert.strictEqual(harness.writes(), 0);
+    assert.strictEqual(JSON.stringify(input), before);
+  }
+
+  // A2. RECORD_ONLY remains write-disabled until an explicit positive sample is configured.
+  {
+    const harness = runtimeHarness();
+    const input = baseInput();
+    const before = JSON.stringify(input);
+    await harness.recordShadowReceiptOutcome(input, harness.read, harness.persistence, {
+      ...baseConfig,
+      scanner2ShadowSamplePercent: 0
+    });
     assert.strictEqual(harness.writes(), 0);
     assert.strictEqual(JSON.stringify(input), before);
   }
@@ -235,6 +265,7 @@ function onlyRecord(harness) {
 
   assert.match(source, /scanner2-shadow:v1:/);
   assert.match(source, /id:\s*"scanner2_shadow_mode"[\s\S]*packageValue:\s*"OFF"/);
+  assert.match(source, /id:\s*"scanner2_shadow_sample_percent"[\s\S]*packageValue:\s*"0"/);
 
   // Release candidate metadata is synchronized and preserves the 0.10.17 permission boundary.
   assert.strictEqual(appManifest.version, "0.10.18");

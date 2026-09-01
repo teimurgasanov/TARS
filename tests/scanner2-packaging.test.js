@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "1db768134ac846cb9cd909c10abbc3aa7867c399bbff9fd7c830ffa8770aa9f6";
+const expectedSourceSha = "c47cbed1ba3b1185b5d4cb42763e0d4cd91470ef27b94b096b26ba2a093d3f04";
 const expectedManifestSha = "609ccd4712ebe10c5bc533a2d5e4982b457877f07c8a14c9240a07a4c436b87e";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
@@ -67,11 +67,16 @@ assert.strictEqual(installedEsbuild, "0.12.29", "packaging must use the pinned e
 const productionSource = fs.readFileSync(sourcePath, "utf8");
 assert.match(productionSource, /safeShadowRecord\s*\(/, "production source must include the fail-open RECORD_ONLY recorder call");
 assert.match(productionSource, /createShadowTokenizer\s*\(/, "production source must tokenize runtime shadow records");
+assert.match(productionSource, /shouldSampleShadowCase\s*\(/, "production source must gate RECORD_ONLY writes through deterministic sampling");
+assert.match(productionSource, /scanner2-shadow:v1:index/, "production source must maintain an isolated bounded-retention index");
+assert.match(productionSource, /id:\s*"scanner2_shadow_sample_percent"[\s\S]*packageValue:\s*"0"/,
+  "packaged sampling must remain write-disabled by default");
 ["evaluateRules", "resolveConflicts", "makeDecision", "runOfflineComparison", "runOfflineDataset"].forEach((name) => {
   assert.doesNotMatch(productionSource, new RegExp(`\\b${name}\\s*\\(`), "production source must not run Scanner 2.0 decision logic: " + name);
 });
 
 const entrySource = fs.readFileSync(path.join(root, "tools", "tars-build-entry.js"), "utf8");
+assert.match(entrySource, /shadow-sampling/, "build entry must include tested sampling and retention helpers");
 assert.doesNotMatch(entrySource, /safeShadowRecord\s*\(/, "build entry must not call Shadow Recorder");
 assert.doesNotMatch(entrySource, /createShadowTokenizer\s*\(/, "build entry must not create a shadow tokenizer");
 

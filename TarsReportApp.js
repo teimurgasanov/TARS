@@ -1092,6 +1092,13 @@ var require_upload_duplicate_guard = __commonJS({
     } = require("./scanner2/shadow-contract");
     var { createShadowTokenizer } = require("./scanner2/shadow-tokenizer");
     var { createCircuitBreaker, safeShadowRecord } = require("./scanner2/shadow-recorder");
+    var {
+      parseShadowSamplePercent,
+      parseShadowRetentionDays,
+      parseShadowMaxRecords,
+      shouldSampleShadowCase,
+      safeShadowRetentionCleanup
+    } = require("./scanner2/shadow-sampling");
     function rightRotate(value, amount) {
       return value >>> amount | value << 32 - amount;
     }
@@ -4340,19 +4347,58 @@ var require_upload_duplicate_guard = __commonJS({
       }
     }
     const shadowRuntimeCircuitBreaker = createCircuitBreaker({ failureThreshold: 3, cooldownMs: 6e4 });
+    let shadowRetentionQueue = Promise.resolve();
+    function queueShadowRetention(options) {
+      const run = shadowRetentionQueue.then(
+        () => safeShadowRetentionCleanup(options),
+        () => safeShadowRetentionCleanup(options)
+      );
+      shadowRetentionQueue = run.then(() => void 0, () => void 0);
+      return run;
+    }
     function shadowAssociation(caseId) {
       return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `scanner2-shadow:v1:${caseId}`);
     }
-    function shadowPersistenceAdapter(read, persistence) {
+    function shadowIndexAssociation() {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, "scanner2-shadow:v1:index");
+    }
+    function shadowPersistenceAdapter(read, persistence, retentionOptions) {
+      const retentionPersistence = {
+        async readIndex() {
+          const records = await read.getPersistenceReader().readByAssociation(shadowIndexAssociation());
+          const index = Array.isArray(records) && records.length ? records[0] : void 0;
+          return index && Array.isArray(index.entries) ? index.entries : [];
+        },
+        async writeIndex(entries) {
+          await persistence.updateByAssociation(shadowIndexAssociation(), {
+            namespace: "scanner2-shadow:v1",
+            entries
+          }, true);
+        },
+        async removeCase(caseId) {
+          await persistence.removeByAssociation(shadowAssociation(caseId));
+        }
+      };
       return {
         async upsert(record, merge) {
           const association = shadowAssociation(record.caseId);
           const records = await read.getPersistenceReader().readByAssociation(association);
           const existing = Array.isArray(records) && records.length ? records[0] : void 0;
           const selected = merge(existing, record);
-          if (selected === existing) return "UNCHANGED";
-          await persistence.updateByAssociation(association, selected, true);
-          return existing ? "UPDATED" : "CREATED";
+          let writeResult = "UNCHANGED";
+          if (selected !== existing) {
+            await persistence.updateByAssociation(association, selected, true);
+            writeResult = existing ? "UPDATED" : "CREATED";
+          }
+          await queueShadowRetention({
+            persistence: retentionPersistence,
+            caseId: record.caseId,
+            retentionDays: retentionOptions.retentionDays,
+            maxRecords: retentionOptions.maxRecords,
+            timeoutMs: 25,
+            maxDeletesPerRun: 32
+          });
+          return writeResult;
         }
       };
     }
@@ -4410,10 +4456,13 @@ var require_upload_duplicate_guard = __commonJS({
           tokenKeyVersion: String(config && config.scanner2ShadowTokenKeyVersion || "")
         });
         if (!tokenizer) return;
-        const evidence = sanitizedShadowEvidence(input && input.shadowEvidence, input && input.requiredDate);
+        const samplePercent = parseShadowSamplePercent(config && config.scanner2ShadowSamplePercent);
+        if (samplePercent <= 0) return;
         const caseSource = [input && input.messageId, input && input.uploadId, input && input.exact].map((value) => String(value || "")).filter(Boolean).join("|");
         if (!caseSource) return;
         const caseId = tokenizer.tokenizeCase(caseSource);
+        if (!shouldSampleShadowCase(caseId, samplePercent)) return;
+        const evidence = sanitizedShadowEvidence(input && input.shadowEvidence, input && input.requiredDate);
         const duplicateMatchType = input && input.duplicateMatchType === "IDENTITY" ? "IDENTITY" : "NONE";
         const isIdentityDuplicate = duplicateMatchType === "IDENTITY";
         const decision = input && input.decision === ShadowDecision.ACCEPT ? ShadowDecision.ACCEPT : input && input.decision === ShadowDecision.REJECT ? ShadowDecision.REJECT : ShadowDecision.REVIEW;
@@ -4448,7 +4497,10 @@ var require_upload_duplicate_guard = __commonJS({
         await safeShadowRecord(snapshot, {
           enabled: true,
           tokenizer,
-          persistence: shadowPersistenceAdapter(read, persistence),
+          persistence: shadowPersistenceAdapter(read, persistence, {
+            retentionDays: parseShadowRetentionDays(config && config.scanner2ShadowRetentionDays),
+            maxRecords: parseShadowMaxRecords(config && config.scanner2ShadowMaxRecords)
+          }),
           circuitBreaker: shadowRuntimeCircuitBreaker,
           writeTimeoutMs: 50
         });
@@ -6563,6 +6615,33 @@ var C = class extends j.App {
       i18nDescription: "scanner2_shadow_token_key_version_description"
     });
     await e.settings.provideSetting({
+      id: "scanner2_shadow_sample_percent",
+      type: z.SettingType.STRING,
+      packageValue: "0",
+      required: false,
+      public: false,
+      i18nLabel: "scanner2_shadow_sample_percent_label",
+      i18nDescription: "scanner2_shadow_sample_percent_description"
+    });
+    await e.settings.provideSetting({
+      id: "scanner2_shadow_retention_days",
+      type: z.SettingType.STRING,
+      packageValue: "30",
+      required: false,
+      public: false,
+      i18nLabel: "scanner2_shadow_retention_days_label",
+      i18nDescription: "scanner2_shadow_retention_days_description"
+    });
+    await e.settings.provideSetting({
+      id: "scanner2_shadow_max_records",
+      type: z.SettingType.STRING,
+      packageValue: "5000",
+      required: false,
+      public: false,
+      i18nLabel: "scanner2_shadow_max_records_label",
+      i18nDescription: "scanner2_shadow_max_records_description"
+    });
+    await e.settings.provideSetting({
       id: "receipt_timezone",
       type: z.SettingType.STRING,
       packageValue: "Europe/Astrakhan",
@@ -6977,6 +7056,9 @@ var C = class extends j.App {
       scanner2ShadowMode: String(await n.getValueById("scanner2_shadow_mode") || "OFF").toUpperCase() === "RECORD_ONLY" ? "RECORD_ONLY" : "OFF",
       scanner2ShadowHmacSecret: String(await n.getValueById("scanner2_shadow_hmac_secret") || ""),
       scanner2ShadowTokenKeyVersion: String(await n.getValueById("scanner2_shadow_token_key_version") || "k1").trim() || "k1",
+      scanner2ShadowSamplePercent: parseShadowSamplePercent(await n.getValueById("scanner2_shadow_sample_percent")),
+      scanner2ShadowRetentionDays: parseShadowRetentionDays(await n.getValueById("scanner2_shadow_retention_days")),
+      scanner2ShadowMaxRecords: parseShadowMaxRecords(await n.getValueById("scanner2_shadow_max_records")),
       timeZone: !t || t === "Europe/Moscow" ? "Europe/Astrakhan" : t,
       cutoffHour: Number(cutoffSetting === void 0 || cutoffSetting === null || cutoffSetting === "" ? 0 : cutoffSetting),
       ownerUsername: String(await n.getValueById("receipt_owner_username") || "teimur"),
