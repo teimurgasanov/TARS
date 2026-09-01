@@ -28,7 +28,7 @@ const pEnd = source.indexOf('function normalizedUsername', pStart);
 if (pStart < 0 || pEnd <= pStart) throw new Error('personal protected-room block not found');
 const protectedBlock = source.slice(pStart, pEnd);
 assert(protectedBlock.includes('if (kind === "photo" || kind === "unknown")'), 'photo and unknown must share the strict routing branch');
-assert(protectedBlock.includes('await validateReceiptStrict(file, content, http, config, logger, validationContext)'), 'unknown personal images must receive a strict receipt fallback with upload-bound evidence');
+assert(protectedBlock.includes('await validateReceiptStrict(file, content, http, config, logger, validationContext'), 'unknown personal images must receive a strict receipt fallback with upload-bound evidence');
 assert(protectedBlock.includes('return PROTECTED_ROOMS.kassa'), 'strictly confirmed fallback receipts must reach the receipt ledger');
 assert(!protectedBlock.includes('isBlockedPersonalPhotoImage(file, content'), 'legacy second classifier must not run after clean classifier');
 assert(!protectedBlock.includes('defaulting to report photo'), 'unknown must not default to report photo');

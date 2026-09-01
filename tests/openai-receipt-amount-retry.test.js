@@ -30,10 +30,10 @@ assert.match(source, /повёрнуто на 90, 180 или 270 градусо�
 assert.match(source, /detail: "high"/);
 assert.match(request, /amount_text/);
 assert.match(request, /candidate\.receiptAmountSource = `openai:\$\{model\}`/);
-assert.match(validation, /requestOpenAiReceiptCheck\(file, content, http, config, requiredDate, logger, 0, true\)/);
+assert.match(validation, /requestOpenAiReceiptCheck\(file, content, http, config, requiredDate, logger, 0, true/);
 assert.match(validation, /if \(amountCandidate\) candidates\.push\(amountCandidate\)/);
 assert.match(validation, /!candidates\.some\(\(candidate\) => candidate && candidate\.receiptDate === requiredDate\)/);
-assert.match(validation, /requestOpenAiReceiptCheck\(file, content, http, config, requiredDate, logger, 0, false, true\)/);
+assert.match(validation, /requestOpenAiReceiptCheck\(file, content, http, config, requiredDate, logger, 0, false, true/);
 assert.match(validation, /if \(dateCandidate\) candidates\.push\(dateCandidate\)/);
 
 const candidateStart = source.indexOf('function alignReceiptDateToRequiredYear');

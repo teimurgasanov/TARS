@@ -11,8 +11,8 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "6925c1e87996d85cad6799fc06852ae0a9be5f47b99dcd680cb63ca7ef435161";
-const expectedManifestSha = "37ffd0f00ecd958089d89e7d573f3c9243fa2ae9214f8fb0102a2573a2ccde0a";
+const expectedSourceSha = "94c9615ff5098714a7d9188fb33ed08cfd3a77a28474f9a349b6dfd43047c231";
+const expectedManifestSha = "5342d8959b46202a21e06dc929f910515adae4a7dc4a280848373b2c72bc54c3";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
 function sha256(value) {
@@ -69,6 +69,7 @@ assert.match(productionSource, /safeShadowRecord\s*\(/, "production source must 
 assert.match(productionSource, /createShadowTokenizer\s*\(/, "production source must tokenize runtime shadow records");
 assert.match(productionSource, /shouldSampleShadowCase\s*\(/, "production source must gate RECORD_ONLY writes through deterministic sampling");
 assert.match(productionSource, /scanner2-shadow:v1:index/, "production source must maintain an isolated bounded-retention index");
+assert.match(productionSource, /PERSONAL_IMAGE_PIPELINE_V2/, "production source must include privacy-safe source/MIME telemetry");
 assert.match(productionSource, /id:\s*"scanner2_shadow_sample_percent"[\s\S]*packageValue:\s*"0"/,
   "packaged sampling must remain write-disabled by default");
 ["evaluateRules", "resolveConflicts", "makeDecision", "runOfflineComparison", "runOfflineDataset"].forEach((name) => {
@@ -116,6 +117,11 @@ execFileSync(process.execPath, [path.join(root, "tests", "receipt-primary-reuse-
   stdio: "pipe"
 });
 execFileSync(process.execPath, [path.join(root, "tests", "work-photo-diagnostics.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "work-photo-source-mime-telemetry.runtime.js")], {
   cwd: root,
   encoding: "utf8",
   stdio: "pipe"

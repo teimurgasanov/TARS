@@ -21,7 +21,7 @@ assert(h.includes('dedicated-work-photo-check'), 'confirmed fallback work photo 
 assert(h.includes('finalKind === \"photo\"'), 'primary photo candidates must receive strict confirmation');
 assert(h.includes('finalKind === \"receipt\"'), 'receipt must block');
 assert(h.includes('finalKind === \"mailing\"'), 'mailing proof must block');
-assert(h.includes('validateReceiptStrict(file, content, http, config, logger)'), 'unknown images must receive strict receipt exclusion before fallback');
+assert(h.includes('validateReceiptStrict(file, content, http, config, logger'), 'unknown images must receive strict receipt exclusion before fallback');
 assert(h.includes('strict-receipt-check'), 'strictly confirmed receipts must remain blocked');
 assert(h.includes('forward: false, reason: "work-photo-not-strictly-confirmed"'), 'unknown images must fail closed instead of being accepted by exclusion');
 assert(!h.includes('forward: true, reason: "verified-non-receipt-image"'), 'receipt-check failures must never default to work photos');
