@@ -57,3 +57,26 @@ Safe remediation requires a separate guarded session-cleanup action using the de
 Review this isolated security commit, then merge it into `develop` only with separate authorization. Before any later deployment, run an independently reviewed credentials-only session cleanup or otherwise revoke all sessions for the exact deployment account. Do not enable Scanner 2.0 RECORD_ONLY as part of that cleanup.
 
 Final commit SHA is reported by Codex after the validated commit is created.
+
+## Stage 3B-2.7 SESSION_CLEANUP
+
+The existing manual workflow now has an explicit choice between `DEPLOY` and `SESSION_CLEANUP`.
+
+- `DEPLOY` continues to require exact `DEPLOY` confirmation and a reviewed `develop` commit SHA.
+- `SESSION_CLEANUP` requires exact `CLEANUP` confirmation.
+- The cleanup job is gated to manual dispatch and cannot run from a `develop` push.
+- The cleanup job does not check out source code, build a package, upload an artifact, or call the application update endpoint.
+- Its single authenticated shell step logs in, immediately masks dynamic credentials, revokes older deployment-user sessions, and always attempts to close its fresh session through an exit trap.
+- Revocation failure is fail-closed and still executes fresh-session cleanup. There is no retry.
+- The existing deployment path retains its full tests, canonical build, package gate, previous-session revocation, application update, and final logout.
+
+Security simulations cover successful cleanup and rejected revocation. Both prove that cleanup never reaches the application update endpoint and that fresh-session logout remains last. This mode was not executed during implementation; the older session remains potentially active until a separately authorized guarded cleanup run succeeds.
+
+Validation from parent `2b391e75188a9b3f23bc875389703ae481ee11f9`:
+
+- Scanner 2.0 tests: 18/18 passed.
+- Legacy TARS tests: 77/77 passed.
+- Workflow YAML parsing, JavaScript syntax checks, and `git diff --check`: passed.
+- `TarsReportApp.js`, `app.json`, `build-tars.sh`, `scanner2/`, packaging files, translations, and production behavior were unchanged.
+
+Residual risk: the cleanup depends on Rocket.Chat permitting `users.logoutOtherClients` for the deployment account. A rejection or unavailable endpoint fails closed, skips every application-update path, and still attempts logout of the newly created cleanup session. The cleanup action must therefore be run only after separate review and authorization.

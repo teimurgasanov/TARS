@@ -17,17 +17,25 @@ function step(name) {
   return workflow.slice(start, next >= 0 ? next : workflow.length);
 }
 
+function runScript(stepText) {
+  const marker = "        run: |\n";
+  const start = stepText.indexOf(marker);
+  assert.ok(start >= 0, "guarded step must contain a shell script");
+  return stepText
+    .slice(start + marker.length)
+    .split("\n")
+    .map((line) => line.startsWith("          ") ? line.slice(10) : line)
+    .join("\n");
+}
+
 const guardedName = "Authenticate, revoke previous sessions, update app, and logout";
 const guarded = step(guardedName);
-const manualGate = "if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY'";
-const runMarker = "        run: |\n";
-const runStart = guarded.indexOf(runMarker);
-assert.ok(runStart >= 0, "guarded step must contain a shell script");
-const guardedScript = guarded
-  .slice(runStart + runMarker.length)
-  .split("\n")
-  .map((line) => line.startsWith("          ") ? line.slice(10) : line)
-  .join("\n");
+const guardedScript = runScript(guarded);
+const cleanupValidation = step("Validate guarded session cleanup request");
+const cleanupGuarded = step("Revoke previous sessions and logout cleanup session");
+const cleanupScript = runScript(cleanupGuarded);
+const manualGate = "if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY'";
+const cleanupJobGate = "if: github.event_name == 'workflow_dispatch' && inputs.action == 'SESSION_CLEANUP'";
 
 assert.ok(guarded.includes(manualGate), "all authenticated Rocket.Chat calls must remain manual DEPLOY only");
 assert.match(guarded, /\/api\/v1\/login/, "guarded step must authenticate locally");
@@ -42,6 +50,16 @@ assert.ok(
 );
 assert.match(guarded, /Deployment blocked before apps\/update/, "revocation failure must fail closed before app update");
 assert.match(guarded, /No retry will be attempted/, "app update must not retry automatically");
+assert.ok(workflow.includes(cleanupJobGate), "session cleanup must be unavailable to develop pushes");
+assert.match(cleanupValidation, /inputs\.confirm.*CLEANUP/, "session cleanup must require exact CLEANUP confirmation");
+assert.match(cleanupGuarded, /\/api\/v1\/login/, "session cleanup must authenticate locally");
+assert.match(cleanupGuarded, /::add-mask::\$AUTH_TOKEN/, "session-cleanup auth token must be masked");
+assert.match(cleanupGuarded, /::add-mask::\$USER_ID/, "session-cleanup user id must be masked");
+assert.match(cleanupGuarded, /trap cleanup EXIT/, "session cleanup must install logout cleanup");
+assert.match(cleanupGuarded, /\/api\/v1\/users\.logoutOtherClients/, "session cleanup must revoke older sessions");
+assert.match(cleanupGuarded, /\/api\/v1\/logout/, "session cleanup must logout its fresh session");
+assert.doesNotMatch(cleanupGuarded, /\/api\/apps\/update/, "session cleanup must never update the application");
+assert.doesNotMatch(cleanupGuarded, /ZIP_PATH|build-tars|upload-artifact/, "session cleanup must not require a package");
 
 assert.doesNotMatch(workflow, /(?:AUTH_TOKEN|USER_ID)=.*>>\s*["']?\$GITHUB_ENV/,
   "dynamic credentials must never be written to GITHUB_ENV");
@@ -56,8 +74,17 @@ assert.deepStrictEqual(credentialEchoes.map((line) => line.trim()), [
   'echo "::add-mask::$AUTH_TOKEN"',
   'echo "::add-mask::$USER_ID"'
 ], "the mask commands must be the only stdout path for dynamic credential values");
+const cleanupCredentialEchoes = cleanupScript
+  .split("\n")
+  .filter((line) => /echo .*\$(?:AUTH_TOKEN|USER_ID)/.test(line));
+assert.deepStrictEqual(cleanupCredentialEchoes.map((line) => line.trim()), [
+  'echo "::add-mask::$AUTH_TOKEN"',
+  'echo "::add-mask::$USER_ID"'
+], "cleanup mask commands must be the only stdout path for dynamic credential values");
 assert.ok(guardedScript.indexOf("trap cleanup EXIT") < guardedScript.indexOf("/api/v1/login"),
   "logout trap must be installed before authentication");
+assert.ok(cleanupScript.indexOf("trap cleanup EXIT") < cleanupScript.indexOf("/api/v1/login"),
+  "cleanup logout trap must be installed before authentication");
 
 const validationPrefix = workflow.slice(0, workflow.indexOf("      - name: Validate Rocket.Chat deployment secrets"));
 assert.doesNotMatch(validationPrefix, /secrets\.ROCKETCHAT_|\/api\/v1\/login|\/api\/apps\/update|logoutOtherClients/,
@@ -66,9 +93,10 @@ assert.doesNotMatch(validationPrefix, /secrets\.ROCKETCHAT_|\/api\/v1\/login|\/a
 const scanner2DecisionCalls = ["evaluateRules", "resolveConflicts", "makeDecision", "runOfflineComparison", "runOfflineDataset"];
 scanner2DecisionCalls.forEach((name) => {
   assert.doesNotMatch(guarded, new RegExp(`\\b${name}\\s*\\(`), `${name} must remain outside deploy credential handling`);
+  assert.doesNotMatch(cleanupGuarded, new RegExp(`\\b${name}\\s*\\(`), `${name} must remain outside session cleanup`);
 });
 
-function simulateGuardedStep(updateCode, revokeCode = 200) {
+function simulateScript(script, updateCode, revokeCode = 200) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tars-token-hygiene-"));
   const callLog = path.join(tempDir, "calls.log");
   const mockPrelude = `
@@ -107,7 +135,7 @@ curl() {
   esac
 }
 `;
-  const result = spawnSync("bash", ["-c", mockPrelude + "\n" + guardedScript], {
+  const result = spawnSync("bash", ["-c", mockPrelude + "\n" + script], {
     cwd: path.resolve(__dirname, ".."),
     encoding: "utf8",
     env: {
@@ -125,6 +153,10 @@ curl() {
   const calls = fs.existsSync(callLog) ? fs.readFileSync(callLog, "utf8").trim().split("\n") : [];
   fs.rmSync(tempDir, { recursive: true, force: true });
   return { ...result, calls };
+}
+
+function simulateGuardedStep(updateCode, revokeCode = 200) {
+  return simulateScript(guardedScript, updateCode, revokeCode);
 }
 
 const successRun = simulateGuardedStep(200);
@@ -145,5 +177,15 @@ const failedRevocationRun = simulateGuardedStep(200, 403);
 assert.notStrictEqual(failedRevocationRun.status, 0, "failed previous-session revocation must block deployment");
 assert.deepStrictEqual(failedRevocationRun.calls, ["login", "revoke", "logout"],
   "apps/update must not run when previous sessions could not be revoked");
+
+const cleanupSuccessRun = simulateScript(cleanupScript, 599, 200);
+assert.strictEqual(cleanupSuccessRun.status, 0, cleanupSuccessRun.stderr);
+assert.deepStrictEqual(cleanupSuccessRun.calls, ["login", "revoke", "logout"],
+  "session cleanup must only login, revoke older sessions, and logout");
+
+const cleanupFailureRun = simulateScript(cleanupScript, 599, 403);
+assert.notStrictEqual(cleanupFailureRun.status, 0, "session cleanup must fail closed when revocation is rejected");
+assert.deepStrictEqual(cleanupFailureRun.calls, ["login", "revoke", "logout"],
+  "failed session cleanup must still logout its fresh session and never update the app");
 
 console.log("PASS: Rocket.Chat deployment credentials remain local, masked, and explicitly revoked");

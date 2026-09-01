@@ -5,12 +5,19 @@ on:
     branches: [develop]
   workflow_dispatch:
     inputs:
-      commit_sha:
-        description: "Exact reviewed develop commit SHA to deploy"
+      action:
+        description: "Choose guarded production action"
         required: true
+        type: choice
+        options:
+          - DEPLOY
+          - SESSION_CLEANUP
+      commit_sha:
+        description: "Exact reviewed develop commit SHA (required for DEPLOY only)"
+        required: false
         type: string
       confirm:
-        description: "Type DEPLOY to confirm installation"
+        description: "Type DEPLOY for deployment or CLEANUP for session cleanup"
         required: true
         type: string
 
@@ -24,6 +31,7 @@ concurrency:
 jobs:
   validate:
     name: Validate canonical package and optionally deploy
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY')
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -34,6 +42,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.action }}" != "DEPLOY" ]; then
+              echo "Deployment blocked: action must be exactly DEPLOY."
+              exit 1
+            fi
             if [ "${{ inputs.confirm }}" != "DEPLOY" ]; then
               echo "Deployment blocked: confirmation must be exactly DEPLOY."
               exit 1
@@ -253,7 +265,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Validate Rocket.Chat deployment secrets
-        if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY'
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY'
         shell: bash
         env:
           ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
@@ -270,7 +282,7 @@ jobs:
           esac
 
       - name: Authenticate, revoke previous sessions, update app, and logout
-        if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY'
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY'
         shell: bash
         env:
           ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
@@ -391,7 +403,7 @@ jobs:
           PY
 
       - name: Manual deployment summary
-        if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY' && success()
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY' && success()
         shell: bash
         run: |
           echo "Rocket.Chat private-app update completed."
@@ -400,3 +412,116 @@ jobs:
           python3 -c 'import json; print("Version:", json.load(open("app.json"))["version"])'
           echo "Bundle SHA-256: $BUNDLE_SHA256"
           echo "ZIP SHA-256: $ZIP_SHA256"
+
+  session_cleanup:
+    name: Revoke Rocket.Chat deployment-user sessions without deploy
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'SESSION_CLEANUP'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Validate guarded session cleanup request
+        shell: bash
+        env:
+          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
+          ROCKETCHAT_USER: ${{ secrets.ROCKETCHAT_USER }}
+          ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test "${{ inputs.confirm }}" = "CLEANUP" || {
+            echo "Session cleanup blocked: confirmation must be exactly CLEANUP."
+            exit 1
+          }
+          test -n "$ROCKETCHAT_URL" || { echo "ROCKETCHAT_URL is missing"; exit 1; }
+          test -n "$ROCKETCHAT_USER" || { echo "ROCKETCHAT_USER is missing"; exit 1; }
+          test -n "$ROCKETCHAT_PASSWORD" || { echo "ROCKETCHAT_PASSWORD is missing"; exit 1; }
+          case "$ROCKETCHAT_URL" in
+            https://*) ;;
+            *) echo "Session cleanup blocked: ROCKETCHAT_URL must use https://"; exit 1 ;;
+          esac
+
+      - name: Revoke previous sessions and logout cleanup session
+        shell: bash
+        env:
+          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
+          ROCKETCHAT_USER: ${{ secrets.ROCKETCHAT_USER }}
+          ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          AUTH_TOKEN=""
+          USER_ID=""
+          SESSION_OPEN=0
+          REVOKE_RESPONSE="$(mktemp "$RUNNER_TEMP/tars-session-cleanup-revoke.XXXXXX")"
+          LOGOUT_RESPONSE="$(mktemp "$RUNNER_TEMP/tars-session-cleanup-logout.XXXXXX")"
+
+          cleanup() {
+            original_status=$?
+            trap - EXIT
+            set +e
+            cleanup_failed=0
+            if [ "$SESSION_OPEN" -eq 1 ] && [ -n "$AUTH_TOKEN" ] && [ -n "$USER_ID" ]; then
+              LOGOUT_HTTP_CODE=$(curl --silent --show-error \
+                --output "$LOGOUT_RESPONSE" \
+                --write-out '%{http_code}' \
+                -X POST \
+                -H "X-Auth-Token: $AUTH_TOKEN" \
+                -H "X-User-Id: $USER_ID" \
+                "$ROCKETCHAT_URL/api/v1/logout")
+              logout_curl_status=$?
+              if [ "$logout_curl_status" -ne 0 ] || [ "$LOGOUT_HTTP_CODE" -lt 200 ] || [ "$LOGOUT_HTTP_CODE" -ge 300 ]; then
+                echo "Rocket.Chat cleanup-session logout failed; the fresh session may still be active."
+                cleanup_failed=1
+              else
+                echo "Rocket.Chat cleanup-session logout: OK"
+              fi
+            fi
+            AUTH_TOKEN=""
+            USER_ID=""
+            rm -f "$REVOKE_RESPONSE" "$LOGOUT_RESPONSE"
+            if [ "$original_status" -ne 0 ]; then
+              exit "$original_status"
+            fi
+            if [ "$cleanup_failed" -ne 0 ]; then
+              exit 1
+            fi
+            exit 0
+          }
+          trap cleanup EXIT
+
+          LOGIN_JSON=$(curl --fail-with-body --silent --show-error \
+            -H 'Content-Type: application/json' \
+            --data "$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({'user': os.environ['ROCKETCHAT_USER'], 'password': os.environ['ROCKETCHAT_PASSWORD']}))
+          PY
+          )" \
+            "$ROCKETCHAT_URL/api/v1/login")
+          AUTH_TOKEN=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("data",{}).get("authToken", ""))' <<<"$LOGIN_JSON")
+          USER_ID=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("data",{}).get("userId", ""))' <<<"$LOGIN_JSON")
+          LOGIN_JSON=""
+          test -n "$AUTH_TOKEN" || { echo 'Login succeeded without dynamic credential; session cleanup blocked'; exit 1; }
+          test -n "$USER_ID" || { echo 'Login succeeded without deployment-user identifier; session cleanup blocked'; exit 1; }
+          echo "::add-mask::$AUTH_TOKEN"
+          echo "::add-mask::$USER_ID"
+          SESSION_OPEN=1
+          echo "Rocket.Chat cleanup authentication: OK"
+
+          REVOKE_HTTP_CODE=$(curl --silent --show-error \
+            --output "$REVOKE_RESPONSE" \
+            --write-out '%{http_code}' \
+            -X POST \
+            -H "X-Auth-Token: $AUTH_TOKEN" \
+            -H "X-User-Id: $USER_ID" \
+            "$ROCKETCHAT_URL/api/v1/users.logoutOtherClients")
+          if [ "$REVOKE_HTTP_CODE" -lt 200 ] || [ "$REVOKE_HTTP_CODE" -ge 300 ]; then
+            echo "Session cleanup failed: Rocket.Chat could not revoke previous deployment-user sessions (HTTP $REVOKE_HTTP_CODE)."
+            exit 1
+          fi
+          echo "Rocket.Chat previous deployment-user sessions revoked: OK"
+
+      - name: Session cleanup summary
+        if: success()
+        shell: bash
+        run: |
+          echo "Rocket.Chat deployment-user session cleanup completed."
+          echo "No application package was built or uploaded."

@@ -15,10 +15,11 @@ function step(name) {
   return workflow.slice(start, next >= 0 ? next : workflow.length);
 }
 
-const manualGate = "if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY'";
+const manualGate = "if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY'";
 
 assert.match(workflow, /push:\s*\n\s*branches: \[develop\]/, "develop pushes must run validation");
-assert.match(workflow, /workflow_dispatch:[\s\S]*commit_sha:[\s\S]*required: true[\s\S]*confirm:[\s\S]*required: true/);
+assert.match(workflow, /workflow_dispatch:[\s\S]*action:[\s\S]*type: choice[\s\S]*- DEPLOY[\s\S]*- SESSION_CLEANUP/);
+assert.match(workflow, /commit_sha:[\s\S]*required: false[\s\S]*confirm:[\s\S]*required: true/);
 assert.match(workflow, /uses: actions\/setup-node@v4[\s\S]*node-version: "20"/);
 assert.match(workflow, /sudo apt-get install --yes --no-install-recommends zsh/);
 assert.match(workflow, /npm ci/);
@@ -43,6 +44,7 @@ assert.match(workflow, /git diff --check/);
 assert.match(workflow, /zsh -n build-tars\.sh/);
 
 const resolve = step("Resolve reviewed target");
+assert.match(resolve, /inputs\.action.*!= "DEPLOY"/);
 assert.match(resolve, /inputs\.confirm.*!= "DEPLOY"/);
 assert.match(resolve, /\^\[0-9a-fA-F\]\{40\}\$/);
 const verifyCommit = step("Verify exact develop commit");
@@ -62,6 +64,8 @@ const beforeSecretGate = workflow.slice(0, workflow.indexOf("      - name: Valid
 assert.doesNotMatch(beforeSecretGate, /secrets\.ROCKETCHAT_|\/api\/v1\/login|\/api\/apps\/update/,
   "validation-only path must not inspect secrets or call Rocket.Chat");
 assert.match(step("Authenticate, revoke previous sessions, update app, and logout"), /\/api\/apps\/update/);
+assert.match(workflow, /session_cleanup:[\s\S]*if: github\.event_name == 'workflow_dispatch' && inputs\.action == 'SESSION_CLEANUP'/);
+assert.match(step("Validate guarded session cleanup request"), /inputs\.confirm.*CLEANUP/);
 
 assert.match(workflow, /uses: actions\/upload-artifact@v4[\s\S]*path: \$\{\{ env\.ZIP_PATH \}\}[\s\S]*retention-days: 2/);
 assert.match(step("Validation summary"), /Validation-only develop push completed\. No Rocket\.Chat deployment was attempted\./);
