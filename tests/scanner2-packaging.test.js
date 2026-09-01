@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "e60e4b2206c44e19b7c8e28e2e073900553ae6ccba27c01e20382117184ac1f5";
+const expectedSourceSha = "cdbba1b000d50c5dbe9979fe8386026bfb955ed22f2c3ea401e1cd0d8710c844";
 const expectedManifestSha = "28983dfa1585e67985616b5d4ce373d2213de5b3997212616f74d5c07a083d3c";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
@@ -70,6 +70,7 @@ assert.match(productionSource, /createShadowTokenizer\s*\(/, "production source 
 assert.match(productionSource, /shouldSampleShadowCase\s*\(/, "production source must gate RECORD_ONLY writes through deterministic sampling");
 assert.match(productionSource, /scanner2-shadow:v1:index/, "production source must maintain an isolated bounded-retention index");
 assert.match(productionSource, /PERSONAL_IMAGE_PIPELINE_V2/, "production source must include privacy-safe source/MIME telemetry");
+assert.match(productionSource, /MANUAL_IMAGE_SELECTION_V1/, "production source must include privacy-safe manual selection telemetry");
 assert.match(productionSource, /id:\s*"scanner2_shadow_sample_percent"[\s\S]*packageValue:\s*"0"/,
   "packaged sampling must remain write-disabled by default");
 ["evaluateRules", "resolveConflicts", "makeDecision", "runOfflineComparison", "runOfflineDataset"].forEach((name) => {
@@ -127,6 +128,11 @@ execFileSync(process.execPath, [path.join(root, "tests", "work-photo-source-mime
   stdio: "pipe"
 });
 execFileSync(process.execPath, [path.join(root, "tests", "manual-image-type-selection.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "manual-image-selection-telemetry.runtime.js")], {
   cwd: root,
   encoding: "utf8",
   stdio: "pipe"

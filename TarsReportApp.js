@@ -3361,6 +3361,48 @@ var require_upload_duplicate_guard = __commonJS({
       const fields = PERSONAL_IMAGE_PIPELINE_TELEMETRY_KEYS.map((key) => `${key}=${String(safe[key])}`).join(" ");
       logger.info(`PERSONAL_IMAGE_PIPELINE_V2 ${fields}`);
     }
+    var MANUAL_IMAGE_SELECTION_TELEMETRY_KEYS = [
+      "stage",
+      "event_kind",
+      "media_signal",
+      "expect_media",
+      "resolved_image_count_bucket",
+      "source_type",
+      "selection_state",
+      "publisher_result",
+      "error_class"
+    ];
+    function manualImageSelectionEventKind(message) {
+      if (!message || typeof message !== "object") return "unknown";
+      if (message.file || Array.isArray(message.files) && message.files.length || Array.isArray(message.attachments) && message.attachments.length) return "upload";
+      return message.id || typeof message.text === "string" ? "message" : "unknown";
+    }
+    function manualImageSelectionImageCountBucket(value) {
+      const count = Number(value || 0);
+      if (count >= 2) return "2plus";
+      if (count >= 1) return "1";
+      return "0";
+    }
+    function safeManualImageSelectionTelemetryPayload(input) {
+      const source = input && typeof input === "object" ? input : {};
+      return {
+        stage: personalImageDiagnosticEnum(source.stage, ["event_received", "media_resolved", "media_not_resolved", "gate_reached", "state_written", "publish_attempted", "publish_success", "publish_error"], "event_received"),
+        event_kind: personalImageDiagnosticEnum(source.event_kind, ["message", "upload", "unknown"]),
+        media_signal: source.media_signal === true ? "true" : source.media_signal === false ? "false" : "unknown",
+        expect_media: source.expect_media === true ? "true" : "false",
+        resolved_image_count_bucket: personalImageDiagnosticEnum(source.resolved_image_count_bucket, ["0", "1", "2plus"], "0"),
+        source_type: personalImageDiagnosticEnum(source.source_type, ["original", "preview", "preview_fallback", "unknown"]),
+        selection_state: personalImageDiagnosticEnum(source.selection_state, ["missing", "created", "existing", "completed", "error"], "missing"),
+        publisher_result: personalImageDiagnosticEnum(source.publisher_result, ["not_attempted", "success", "error"], "not_attempted"),
+        error_class: personalImageDiagnosticEnum(source.error_class, ["none", "resolver_timeout", "persistence", "uikit", "other"], "none")
+      };
+    }
+    function emitManualImageSelectionTelemetry(logger, input) {
+      if (!logger || typeof logger.info !== "function") return;
+      const safe = safeManualImageSelectionTelemetryPayload(input);
+      const fields = MANUAL_IMAGE_SELECTION_TELEMETRY_KEYS.map((key) => `${key}=${String(safe[key])}`).join(" ");
+      logger.info(`MANUAL_IMAGE_SELECTION_V1 ${fields}`);
+    }
     async function isBlockedPersonalPhotoImage(file, content, http, config, logger) {
       if (!config || !content || !content.length) return false;
       let ocrChecked = false;
@@ -7204,6 +7246,10 @@ var require_upload_duplicate_guard = __commonJS({
       emitPersonalImageClassificationDiagnostic,
       safePersonalImagePipelineTelemetryPayload,
       emitPersonalImagePipelineTelemetry,
+      manualImageSelectionEventKind,
+      manualImageSelectionImageCountBucket,
+      safeManualImageSelectionTelemetryPayload,
+      emitManualImageSelectionTelemetry,
       fastForwardPersonalReportPhotos,
       notifyWorkPhotoAccepted,
       publishPendingReportPhotos,
@@ -7632,6 +7678,18 @@ var C = class extends j.App {
     const originalEvent = e;
     const hasInitialMediaSignal = Boolean(G.messageImageFiles(e).length || G.messageLooksLikePendingImageUpload(e) || e && e.file || e && Array.isArray(e.files) && e.files.length || e && Array.isArray(e.attachments) && e.attachments.length || !String(e && e.text || "").trim());
     if (G.isPersonalTarsRoom(e && e.room)) {
+      const initialImageCount = G.messageImageFiles(e).length;
+      G.emitManualImageSelectionTelemetry(this.getLogger(), {
+        stage: "event_received",
+        event_kind: G.manualImageSelectionEventKind(e),
+        media_signal: hasInitialMediaSignal,
+        expect_media: hasInitialMediaSignal,
+        resolved_image_count_bucket: G.manualImageSelectionImageCountBucket(initialImageCount),
+        source_type: G.personalImageDiagnosticSourceType(e),
+        selection_state: "missing",
+        publisher_result: "not_attempted",
+        error_class: "none"
+      });
       // MEDIA V2 owns upload settling. It does not depend on a second
       // PostMessageSent event and checks both the message reader and room history.
       // Rocket.Chat can use an opaque non-empty placeholder for a mobile upload,
@@ -7657,6 +7715,17 @@ var C = class extends j.App {
         __mediaV2OriginMessageId: originalEvent && originalEvent.id || ""
       };
       messageId = e && e.id ? String(e.id) : messageId;
+      G.emitManualImageSelectionTelemetry(this.getLogger(), {
+        stage: settledHasImages ? "media_resolved" : "media_not_resolved",
+        event_kind: G.manualImageSelectionEventKind(e),
+        media_signal: hasInitialMediaSignal,
+        expect_media: hasInitialMediaSignal,
+        resolved_image_count_bucket: G.manualImageSelectionImageCountBucket(G.messageImageFiles(e).length),
+        source_type: G.personalImageDiagnosticSourceType(e),
+        selection_state: "missing",
+        publisher_result: "not_attempted",
+        error_class: settledHasImages || !hasInitialMediaSignal ? "none" : "resolver_timeout"
+      });
       if (settledHasImages) G.logReceiptMediaResolved(e, this.getLogger());
     }
     const uploadIds = [];
@@ -7723,7 +7792,13 @@ var C = class extends j.App {
           return;
         }
         if (hasPersonalImageUpload) {
-          await this.ensureManualImageSelection(n, s, r, e);
+          await this.ensureManualImageSelection(n, s, r, e, {
+            event_kind: G.manualImageSelectionEventKind(e),
+            media_signal: hasInitialMediaSignal,
+            expect_media: hasInitialMediaSignal,
+            resolved_image_count_bucket: G.manualImageSelectionImageCountBucket(resolvedImages.length),
+            source_type: G.personalImageDiagnosticSourceType(e)
+          });
           return;
         }
         const explicitTransferIntent = hasPersonalImageUpload && await this.activeTransferReportIntent(n, e.room);
@@ -8074,14 +8149,29 @@ var C = class extends j.App {
   async clearTransferReportIntent(persistence, room) {
     if (persistence && room && room.id) await persistence.removeByAssociation(this.transferReportIntentAssociation(room.id));
   }
-  async ensureManualImageSelection(read, persistence, modify, message) {
+  async ensureManualImageSelection(read, persistence, modify, message, telemetryContext = {}) {
     const run = async () => {
       if (!read || !persistence || !modify || !message || !message.room || !message.sender) return false;
       const selectionKey = G.postMessageClaimKey(message);
       if (!selectionKey) return false;
       const now = Date.now();
       const existing = await G.readManualImageSelection(read, selectionKey);
-      if (existing && Number(existing.expiresAt || 0) > now && ["pending", "processing", "completed"].includes(String(existing.status || ""))) return existing;
+      const telemetry = {
+        ...telemetryContext,
+        resolved_image_count_bucket: telemetryContext.resolved_image_count_bucket || G.manualImageSelectionImageCountBucket(G.messageImageFiles(message).length),
+        source_type: telemetryContext.source_type || G.personalImageDiagnosticSourceType(message),
+        publisher_result: "not_attempted",
+        error_class: "none"
+      };
+      if (existing && Number(existing.expiresAt || 0) > now && ["pending", "processing", "completed"].includes(String(existing.status || ""))) {
+        G.emitManualImageSelectionTelemetry(this.getLogger(), {
+          ...telemetry,
+          stage: "gate_reached",
+          selection_state: existing.status === "completed" ? "completed" : "existing"
+        });
+        return existing;
+      }
+      G.emitManualImageSelectionTelemetry(this.getLogger(), { ...telemetry, stage: "gate_reached", selection_state: "missing" });
       const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
       if (!appUser) return false;
       const blocks = modify.getCreator().getBlockBuilder();
@@ -8091,9 +8181,17 @@ var C = class extends j.App {
         blocks.newButtonElement({ actionId: MANUAL_IMAGE_PHOTO_ACTION, text: blocks.newPlainTextObject("Фото работы"), value: selectionKey }),
         blocks.newButtonElement({ actionId: MANUAL_IMAGE_MAILING_ACTION, text: blocks.newPlainTextObject("Рассылка"), value: selectionKey })
       ] });
-      const promptMessageId = await modify.getCreator().finish(
-        modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("Что вы отправили?").setBlocks(blocks)
-      );
+      G.emitManualImageSelectionTelemetry(this.getLogger(), { ...telemetry, stage: "publish_attempted", selection_state: "missing" });
+      let promptMessageId;
+      try {
+        promptMessageId = await modify.getCreator().finish(
+          modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("Что вы отправили?").setBlocks(blocks)
+        );
+        G.emitManualImageSelectionTelemetry(this.getLogger(), { ...telemetry, stage: "publish_success", selection_state: "missing", publisher_result: "success" });
+      } catch (error) {
+        G.emitManualImageSelectionTelemetry(this.getLogger(), { ...telemetry, stage: "publish_error", selection_state: "error", publisher_result: "error", error_class: "uikit" });
+        throw error;
+      }
       const record = {
         selectionKey,
         sourceMessageId: String(message.id || ""),
@@ -8106,7 +8204,13 @@ var C = class extends j.App {
         updatedAt: now,
         expiresAt: now + 30 * 60 * 1e3
       };
-      await G.writeManualImageSelection(persistence, record);
+      try {
+        await G.writeManualImageSelection(persistence, record);
+        G.emitManualImageSelectionTelemetry(this.getLogger(), { ...telemetry, stage: "state_written", selection_state: "created", publisher_result: "success" });
+      } catch (error) {
+        G.emitManualImageSelectionTelemetry(this.getLogger(), { ...telemetry, stage: "state_written", selection_state: "error", publisher_result: "success", error_class: "persistence" });
+        throw error;
+      }
       return record;
     };
     const result = manualImageSelectionPromptQueue.then(run, run);
