@@ -1079,6 +1079,19 @@ var require_upload_duplicate_guard = __commonJS({
   "build_0.5.3/upload-duplicate-guard.js"(exports2, module2) {
     "use strict";
     var jpeg = require_jpeg_js();
+    var {
+      Decision: ShadowDecision,
+      DocumentType: ShadowDocumentType,
+      OperationStatus: ShadowOperationStatus,
+      DuplicateState: ShadowDuplicateState
+    } = require("./scanner2/contracts");
+    var {
+      SHADOW_SCHEMA_VERSION,
+      SHADOW_PROVENANCE,
+      validateShadowSnapshot
+    } = require("./scanner2/shadow-contract");
+    var { createShadowTokenizer } = require("./scanner2/shadow-tokenizer");
+    var { createCircuitBreaker, safeShadowRecord } = require("./scanner2/shadow-recorder");
     function rightRotate(value, amount) {
       return value >>> amount | value << 32 - amount;
     }
@@ -4070,6 +4083,41 @@ var require_upload_duplicate_guard = __commonJS({
       const amount = Number(value);
       return Number.isFinite(amount) && amount > 0;
     }
+    function shadowAmountFromRubles(value) {
+      const amount = Number(value);
+      if (!Number.isFinite(amount) || amount <= 0) return null;
+      const minorUnits = Math.round(amount * 100);
+      return Number.isSafeInteger(minorUnits) && minorUnits > 0 ? { minorUnits, currency: "RUB" } : null;
+    }
+    function shadowOperationStatus(candidate) {
+      const rejection = String(candidate && candidate.statusRejection || "").toLowerCase();
+      if (/ожида|обработ|pending|processing|не подтвержд/.test(rejection)) return ShadowOperationStatus.PENDING;
+      if (/не выполн|не прош|отказ|отмен|ошиб|failed|declin|reject/.test(rejection)) return ShadowOperationStatus.FAILED;
+      const transientText = String(candidate && candidate.text || "").toLowerCase();
+      if (/успешно|исполнен|выполнен|оплачен|completed|success|successful|approved/.test(transientText)) return ShadowOperationStatus.SUCCESS;
+      return ShadowOperationStatus.UNKNOWN;
+    }
+    function shadowDocumentType(candidate) {
+      const transientText = String(candidate && candidate.text || "");
+      if (candidate && candidate.aiReceipt && /"is_receipt"\s*:\s*true/i.test(transientText)) return ShadowDocumentType.BANK_RECEIPT;
+      if (looksLikeBankReceiptText(transientText)) return ShadowDocumentType.OTHER_FINANCIAL_DOCUMENT;
+      return ShadowDocumentType.UNKNOWN;
+    }
+    function shadowObservation(candidate, passType) {
+      const date = candidate && typeof candidate.receiptDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(candidate.receiptDate) ? candidate.receiptDate : null;
+      const amount = shadowAmountFromRubles(candidate && candidate.receiptAmount);
+      const documentType = shadowDocumentType(candidate);
+      const status = shadowOperationStatus(candidate);
+      const evidenceCount = Number(Boolean(date)) + Number(Boolean(amount)) + Number(documentType !== ShadowDocumentType.UNKNOWN) + Number(status !== ShadowOperationStatus.UNKNOWN);
+      return {
+        passType,
+        date,
+        amount,
+        documentType,
+        status,
+        qualitySignal: evidenceCount / 4
+      };
+    }
     async function validateReceiptDate(file, content, http, config, logger, retryAttempt = 0) {
       if (!config) {
         return { ok: false, reason: "🚫 ПРОВЕРКА ДАТЫ ЧЕКА НЕ НАСТРОЕНА" };
@@ -4082,6 +4130,16 @@ var require_upload_duplicate_guard = __commonJS({
       }
       const candidates = [];
       const failures = [];
+      const legacyOcrResults = [];
+      const legacyVisionResults = [];
+      const withShadowEvidence = (legacyResult) => ({
+        ...legacyResult,
+        shadowEvidence: {
+          acceptedDates: requiredDate ? [requiredDate] : [],
+          legacyOcrResults: legacyOcrResults.map((item) => ({ ...item, amount: item.amount ? { ...item.amount } : null })),
+          legacyVisionResults: legacyVisionResults.map((item) => ({ ...item, amount: item.amount ? { ...item.amount } : null }))
+        }
+      });
       const addCombinedCandidate = () => {
         const sourceCandidates = candidates.filter((candidate) => !candidate.combinedReceipt);
         if (sourceCandidates.length <= 1) return;
@@ -4119,36 +4177,36 @@ var require_upload_duplicate_guard = __commonJS({
       const returnContainer = () => {
         const containerCandidate = mergeCandidateForDecision(candidates.find((candidate) => candidate.containerRejection));
         if (!containerCandidate) return void 0;
-        return {
+        return withShadowEvidence({
           ok: false,
           reason: containerCandidate.containerRejection,
           receiptDate: containerCandidate.receiptDate,
           receiptAmount: containerCandidate.receiptAmount,
           receiptIdentity: extractReceiptIdentity(containerCandidate.text, containerCandidate.receiptDate, containerCandidate.receiptAmount)
-        };
+        });
       };
       const returnAccepted = () => {
         if (receiptAmountsDisagree(candidates, requiredDate, !hasYandex)) return void 0;
         const accepted = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate && !receiptStatusBlocks(candidate.statusRejection) && (!candidate.aiReceipt || aiCandidateStronglyAcceptsReceipt(candidate, requiredDate)) && (!hasOpenAi || receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate, !hasYandex))));
         if (!accepted || !isValidReceiptAmount(accepted.receiptAmount) || receiptStatusBlocks(accepted.statusRejection)) return void 0;
-        return {
+        return withShadowEvidence({
           ok: true,
           receiptDate: accepted.receiptDate,
           receiptAmount: accepted.receiptAmount,
           receiptIdentity: extractReceiptIdentity(accepted.text, accepted.receiptDate, accepted.receiptAmount),
           receiptWarning: accepted.statusRejection || ""
-        };
+        });
       };
       const returnStatus = () => {
         const statusCandidate = mergeCandidateForDecision(candidates.find((candidate) => receiptStatusBlocks(candidate.statusRejection)));
         if (!statusCandidate) return void 0;
-        return {
+        return withShadowEvidence({
           ok: false,
           reason: statusCandidate.statusRejection,
           receiptDate: statusCandidate.receiptDate,
           receiptAmount: statusCandidate.receiptAmount,
           receiptIdentity: extractReceiptIdentity(statusCandidate.text, statusCandidate.receiptDate, statusCandidate.receiptAmount)
-        };
+        });
       };
       try {
         if (hasYandex) {
@@ -4156,14 +4214,18 @@ var require_upload_duplicate_guard = __commonJS({
             try {
               const payload = await requestReceiptOcr(file, content, http, config, model);
               const text = receiptOcrText(payload);
-              if (text) candidates.push({
-                text,
-                receiptDate: extractReceiptDate(text, requiredDate),
-                receiptAmount: extractReceiptAmount(text),
-                receiptAmountSource: `yandex:${model}`,
-                statusRejection: receiptStatusRejection(text),
-                containerRejection: receiptContainerScreenshotRejection(text)
-              });
+              if (text) {
+                const candidate = {
+                  text,
+                  receiptDate: extractReceiptDate(text, requiredDate),
+                  receiptAmount: extractReceiptAmount(text),
+                  receiptAmountSource: `yandex:${model}`,
+                  statusRejection: receiptStatusRejection(text),
+                  containerRejection: receiptContainerScreenshotRejection(text)
+                };
+                candidates.push(candidate);
+                legacyOcrResults.push(shadowObservation(candidate, model));
+              }
             } catch (modelError) {
               failures.push(String(modelError && modelError.message || modelError));
             }
@@ -4176,11 +4238,14 @@ var require_upload_duplicate_guard = __commonJS({
           try {
             const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger);
             if (aiCandidate) candidates.push(aiCandidate);
+            if (aiCandidate) legacyVisionResults.push(shadowObservation(aiCandidate, "primary"));
             const amountCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, true);
             if (amountCandidate) candidates.push(amountCandidate);
+            if (amountCandidate) legacyVisionResults.push(shadowObservation(amountCandidate, "amount_focus"));
             if (!candidates.some((candidate) => candidate && candidate.receiptDate === requiredDate)) {
               const dateCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, false, true);
               if (dateCandidate) candidates.push(dateCandidate);
+              if (dateCandidate) legacyVisionResults.push(shadowObservation(dateCandidate, "date_focus"));
             }
           } catch (aiError) {
             failures.push(String(aiError && aiError.message || aiError));
@@ -4191,47 +4256,47 @@ var require_upload_duplicate_guard = __commonJS({
         const hardContainer = returnContainer();
         if (hardContainer) return hardContainer;
         const strongOpenAiAccepted = !receiptAmountsDisagree(candidates, requiredDate, !hasYandex) && candidates.find((candidate) => aiCandidateStronglyAcceptsReceipt(candidate, requiredDate) && receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate, !hasYandex));
-        if (strongOpenAiAccepted) return {
+        if (strongOpenAiAccepted) return withShadowEvidence({
           ok: true,
           receiptDate: strongOpenAiAccepted.receiptDate,
           receiptAmount: strongOpenAiAccepted.receiptAmount,
           receiptIdentity: extractReceiptIdentity(strongOpenAiAccepted.text, strongOpenAiAccepted.receiptDate, strongOpenAiAccepted.receiptAmount),
           receiptWarning: strongOpenAiAccepted.statusRejection || ""
-        };
+        });
         const hardStatus = returnStatus();
         if (hardStatus) return hardStatus;
         const accepted = returnAccepted();
         if (accepted) return accepted;
         if (receiptAmountsDisagree(candidates, requiredDate, !hasYandex)) {
           const conflicting = candidates.find((candidate) => candidate && !candidate.combinedReceipt && candidate.receiptDate === requiredDate && isValidReceiptAmount(candidate.receiptAmount));
-          return {
+          return withShadowEvidence({
             ok: false,
             reason: "🚫 СУММЫ ЧЕКА НЕ СОВПАЛИ — НУЖНА ПРОВЕРКА",
             receiptDate: requiredDate,
             receiptAmount: conflicting && conflicting.receiptAmount,
             receiptIdentity: conflicting ? extractReceiptIdentity(conflicting.text, conflicting.receiptDate, conflicting.receiptAmount) : void 0
-          };
+          });
         }
         const correctDate = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate));
-        if (correctDate) return {
+        if (correctDate) return withShadowEvidence({
           ok: false,
           reason: "🚫 СУММА ЧЕКА НЕ РАСПОЗНАНА",
           receiptDate: correctDate.receiptDate,
           receiptAmount: correctDate.receiptAmount,
           receiptIdentity: extractReceiptIdentity(correctDate.text, correctDate.receiptDate, correctDate.receiptAmount)
-        };
+        });
         const dated = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate));
         if (dated) {
-          return {
+          return withShadowEvidence({
             ok: false,
             reason: `🚫 ДАТА ЧЕКА ${displayDate(dated.receiptDate)}, НУЖНА ${displayDate(requiredDate)}`,
             receiptDate: dated.receiptDate,
             receiptAmount: dated.receiptAmount,
             receiptIdentity: extractReceiptIdentity(dated.text, dated.receiptDate, dated.receiptAmount)
-          };
+          });
         }
         if (!candidates.length && failures.length) throw new Error(failures.join("; "));
-        return { ok: false, reason: "🚫 ДАТА ЧЕКА НЕ РАСПОЗНАНА" };
+        return withShadowEvidence({ ok: false, reason: "🚫 ДАТА ЧЕКА НЕ РАСПОЗНАНА" });
       } catch (error) {
         const errorText = String(error && error.message || error);
         if (errorText.indexOf("OCR HTTP 429") !== -1 && retryAttempt < 2) {
@@ -4239,7 +4304,7 @@ var require_upload_duplicate_guard = __commonJS({
           return validateReceiptDate(file, content, http, config, logger, retryAttempt + 1);
         }
         if (logger) logger.warn(`Receipt date OCR failed: ${errorText}`);
-        return { ok: false, reason: "🚫 НЕ УДАЛОСЬ ПРОВЕРИТЬ ДАТУ ЧЕКА" };
+        return withShadowEvidence({ ok: false, reason: "🚫 НЕ УДАЛОСЬ ПРОВЕРИТЬ ДАТУ ЧЕКА" });
       }
     }
     const strictReceiptValidationCache = /* @__PURE__ */ new Map();
@@ -4272,6 +4337,122 @@ var require_upload_duplicate_guard = __commonJS({
       } catch (error) {
         strictReceiptValidationCache.delete(key);
         throw error;
+      }
+    }
+    const shadowRuntimeCircuitBreaker = createCircuitBreaker({ failureThreshold: 3, cooldownMs: 6e4 });
+    function shadowAssociation(caseId) {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `scanner2-shadow:v1:${caseId}`);
+    }
+    function shadowPersistenceAdapter(read, persistence) {
+      return {
+        async upsert(record, merge) {
+          const association = shadowAssociation(record.caseId);
+          const records = await read.getPersistenceReader().readByAssociation(association);
+          const existing = Array.isArray(records) && records.length ? records[0] : void 0;
+          const selected = merge(existing, record);
+          if (selected === existing) return "UNCHANGED";
+          await persistence.updateByAssociation(association, selected, true);
+          return existing ? "UPDATED" : "CREATED";
+        }
+      };
+    }
+    function shadowReasonCode(reason) {
+      const text = String(reason || "").toLowerCase().replace(/ё/g, "е");
+      if (/скриншот|скрин страницы|сам чек/.test(text)) return "CONTAINER_SCREENSHOT";
+      if (/сумм.*не совпал/.test(text)) return "AMOUNT_CONFLICT";
+      if (/сумм.*не распознан/.test(text)) return "AMOUNT_MISSING";
+      if (/дата чека.*нужна/.test(text)) return "DATE_MISMATCH";
+      if (/дата.*не распознан/.test(text)) return "DATE_MISSING";
+      if (/платеж не выполнен|не прошел проверку/.test(text)) return "OPERATION_FAILED";
+      if (/не подтвержден|ожида|обработ/.test(text)) return "OPERATION_PENDING";
+      if (/не удалось проверить/.test(text)) return "PROVIDER_UNAVAILABLE";
+      if (/не чек|не является чеком/.test(text)) return "NOT_RECEIPT";
+      return "VALIDATION_INCONCLUSIVE";
+    }
+    function shadowDocumentTypeFromEvidence(evidence) {
+      const observations = [...evidence.legacyOcrResults, ...evidence.legacyVisionResults];
+      const known = observations.find((item) => item.documentType && item.documentType !== ShadowDocumentType.UNKNOWN);
+      return known ? known.documentType : ShadowDocumentType.UNKNOWN;
+    }
+    function shadowStrongIdentityEvidence(identity, tokenizer) {
+      const value = String(identity || "");
+      if (value.startsWith("id:") && value.length > 3) {
+        return { kind: "DOCUMENT_ID_TOKEN", token: tokenizer.tokenizeDocument(value) };
+      }
+      if (value.startsWith("txn:") && value.length > 4) {
+        return { kind: "TRANSACTION_ID_TOKEN", token: tokenizer.tokenizeTransaction(value) };
+      }
+      return null;
+    }
+    function sanitizedShadowEvidence(value, fallbackDate) {
+      const evidence = value && typeof value === "object" ? value : {};
+      const acceptedDates = Array.isArray(evidence.acceptedDates) ? evidence.acceptedDates.filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(String(date))) : [];
+      if (!acceptedDates.length && /^\d{4}-\d{2}-\d{2}$/.test(String(fallbackDate || ""))) acceptedDates.push(String(fallbackDate));
+      const copyObservation = (item) => ({
+        passType: item.passType,
+        date: item.date === null ? null : String(item.date),
+        amount: item.amount === null ? null : { minorUnits: item.amount.minorUnits, currency: "RUB" },
+        documentType: item.documentType,
+        status: item.status,
+        qualitySignal: item.qualitySignal
+      });
+      return {
+        acceptedDates,
+        legacyOcrResults: Array.isArray(evidence.legacyOcrResults) ? evidence.legacyOcrResults.slice(0, 8).map(copyObservation) : [],
+        legacyVisionResults: Array.isArray(evidence.legacyVisionResults) ? evidence.legacyVisionResults.slice(0, 8).map(copyObservation) : []
+      };
+    }
+    async function recordShadowReceiptOutcome(input, read, persistence, config) {
+      try {
+        if (String(config && config.scanner2ShadowMode || "").toUpperCase() !== "RECORD_ONLY") return;
+        const tokenizer = createShadowTokenizer({
+          secret: config && config.scanner2ShadowHmacSecret,
+          tokenKeyVersion: String(config && config.scanner2ShadowTokenKeyVersion || "")
+        });
+        if (!tokenizer) return;
+        const evidence = sanitizedShadowEvidence(input && input.shadowEvidence, input && input.requiredDate);
+        const caseSource = [input && input.messageId, input && input.uploadId, input && input.exact].map((value) => String(value || "")).filter(Boolean).join("|");
+        if (!caseSource) return;
+        const caseId = tokenizer.tokenizeCase(caseSource);
+        const duplicateMatchType = input && input.duplicateMatchType === "IDENTITY" ? "IDENTITY" : "NONE";
+        const isIdentityDuplicate = duplicateMatchType === "IDENTITY";
+        const decision = input && input.decision === ShadowDecision.ACCEPT ? ShadowDecision.ACCEPT : input && input.decision === ShadowDecision.REJECT ? ShadowDecision.REJECT : ShadowDecision.REVIEW;
+        const reasonCode = decision === ShadowDecision.ACCEPT ? "LEGACY_ACCEPTED" : isIdentityDuplicate ? "DUPLICATE_IDENTITY" : shadowReasonCode(input && input.reason);
+        const snapshot = {
+          schemaVersion: SHADOW_SCHEMA_VERSION,
+          caseId,
+          provenance: SHADOW_PROVENANCE,
+          captureBucket: null,
+          acceptedDates: evidence.acceptedDates,
+          legacyOcrResults: evidence.legacyOcrResults,
+          legacyVisionResults: evidence.legacyVisionResults,
+          duplicateEvidence: {
+            state: isIdentityDuplicate ? ShadowDuplicateState.CONFIRMED : ShadowDuplicateState.NONE,
+            matchType: duplicateMatchType,
+            referenceToken: isIdentityDuplicate && input.duplicateReference ? tokenizer.tokenizeDuplicateReference(String(input.duplicateReference)) : null,
+            exactToken: input && input.exact ? tokenizer.tokenizeExact(String(input.exact)) : null,
+            visualToken: input && input.visual ? tokenizer.tokenizeVisual(String(input.visual)) : null
+          },
+          legacyDecision: {
+            decision,
+            reasonCode,
+            date: input && /^\d{4}-\d{2}-\d{2}$/.test(String(input.date || "")) ? String(input.date) : null,
+            amount: shadowAmountFromRubles(input && input.amount),
+            documentType: shadowDocumentTypeFromEvidence(evidence),
+            duplicateState: isIdentityDuplicate ? ShadowDuplicateState.CONFIRMED : ShadowDuplicateState.NONE,
+            strongIdentityEvidence: shadowStrongIdentityEvidence(input && input.receiptIdentity, tokenizer)
+          },
+          tokenKeyVersion: tokenizer.tokenKeyVersion
+        };
+        validateShadowSnapshot(snapshot);
+        await safeShadowRecord(snapshot, {
+          enabled: true,
+          tokenizer,
+          persistence: shadowPersistenceAdapter(read, persistence),
+          circuitBreaker: shadowRuntimeCircuitBreaker,
+          writeTimeoutMs: 50
+        });
+      } catch (_error) {
       }
     }
     function personalArchiveMessageAssociation(messageId) {
@@ -5027,6 +5208,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (acceptedByIndex[roomConfig.index].indexOf(entry) === -1) acceptedByIndex[roomConfig.index].push(entry);
       };
       const acceptedEntries = [];
+      const acceptedShadowRecords = [];
       let duplicate = false;
       let rejectionText = "";
       for (const messageFile of imageFiles) {
@@ -5193,6 +5375,19 @@ var require_upload_duplicate_guard = __commonJS({
                 }
                 await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, exactMatch.invalidReason);
                 if (logger) logger.info(`Deleted unconfirmed receipt ${message.id || "unknown"}; exact photo fingerprint locked: ${exactMatch.invalidReason}`);
+                await recordShadowReceiptOutcome({
+                  messageId: message.id,
+                  uploadId: messageFileId,
+                  exact,
+                  visual,
+                  shadowEvidence: receiptCheck.shadowEvidence,
+                  requiredDate: expectedReceiptDate(ocrConfig),
+                  decision: ShadowDecision.REVIEW,
+                  reason: receiptCheck.reason,
+                  date: receiptCheck.receiptDate,
+                  amount: receiptCheck.receiptAmount,
+                  receiptIdentity: receiptCheck.receiptIdentity
+                }, read, persistence, ocrConfig);
                 return true;
               }
               const identityMatch = findReceiptIdentityDuplicate(index, receiptCheck.receiptIdentity, exactMatch);
@@ -5226,6 +5421,21 @@ var require_upload_duplicate_guard = __commonJS({
                   await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, "\u{1F6AB} \u041F\u041E\u0412\u0422\u041E\u0420 \u0427\u0415\u041A\u0410");
                 }
                 if (logger) logger.info(`Deleted proven duplicate receipt message ${message.id || "unknown"}`);
+                if (identityMatch) await recordShadowReceiptOutcome({
+                  messageId: message.id,
+                  uploadId: messageFileId,
+                  exact,
+                  visual,
+                  shadowEvidence: receiptCheck.shadowEvidence,
+                  requiredDate: expectedReceiptDate(ocrConfig),
+                  decision: ShadowDecision.REJECT,
+                  reason: exactMatch.invalidReason,
+                  date: receiptCheck.receiptDate,
+                  amount: receiptCheck.receiptAmount,
+                  receiptIdentity: receiptCheck.receiptIdentity,
+                  duplicateMatchType: "IDENTITY",
+                  duplicateReference: identityMatch.receiptIdentity
+                }, read, persistence, ocrConfig);
                 return true;
               }
               exactMatch.receiptIdentity = receiptCheck.receiptIdentity;
@@ -5234,6 +5444,18 @@ var require_upload_duplicate_guard = __commonJS({
               exactMatch.receiptWarning = receiptCheck.receiptWarning || "";
               exactMatch.validationVersion = 10;
               exactMatch.invalidReason = "";
+              if (receiptCheck.shadowEvidence) acceptedShadowRecords.push({
+                messageId: message.id,
+                uploadId: messageFileId,
+                exact,
+                visual,
+                shadowEvidence: receiptCheck.shadowEvidence,
+                requiredDate: expectedReceiptDate(ocrConfig),
+                decision: ShadowDecision.ACCEPT,
+                date: receiptCheck.receiptDate,
+                amount: receiptCheck.receiptAmount,
+                receiptIdentity: receiptCheck.receiptIdentity
+              });
             }
             exactMatch.roomId = message.room && message.room.id || exactMatch.roomId;
             exactMatch.userId = message.sender && message.sender.id || exactMatch.userId || "";
@@ -5275,6 +5497,7 @@ var require_upload_duplicate_guard = __commonJS({
           let receiptDate;
           let receiptAmount;
           let receiptWarning = "";
+          let receiptShadowEvidence;
           if (protectedRoom.kind === "receipt") {
             const receiptCheck = await validateReceiptStrict(messageFile, content, http, ocrConfig, logger);
             if (!receiptCheck.ok) {
@@ -5309,6 +5532,19 @@ var require_upload_duplicate_guard = __commonJS({
               if (message.id && message.sender) await deleteReceiptMessage(message, read, modify, logger);
               await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, rejectedEntry.invalidReason);
               if (logger) logger.info(`Deleted suspicious receipt ${message.id || "unknown"} without pre-upload reservation: ${rejectedEntry.invalidReason}`);
+              await recordShadowReceiptOutcome({
+                messageId: message.id,
+                uploadId: messageFileId,
+                exact,
+                visual,
+                shadowEvidence: receiptCheck.shadowEvidence,
+                requiredDate: expectedReceiptDate(ocrConfig),
+                decision: ShadowDecision.REVIEW,
+                reason: receiptCheck.reason,
+                date: receiptCheck.receiptDate,
+                amount: receiptCheck.receiptAmount,
+                receiptIdentity: receiptCheck.receiptIdentity
+              }, read, persistence, ocrConfig);
               return true;
             }
             const identityMatch = findReceiptIdentityDuplicate(index, receiptCheck.receiptIdentity);
@@ -5338,12 +5574,28 @@ var require_upload_duplicate_guard = __commonJS({
                 await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, "🚫 ПОВТОР ЧЕКА");
               }
               if (logger) logger.info(`Deleted duplicate receipt ${message.id || "unknown"} without pre-upload reservation`);
+              if (identityMatch) await recordShadowReceiptOutcome({
+                messageId: message.id,
+                uploadId: messageFileId,
+                exact,
+                visual,
+                shadowEvidence: receiptCheck.shadowEvidence,
+                requiredDate: expectedReceiptDate(ocrConfig),
+                decision: ShadowDecision.REJECT,
+                reason: "🚫 ПОВТОР ЧЕКА",
+                date: receiptCheck.receiptDate,
+                amount: receiptCheck.receiptAmount,
+                receiptIdentity: receiptCheck.receiptIdentity,
+                duplicateMatchType: "IDENTITY",
+                duplicateReference: identityMatch.receiptIdentity
+              }, read, persistence, ocrConfig);
               return true;
             }
             receiptIdentity = receiptCheck.receiptIdentity;
             receiptDate = receiptCheck.receiptDate;
             receiptAmount = receiptCheck.receiptAmount;
             receiptWarning = receiptCheck.receiptWarning || "";
+            receiptShadowEvidence = receiptCheck.shadowEvidence;
           } else {
             const exactPhotoMatch = findDuplicate(index, exact, visual);
             if (exactPhotoMatch) {
@@ -5417,6 +5669,18 @@ var require_upload_duplicate_guard = __commonJS({
           index.photos.push(acceptedEntry);
           acceptedEntries.push(acceptedEntry);
           rememberAccepted(protectedRoom, acceptedEntry);
+          if (protectedRoom.kind === "receipt" && receiptShadowEvidence) acceptedShadowRecords.push({
+            messageId: message.id,
+            uploadId: messageFileId,
+            exact,
+            visual,
+            shadowEvidence: receiptShadowEvidence,
+            requiredDate: expectedReceiptDate(ocrConfig),
+            decision: ShadowDecision.ACCEPT,
+            date: receiptDate,
+            amount: receiptAmount,
+            receiptIdentity
+          });
         } catch (postError) {
           if (logger) logger.warn(`Duplicate post-check failed for upload ${messageFile._id || messageFile.id || "unknown"}: ${postError && postError.message || postError}`);
         }
@@ -5469,6 +5733,9 @@ var require_upload_duplicate_guard = __commonJS({
           return roomConfig && roomConfig.kind === "photo" ? list.concat(acceptedByIndex[indexName] || []) : list;
         }, []);
         if (photoEntries.length) await notifyWorkPhotoAccepted(message, read, modify);
+        for (const shadowRecord of acceptedShadowRecords) {
+          await recordShadowReceiptOutcome(shadowRecord, read, persistence, ocrConfig);
+        }
         return acceptedEntries.length ? "processed" : false;
       }
       if (protectedRoom.kind === "receipt") {
@@ -6270,6 +6537,32 @@ var C = class extends j.App {
       i18nDescription: "openai_receipt_model_description"
     });
     await e.settings.provideSetting({
+      id: "scanner2_shadow_mode",
+      type: z.SettingType.STRING,
+      packageValue: "OFF",
+      required: false,
+      public: false,
+      i18nLabel: "scanner2_shadow_mode_label",
+      i18nDescription: "scanner2_shadow_mode_description"
+    });
+    await e.settings.provideSetting({
+      id: "scanner2_shadow_hmac_secret",
+      type: z.SettingType.PASSWORD,
+      required: false,
+      public: false,
+      i18nLabel: "scanner2_shadow_hmac_secret_label",
+      i18nDescription: "scanner2_shadow_hmac_secret_description"
+    });
+    await e.settings.provideSetting({
+      id: "scanner2_shadow_token_key_version",
+      type: z.SettingType.STRING,
+      packageValue: "k1",
+      required: false,
+      public: false,
+      i18nLabel: "scanner2_shadow_token_key_version_label",
+      i18nDescription: "scanner2_shadow_token_key_version_description"
+    });
+    await e.settings.provideSetting({
       id: "receipt_timezone",
       type: z.SettingType.STRING,
       packageValue: "Europe/Astrakhan",
@@ -6681,6 +6974,9 @@ var C = class extends j.App {
       folderId: String(await n.getValueById("yandex_ocr_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
       openaiReceiptModel: String(await n.getValueById("openai_receipt_model") || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
+      scanner2ShadowMode: String(await n.getValueById("scanner2_shadow_mode") || "OFF").toUpperCase() === "RECORD_ONLY" ? "RECORD_ONLY" : "OFF",
+      scanner2ShadowHmacSecret: String(await n.getValueById("scanner2_shadow_hmac_secret") || ""),
+      scanner2ShadowTokenKeyVersion: String(await n.getValueById("scanner2_shadow_token_key_version") || "k1").trim() || "k1",
       timeZone: !t || t === "Europe/Moscow" ? "Europe/Astrakhan" : t,
       cutoffHour: Number(cutoffSetting === void 0 || cutoffSetting === null || cutoffSetting === "" ? 0 : cutoffSetting),
       ownerUsername: String(await n.getValueById("receipt_owner_username") || "teimur"),

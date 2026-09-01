@@ -85,7 +85,7 @@ jobs:
             node "$test_file"
             scanner_count=$((scanner_count + 1))
           done
-          test "$scanner_count" -eq 15
+          test "$scanner_count" -eq 16
           echo "SCANNER2_TEST_COUNT=$scanner_count" >> "$GITHUB_ENV"
 
       - name: Run 77 legacy TARS tests
@@ -125,12 +125,16 @@ jobs:
           node --check "$BUNDLE_PATH"
           node tools/verify-tars-bundle.js "$BUNDLE_PATH"
 
-          if grep -Eq 'safeShadowRecord[[:space:]]*\(' TarsReportApp.js tools/tars-build-entry.js; then
-            echo "Runtime Shadow Recorder call detected" >&2
+          if ! grep -Eq 'safeShadowRecord[[:space:]]*\(' TarsReportApp.js; then
+            echo "Expected fail-open runtime Shadow Recorder call is missing" >&2
             exit 1
           fi
-          if grep -Eq 'createShadowTokenizer[[:space:]]*\(' TarsReportApp.js tools/tars-build-entry.js; then
-            echo "Runtime shadow tokenizer call detected" >&2
+          if ! grep -Eq 'createShadowTokenizer[[:space:]]*\(' TarsReportApp.js; then
+            echo "Expected runtime shadow tokenizer call is missing" >&2
+            exit 1
+          fi
+          if grep -Eq '(evaluateRules|resolveConflicts|makeDecision|runOfflineComparison|runOfflineDataset)[[:space:]]*\(' TarsReportApp.js; then
+            echo "Runtime Scanner 2.0 decision call detected" >&2
             exit 1
           fi
 

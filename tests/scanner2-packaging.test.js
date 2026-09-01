@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "d75cb06873fce73330b24e108ac7d96bc367eadb2723c43ccd376ac95beaba9e";
+const expectedSourceSha = "1db768134ac846cb9cd909c10abbc3aa7867c399bbff9fd7c830ffa8770aa9f6";
 const expectedManifestSha = "8c93b34e8339027896c94872af55f656511c0b338d813bde2c25a0cddfeca963";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
@@ -65,8 +65,11 @@ const installedEsbuild = require("esbuild/package.json").version;
 assert.strictEqual(installedEsbuild, "0.12.29", "packaging must use the pinned esbuild version");
 
 const productionSource = fs.readFileSync(sourcePath, "utf8");
-assert.doesNotMatch(productionSource, /safeShadowRecord\s*\(/, "production source must not call Shadow Recorder");
-assert.doesNotMatch(productionSource, /createShadowTokenizer\s*\(/, "production source must not create a shadow tokenizer");
+assert.match(productionSource, /safeShadowRecord\s*\(/, "production source must include the fail-open RECORD_ONLY recorder call");
+assert.match(productionSource, /createShadowTokenizer\s*\(/, "production source must tokenize runtime shadow records");
+["evaluateRules", "resolveConflicts", "makeDecision", "runOfflineComparison", "runOfflineDataset"].forEach((name) => {
+  assert.doesNotMatch(productionSource, new RegExp(`\\b${name}\\s*\\(`), "production source must not run Scanner 2.0 decision logic: " + name);
+});
 
 const entrySource = fs.readFileSync(path.join(root, "tools", "tars-build-entry.js"), "utf8");
 assert.doesNotMatch(entrySource, /safeShadowRecord\s*\(/, "build entry must not call Shadow Recorder");
@@ -95,4 +98,4 @@ assert.strictEqual(fileSha(sourcePath), sourceBefore, "build must not alter trac
 assert.strictEqual(fileSha(manifestPath), manifestBefore, "build must not alter app.json");
 assert.strictEqual(gitStatus(), initialStatus, "build must not create or modify visible git artifacts");
 
-console.log("PASS: deterministic single-file packaging is inactive, policy-safe, and reproducible");
+console.log("PASS: deterministic single-file packaging includes fail-open RECORD_ONLY capture and remains policy-safe");
