@@ -1,0 +1,173 @@
+name: Scanner 2.0 Packaging CI
+
+on:
+  push:
+    branches:
+      - feature/scanner-2.0
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scanner2-packaging-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Verify deterministic package
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.head_ref == 'feature/scanner-2.0' ||
+      github.base_ref == 'feature/scanner-2.0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout reviewed commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Capture protected source hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "SOURCE_SHA_BEFORE=$(sha256sum TarsReportApp.js | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "MANIFEST_SHA_BEFORE=$(sha256sum app.json | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Install pinned build dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          NODE_VERSION="$(node --version)"
+          ESBUILD_VERSION="$(node -p 'require("esbuild/package.json").version')"
+          test "${NODE_VERSION%%.*}" = "v20"
+          test "$ESBUILD_VERSION" = "0.12.29"
+          echo "NODE_VERSION=$NODE_VERSION" >> "$GITHUB_ENV"
+          echo "ESBUILD_VERSION=$ESBUILD_VERSION" >> "$GITHUB_ENV"
+
+      - name: Validate scripts and working tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          zsh -n build-tars.sh
+          node --check tools/tars-build-entry.js
+          node --check tools/verify-tars-bundle.js
+          node --check tests/scanner2-packaging.test.js
+          git diff --check
+
+      - name: Run Scanner 2.0 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/scanner2-packaging.test.js
+          scanner_count=1
+          for test_file in tests/scanner2-*.test.js; do
+            if [ "$test_file" = "tests/scanner2-packaging.test.js" ]; then
+              continue
+            fi
+            echo "==> $test_file"
+            node "$test_file"
+            scanner_count=$((scanner_count + 1))
+          done
+          test "$scanner_count" -eq 15
+          echo "SCANNER2_TEST_COUNT=$scanner_count" >> "$GITHUB_ENV"
+
+      - name: Run 77 legacy TARS tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          legacy_count=0
+          while IFS= read -r test_file; do
+            echo "==> $test_file"
+            node "$test_file"
+            legacy_count=$((legacy_count + 1))
+          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' | sort)
+          test "$legacy_count" -eq 77
+          echo "LEGACY_TEST_COUNT=$legacy_count" >> "$GITHUB_ENV"
+
+      - name: Build canonical package
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build-tars.sh
+
+      - name: Verify package and source integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p 'require("./app.json").version')"
+          ZIP_PATH="$PWD/tars-report_${VERSION}.zip"
+          test -f "$ZIP_PATH"
+          unzip -t "$ZIP_PATH"
+
+          EXPECTED_CONTENTS="$(printf '%s\n' app.json TarsReportApp.js en.json ru.json icon.png)"
+          ZIP_CONTENTS="$(unzip -Z1 "$ZIP_PATH")"
+          test "$ZIP_CONTENTS" = "$EXPECTED_CONTENTS"
+
+          BUNDLE_PATH="$RUNNER_TEMP/TarsReportApp.js"
+          unzip -p "$ZIP_PATH" TarsReportApp.js > "$BUNDLE_PATH"
+          node --check "$BUNDLE_PATH"
+          node tools/verify-tars-bundle.js "$BUNDLE_PATH"
+
+          if grep -Eq 'safeShadowRecord[[:space:]]*\(' TarsReportApp.js tools/tars-build-entry.js; then
+            echo "Runtime Shadow Recorder call detected" >&2
+            exit 1
+          fi
+          if grep -Eq 'createShadowTokenizer[[:space:]]*\(' TarsReportApp.js tools/tars-build-entry.js; then
+            echo "Runtime shadow tokenizer call detected" >&2
+            exit 1
+          fi
+
+          test "$(sha256sum TarsReportApp.js | awk '{print $1}')" = "$SOURCE_SHA_BEFORE"
+          test "$(sha256sum app.json | awk '{print $1}')" = "$MANIFEST_SHA_BEFORE"
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+
+          echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+          echo "BUNDLE_SHA256=$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "ZIP_SHA256=$(sha256sum "$ZIP_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
+          {
+            echo "ZIP_CONTENTS<<EOF"
+            printf '%s\n' "$ZIP_CONTENTS"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Write verification summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Scanner 2.0 packaging verification"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Commit | \`$GITHUB_SHA\` |"
+            echo "| Node.js | \`$NODE_VERSION\` |"
+            echo "| esbuild | \`$ESBUILD_VERSION\` |"
+            echo "| Bundled TarsReportApp.js SHA-256 | \`$BUNDLE_SHA256\` |"
+            echo "| ZIP SHA-256 | \`$ZIP_SHA256\` |"
+            echo "| Scanner 2.0 tests | $SCANNER2_TEST_COUNT |"
+            echo "| Legacy tests | $LEGACY_TEST_COUNT |"
+            echo
+            echo "ZIP SHA-256 is diagnostic only; ZIP timestamps are not the reproducibility contract."
+            echo
+            echo "### ZIP contents"
+            echo '```text'
+            printf '%s\n' "$ZIP_CONTENTS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verification artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanner2-package-${{ github.sha }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+          retention-days: 2

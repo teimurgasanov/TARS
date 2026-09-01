@@ -1,0 +1,129 @@
+# Stage 3B-1.5 — Packaging CI only
+
+Date: 2026-09-01
+
+Branch: `feature/scanner-2.0`
+
+Baseline commit: `f7dd57a46ab9cf93daf4bafc17cee1207b62f21f`
+
+Planned commit: `ci(scanner2): verify deterministic packaging without deploy`
+
+## Scope
+
+Added a dedicated GitHub Actions workflow at
+`.github/workflows/scanner2-packaging-ci.yml`. It verifies the deterministic
+single-file packaging path introduced in Stage 3B-1 without calling or
+modifying the production deployment workflow.
+
+No production source, Scanner 2.0 module, receipt pipeline, runtime integration,
+build implementation, or application manifest was changed in this stage.
+
+## Workflow behavior
+
+The workflow:
+
+- runs on pushes to `feature/scanner-2.0`;
+- is available for pull requests whose head or base is
+  `feature/scanner-2.0`;
+- supports input-free `workflow_dispatch`;
+- uses `actions/checkout@v4`, `actions/setup-node@v4`, and Node.js 20;
+- installs dependencies with `npm ci` and fails unless esbuild is exactly
+  `0.12.29`;
+- runs the packaging test, all 15 Scanner 2.0 test files, and all 77 legacy
+  TARS test files;
+- runs `git diff --check`, `zsh -n build-tars.sh`, and Node syntax checks;
+- invokes only the canonical `./build-tars.sh` packaging command;
+- verifies the ZIP, bundled JavaScript, approved externals, absence of relative
+  unresolved imports, included shadow infrastructure, and absence of runtime
+  recorder calls;
+- verifies that tracked `TarsReportApp.js` and `app.json` hashes do not change;
+- writes commit, tool versions, test counts, bundle hash, diagnostic ZIP hash,
+  and ZIP contents to the GitHub Actions job summary;
+- uploads the ZIP only as a verification artifact with two-day retention.
+
+## Local verification
+
+The following checks passed locally:
+
+- workflow YAML parsed successfully with Ruby/Psych;
+- forbidden secret names, Rocket.Chat API calls, deployment environment, and
+  write permissions were absent;
+- `npm ci` completed and installed esbuild `0.12.29`;
+- packaging test: PASS;
+- Scanner 2.0 tests: 15/15 test files PASS;
+- legacy TARS tests: 77/77 test files PASS;
+- `git diff --check`: PASS;
+- `zsh -n build-tars.sh`: PASS;
+- build entry, bundle verifier, and packaging test Node syntax: PASS;
+- canonical `./build-tars.sh`: PASS;
+- `unzip -t`: PASS;
+- bundle policy verifier: PASS;
+- unresolved relative imports: 0;
+- unapproved externals: 0.
+
+Local validation used Node.js `v24.19.0`; the GitHub Actions run is the required
+proof for the requested Node.js 20 environment.
+
+## Package verification
+
+ZIP contents were exactly:
+
+1. `app.json`
+2. `TarsReportApp.js`
+3. `en.json`
+4. `ru.json`
+5. `icon.png`
+
+Observed local hashes:
+
+- source `TarsReportApp.js` SHA-256:
+  `d75cb06873fce73330b24e108ac7d96bc367eadb2723c43ccd376ac95beaba9e`;
+- source `app.json` SHA-256:
+  `8c93b34e8339027896c94872af55f656511c0b338d813bde2c25a0cddfeca963`;
+- bundled `TarsReportApp.js` SHA-256:
+  `1c55207d44e4a5875a0d07f32d2a1d522e440e3437796e4cc348e4ff346a0747`.
+
+The ZIP SHA is emitted for diagnostics only. ZIP timestamps are explicitly not
+treated as the reproducibility contract; the bundled JavaScript SHA-256 is the
+primary comparison hash.
+
+## Security boundary
+
+The workflow has only:
+
+```yaml
+permissions:
+  contents: read
+```
+
+It contains no Rocket.Chat secrets, authentication variables, `curl`,
+`apps/update`, deployment environment, deploy step, or write permission. The
+artifact is retained only for inspection and is never installed into
+Rocket.Chat.
+
+The production workflow `.github/workflows/deploy-rocketchat.yml` remains
+unchanged at SHA-256
+`a6b8f531cb4f1f91218fd75878a7c3a86d55c42a76d4390b9575a6ebd2d01ce5`.
+
+## Risks
+
+- Local validation cannot fully emulate the GitHub-hosted Node.js 20 runner;
+  the first pushed Actions run is therefore part of this stage's acceptance.
+- The intentionally pinned esbuild `0.12.29` is old and npm reports a moderate
+  advisory. Changing it is outside this stage and must be reviewed separately
+  because the exact version is part of the approved packaging path.
+- Pull-request events are registered repository-wide, but the job is gated so
+  it only executes when the PR head or base is `feature/scanner-2.0`.
+- Artifact upload uses GitHub's artifact service only; it does not validate a
+  Rocket.Chat deployment, by design.
+
+## Next step
+
+After this report and workflow are committed and pushed, wait for the dedicated
+`Scanner 2.0 Packaging CI` run. If it passes, Stage 3B-1.5 is complete. Do not
+merge, deploy, modify `develop`/`main`, or begin runtime Shadow Recorder
+integration without separate authorization.
+
+The immutable implementation commit SHA is reported by Git after commit and in
+the GitHub Actions summary; a report cannot embed its own SHA without changing
+that SHA.
