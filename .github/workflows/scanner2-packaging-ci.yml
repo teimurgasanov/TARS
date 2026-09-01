@@ -7,6 +7,7 @@ on:
       - feature/scanner2-shadow-sampling
       - fix/scanner2-shadow-config-scope
       - fix/personal-rejected-receipt-control-route
+      - fix/receipt-date-early-mismatch
   pull_request:
   workflow_dispatch:
 
@@ -29,7 +30,9 @@ jobs:
       github.head_ref == 'fix/scanner2-shadow-config-scope' ||
       github.base_ref == 'fix/scanner2-shadow-config-scope' ||
       github.head_ref == 'fix/personal-rejected-receipt-control-route' ||
-      github.base_ref == 'fix/personal-rejected-receipt-control-route'
+      github.base_ref == 'fix/personal-rejected-receipt-control-route' ||
+      github.head_ref == 'fix/receipt-date-early-mismatch' ||
+      github.base_ref == 'fix/receipt-date-early-mismatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
