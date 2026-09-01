@@ -1954,7 +1954,7 @@ var require_upload_duplicate_guard = __commonJS({
     }
     const RECEIPT_VISUAL_CRITERIA = "КРИТЕРИИ БАНКОВСКОГО ЧЕКА. Считай изображение чеком, банковской квитанцией или справкой по операции, если главным объектом является официальный банковский документ, банковский экран либо чек, открытый на экране другого телефона. Ищи совокупность признаков: название или логотип банка/платёжного сервиса; слова Чек, Квитанция, Справка по операции, Перевод, Платёж, Оплата, СБП или SberPay; дата и время операции; итоговая сумма рядом с ₽, руб, Р, RUB или RUR; статус Успешно, Исполнено, Выполнено, Оплачено, Completed или иной статус; отправитель, получатель, счёт/карта, номер операции, QR или СБП. Чек может быть повёрнут, снят под углом, с бликами, на белом PDF-листе или на экране телефона. Для классификации достаточно ясно видимого банковского интерфейса/документа и нескольких согласованных признаков; для зачёта суммы обязательно отдельно прочитай именно итог операции. Не считай чеком: одиночное число без банковского контекста, баланс, время, номер телефона/карты, обычную переписку, рассылку, интерфейс Rocket.Chat, фото человека или салонной работы. ";
     const WORK_PHOTO_VISUAL_CRITERIA = "СТРОГИЕ КРИТЕРИИ ФОТО РАБОТЫ САЛОНА. Считай изображение фото работы только когда одновременно выполнены все условия: 1) главным объектом является реальный человек целиком, клиент либо крупно показанная часть его тела; 2) ясно видна конкретная зона салонной услуги; 3) зона относится ровно к одному виду: HAIR — волосы, стрижка, окрашивание, укладка, причёска, затылок, виски или борода; NAILS — руки, пальцы или ногти; PEDICURE — стопы, пальцы ног или ногти на ногах; BROWS_LASHES — лицо крупно, глаза, брови или ресницы; 4) изображение не является документом, экраном телефона, скриншотом, перепиской или рекламным материалом. Не требуй коллаж до/после и не требуй идеального крупного плана, но человек и релевантная зона услуги должны быть реально видимы, а не предполагаться по обстановке. Обычный портрет без различимой зоны услуги, человек только на заднем плане, пустой интерьер, рабочее место, инструменты, товар или случайная фотография — не фото работы. Никогда не считай работой банковский чек, квитанцию, справку по операции, банковский экран, экран телефона, QR/СБП, документ, чек на экране другого телефона, переписку/рассылку или интерфейс Rocket.Chat. Если виден читаемый документ или экран с банковскими реквизитами, суммой, датой, статусом, отправителем или получателем, всегда классифицируй изображение как документ/чек, даже когда в кадре также видны руки или человек. При сомнении не подтверждай фото работы. ";
-    async function requestOpenAiWorkPhotoCheckUncached(file, content, http, config, logger) {
+    async function requestOpenAiWorkPhotoCheckUncached(file, content, http, config, logger, diagnostic) {
       if (!config || !config.openaiApiKey || !content || !content.length || !http) return "";
       const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
       const imageUrl = `data:${receiptImageMimeType(file)};base64,${bytesToBase64(content)}`;
@@ -1998,6 +1998,7 @@ var require_upload_duplicate_guard = __commonJS({
           const match = String(text || "").match(/\{[\s\S]{0,10000}\}/);
           if (!match) continue;
           const parsed = JSON.parse(match[0]);
+          captureDedicatedWorkPhotoDiagnostic(diagnostic, parsed);
           const confidence = Number(parsed && parsed.confidence);
           const kind = String(parsed && parsed.kind || "").trim().toLowerCase();
           const knownServiceArea = /^(?:hair|nails|pedicure|brows_lashes)$/.test(kind);
@@ -2012,16 +2013,21 @@ var require_upload_duplicate_guard = __commonJS({
       return "";
     }
     const workPhotoCheckCache = /* @__PURE__ */ new Map();
-    async function requestOpenAiWorkPhotoCheck(file, content, http, config, logger) {
+    async function requestOpenAiWorkPhotoCheck(file, content, http, config, logger, diagnostic) {
       if (!content || !content.length) return "";
       const key = `${expectedReceiptDate(config)}:${exactHash(content)}`;
-      const cached = workPhotoCheckCache.get(key);
-      if (cached && Date.now() - cached.createdAt < 10 * 60 * 1e3) return cached.promise;
-      const promise = requestOpenAiWorkPhotoCheckUncached(file, content, http, config, logger);
-      workPhotoCheckCache.set(key, { createdAt: Date.now(), promise });
-      if (workPhotoCheckCache.size > 200) workPhotoCheckCache.delete(workPhotoCheckCache.keys().next().value);
+      let cached = workPhotoCheckCache.get(key);
+      if (!cached || Date.now() - cached.createdAt >= 10 * 60 * 1e3) {
+        const cachedDiagnostic = createPersonalImageClassificationDiagnostic();
+        const promise = requestOpenAiWorkPhotoCheckUncached(file, content, http, config, logger, cachedDiagnostic);
+        cached = { createdAt: Date.now(), promise, diagnostic: cachedDiagnostic };
+        workPhotoCheckCache.set(key, cached);
+        if (workPhotoCheckCache.size > 200) workPhotoCheckCache.delete(workPhotoCheckCache.keys().next().value);
+      }
       try {
-        return await promise;
+        const result = await cached.promise;
+        mergePersonalImageDiagnostic(diagnostic, cached.diagnostic, "dedicated");
+        return result;
       } catch (error) {
         workPhotoCheckCache.delete(key);
         throw error;
@@ -2082,7 +2088,7 @@ var require_upload_duplicate_guard = __commonJS({
       }
       return void 0;
     }
-    async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config, explicitPhotoIntent = false) {
+    async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config, explicitPhotoIntent = false, diagnostic) {
       if (!message || !isPersonalTarsRoom(message.room)) return false;
       const intent = directFileIntent(message);
       if (intent === "mailing" || intent === "receipt") return false;
@@ -2153,6 +2159,17 @@ var require_upload_duplicate_guard = __commonJS({
         return false;
       }
       const workPhotoDecision = await shouldForwardConfirmedWorkPhoto(sourceFile, bestCandidate.content, http, config, logger, explicitPhotoIntent);
+      // Read normalized fields only from the just-populated per-image caches.
+      // These calls do not repeat provider requests and do not participate in
+      // the decision above; they only copy bounded diagnostic enums/booleans.
+      if (diagnostic) {
+        await personalImageKindForPreUpload(sourceFile, bestCandidate.content, http, config, logger, diagnostic);
+        if (["dedicated-work-photo-check", "document-or-screen", "strict-receipt-check", "work-photo-not-strictly-confirmed"].indexOf(workPhotoDecision.reason) !== -1) {
+          await requestOpenAiWorkPhotoCheck(sourceFile, bestCandidate.content, http, config, logger, diagnostic);
+        }
+        const diagnosticClassification = workPhotoDecision.forward ? "work_photo" : workPhotoDecision.reason === "receipt" || workPhotoDecision.reason === "strict-receipt-check" ? "receipt" : workPhotoDecision.reason === "mailing" ? "mailing" : workPhotoDecision.reason === "document-or-screen" ? "document" : "unknown";
+        setPersonalImageFinalDiagnostic(diagnostic, diagnosticClassification, workPhotoDecision.reason || "unknown", "dedicated");
+      }
       if (!workPhotoDecision.forward) {
         if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED upload=${uploadId} reason=${workPhotoDecision.reason || "unknown"}`);
         return false;
@@ -2924,6 +2941,151 @@ var require_upload_duplicate_guard = __commonJS({
       const serviceType = String(parsed.service_type || "").trim().toLowerCase();
       return /^(?:haircut|coloring|manicure|pedicure|brows|lashes)$/.test(serviceType);
     }
+    const PERSONAL_IMAGE_DIAGNOSTIC_KEYS = [
+      "source_type",
+      "primary_kind",
+      "primary_is_receipt",
+      "primary_is_document",
+      "primary_is_work_photo",
+      "primary_is_mailing",
+      "dedicated_result",
+      "dedicated_is_work_photo",
+      "dedicated_has_visible_client",
+      "dedicated_has_visible_service_area",
+      "dedicated_kind",
+      "dedicated_document_block",
+      "dedicated_banking_block",
+      "final_classification",
+      "final_reason",
+      "processing_stage"
+    ];
+    function personalImageDiagnosticEnum(value, allowed, fallback = "unknown") {
+      const normalized = String(value || "").trim().toLowerCase();
+      return allowed.indexOf(normalized) !== -1 ? normalized : fallback;
+    }
+    function createPersonalImageClassificationDiagnostic(sourceType = "unknown") {
+      return {
+        source_type: personalImageDiagnosticEnum(sourceType, ["original", "preview", "preview_fallback", "unknown"]),
+        primary_kind: "unknown",
+        primary_is_receipt: false,
+        primary_is_document: false,
+        primary_is_work_photo: false,
+        primary_is_mailing: false,
+        dedicated_result: "unknown",
+        dedicated_is_work_photo: false,
+        dedicated_has_visible_client: false,
+        dedicated_has_visible_service_area: false,
+        dedicated_kind: "unknown",
+        dedicated_document_block: false,
+        dedicated_banking_block: false,
+        final_classification: "unknown",
+        final_reason: "unknown",
+        processing_stage: "unknown"
+      };
+    }
+    function personalImageDiagnosticSourceType(message) {
+      if (!message) return "unknown";
+      if (message.__mediaV2PreviewOnly === true) return "preview_fallback";
+      let previewSeen = false;
+      let originalSeen = false;
+      const fileIsPreview = (file) => {
+        const title = file && file.title;
+        const titleValue = String(title && typeof title === "object" ? title.value : title || "");
+        const name = String(file && (file.name || titleValue || file.url || file.path) || "").split("?")[0].split("/").pop();
+        return /^thumb[-_]/i.test(name);
+      };
+      for (const file of [message.file, ...Array.isArray(message.files) ? message.files : []].filter(Boolean)) {
+        if (fileIsPreview(file)) previewSeen = true;
+        else originalSeen = true;
+      }
+      const visit = (attachment) => {
+        if (!attachment) return;
+        if (attachment.title && typeof attachment.title === "object" && attachment.title.link || attachment.title_link) originalSeen = true;
+        for (const file of [attachment.file, ...Array.isArray(attachment.files) ? attachment.files : []].filter(Boolean)) {
+          if (fileIsPreview(file)) previewSeen = true;
+          else originalSeen = true;
+        }
+        if (attachment.imageUrl || attachment.image_url) previewSeen = true;
+        for (const nested of Array.isArray(attachment.attachments) ? attachment.attachments : []) visit(nested);
+      };
+      for (const attachment of Array.isArray(message.attachments) ? message.attachments : []) visit(attachment);
+      if (originalSeen) return "original";
+      if (previewSeen) return "preview";
+      return "unknown";
+    }
+    function capturePrimaryPersonalImageDiagnostic(diagnostic, candidate) {
+      if (!diagnostic || !candidate) return;
+      const parsed = parseReceiptJson(candidate.text) || {};
+      const visualType = String(parsed.visual_type || "").trim().toLowerCase();
+      const marksReceipt = aiCandidateMarksReceipt(candidate);
+      const marksMailing = aiCandidateMarksMailing(candidate);
+      const marksWorkPhoto = aiCandidateMarksReportPhoto(candidate);
+      const marksDocument = Boolean(
+        candidate.containerRejection ||
+        parsed.is_document_or_screen === true ||
+        /^(?:bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt)$/.test(visualType)
+      );
+      diagnostic.primary_is_receipt = marksReceipt;
+      diagnostic.primary_is_document = marksDocument;
+      diagnostic.primary_is_work_photo = marksWorkPhoto;
+      diagnostic.primary_is_mailing = marksMailing;
+      diagnostic.primary_kind = marksMailing ? "mailing" : marksReceipt ? "receipt" : marksWorkPhoto ? "photo" : marksDocument ? "document" : "unknown";
+    }
+    function captureDedicatedWorkPhotoDiagnostic(diagnostic, parsed) {
+      if (!diagnostic || !parsed || typeof parsed !== "object") return;
+      const kind = personalImageDiagnosticEnum(parsed.kind, ["hair", "nails", "pedicure", "brows_lashes", "other"]);
+      const knownServiceArea = /^(?:hair|nails|pedicure|brows_lashes)$/.test(kind);
+      const documentBlock = parsed.is_document_or_screen === true;
+      const bankingBlock = parsed.is_receipt_or_banking === true;
+      const work = parsed.is_work_photo === true && parsed.has_visible_client === true && parsed.has_visible_service_area === true && knownServiceArea && !documentBlock && !bankingBlock;
+      diagnostic.dedicated_is_work_photo = parsed.is_work_photo === true;
+      diagnostic.dedicated_has_visible_client = parsed.has_visible_client === true;
+      diagnostic.dedicated_has_visible_service_area = parsed.has_visible_service_area === true;
+      diagnostic.dedicated_kind = kind;
+      diagnostic.dedicated_document_block = documentBlock;
+      diagnostic.dedicated_banking_block = bankingBlock;
+      diagnostic.dedicated_result = documentBlock || bankingBlock ? "document" : work ? "work" : "unknown";
+    }
+    function mergePersonalImageDiagnostic(target, source, section) {
+      if (!target || !source) return;
+      const prefix = section === "primary" ? "primary_" : section === "dedicated" ? "dedicated_" : "";
+      for (const key of PERSONAL_IMAGE_DIAGNOSTIC_KEYS) {
+        if (prefix && key.indexOf(prefix) !== 0) continue;
+        if (Object.prototype.hasOwnProperty.call(source, key)) target[key] = source[key];
+      }
+    }
+    function setPersonalImageFinalDiagnostic(diagnostic, classification, reason, stage) {
+      if (!diagnostic) return;
+      diagnostic.final_classification = personalImageDiagnosticEnum(classification, ["work_photo", "receipt", "document", "mailing", "unknown"]);
+      diagnostic.final_reason = personalImageDiagnosticEnum(reason, ["dedicated-work-photo-check", "work-photo-not-strictly-confirmed", "strict-receipt-check", "document-or-screen", "receipt", "mailing", "unclassified", "unknown"]);
+      diagnostic.processing_stage = personalImageDiagnosticEnum(stage, ["primary", "dedicated", "strict-receipt", "financial-route", "final"]);
+    }
+    function safePersonalImageDiagnosticPayload(diagnostic) {
+      const source = diagnostic && typeof diagnostic === "object" ? diagnostic : {};
+      const safe = createPersonalImageClassificationDiagnostic(source.source_type);
+      safe.primary_kind = personalImageDiagnosticEnum(source.primary_kind, ["receipt", "document", "photo", "mailing", "unknown"]);
+      safe.primary_is_receipt = source.primary_is_receipt === true;
+      safe.primary_is_document = source.primary_is_document === true;
+      safe.primary_is_work_photo = source.primary_is_work_photo === true;
+      safe.primary_is_mailing = source.primary_is_mailing === true;
+      safe.dedicated_result = personalImageDiagnosticEnum(source.dedicated_result, ["work", "document", "unknown"]);
+      safe.dedicated_is_work_photo = source.dedicated_is_work_photo === true;
+      safe.dedicated_has_visible_client = source.dedicated_has_visible_client === true;
+      safe.dedicated_has_visible_service_area = source.dedicated_has_visible_service_area === true;
+      safe.dedicated_kind = personalImageDiagnosticEnum(source.dedicated_kind, ["hair", "nails", "pedicure", "brows_lashes", "other", "unknown"]);
+      safe.dedicated_document_block = source.dedicated_document_block === true;
+      safe.dedicated_banking_block = source.dedicated_banking_block === true;
+      safe.final_classification = personalImageDiagnosticEnum(source.final_classification, ["work_photo", "receipt", "document", "mailing", "unknown"]);
+      safe.final_reason = personalImageDiagnosticEnum(source.final_reason, ["dedicated-work-photo-check", "work-photo-not-strictly-confirmed", "strict-receipt-check", "document-or-screen", "receipt", "mailing", "unclassified", "unknown"]);
+      safe.processing_stage = personalImageDiagnosticEnum(source.processing_stage, ["primary", "dedicated", "strict-receipt", "financial-route", "final"]);
+      return safe;
+    }
+    function emitPersonalImageClassificationDiagnostic(logger, diagnostic) {
+      if (!logger || typeof logger.info !== "function") return;
+      const safe = safePersonalImageDiagnosticPayload(diagnostic);
+      const fields = PERSONAL_IMAGE_DIAGNOSTIC_KEYS.map((key) => `${key}=${String(safe[key])}`).join(" ");
+      logger.info(`PERSONAL_IMAGE_CLASSIFICATION_V1 ${fields}`);
+    }
     async function isBlockedPersonalPhotoImage(file, content, http, config, logger) {
       if (!config || !content || !content.length) return false;
       let ocrChecked = false;
@@ -3021,7 +3183,7 @@ var require_upload_duplicate_guard = __commonJS({
       const caseToken = sha256Bytes(utf8Bytes(`receipt-stage-v1:${uploadId}`)).slice(0, 16);
       logReceiptStage(logger, { caseToken }, "media_resolved");
     }
-    async function personalImageKindForPreUploadUncached(file, content, http, config, logger) {
+    async function personalImageKindForPreUploadUncached(file, content, http, config, logger, diagnostic) {
       if (!config || !content || !content.length) return void 0;
       let checked = false;
       let aiChecked = false;
@@ -3033,6 +3195,7 @@ var require_upload_duplicate_guard = __commonJS({
           const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger);
           if (aiCandidate) {
             rememberPrimaryReceiptEvidence(file, content, config, aiCandidate);
+            capturePrimaryPersonalImageDiagnostic(diagnostic, aiCandidate);
             checked = true;
             aiChecked = true;
             aiReceipt = aiCandidateMarksReceipt(aiCandidate);
@@ -3069,16 +3232,21 @@ var require_upload_duplicate_guard = __commonJS({
       if (ocrReceipt) return "receipt";
       return "unknown";
     }
-    async function personalImageKindForPreUpload(file, content, http, config, logger) {
+    async function personalImageKindForPreUpload(file, content, http, config, logger, diagnostic) {
       if (!content || !content.length) return void 0;
       const key = `${expectedReceiptDate(config)}:${exactHash(content)}`;
-      const cached = personalImageKindCache.get(key);
-      if (cached && Date.now() - cached.createdAt < 10 * 60 * 1e3) return cached.promise;
-      const promise = personalImageKindForPreUploadUncached(file, content, http, config, logger);
-      personalImageKindCache.set(key, { createdAt: Date.now(), promise });
-      if (personalImageKindCache.size > 200) personalImageKindCache.delete(personalImageKindCache.keys().next().value);
+      let cached = personalImageKindCache.get(key);
+      if (!cached || Date.now() - cached.createdAt >= 10 * 60 * 1e3) {
+        const cachedDiagnostic = createPersonalImageClassificationDiagnostic();
+        const promise = personalImageKindForPreUploadUncached(file, content, http, config, logger, cachedDiagnostic);
+        cached = { createdAt: Date.now(), promise, diagnostic: cachedDiagnostic };
+        personalImageKindCache.set(key, cached);
+        if (personalImageKindCache.size > 200) personalImageKindCache.delete(personalImageKindCache.keys().next().value);
+      }
       try {
-        return await promise;
+        const result = await cached.promise;
+        mergePersonalImageDiagnostic(diagnostic, cached.diagnostic, "primary");
+        return result;
       } catch (error) {
         personalImageKindCache.delete(key);
         throw error;
@@ -3100,13 +3268,13 @@ var require_upload_duplicate_guard = __commonJS({
       }
       return protectedRoomForRoom(message.room);
     }
-    async function protectedRoomForPersonalFile(message, file, content, intent, fallbackProtectedRoom, http, config, logger) {
+    async function protectedRoomForPersonalFile(message, file, content, intent, fallbackProtectedRoom, http, config, logger, diagnostic) {
       if (!isPersonalTarsRoom(message && message.room)) return fallbackProtectedRoom;
       if (intent === "mailing") return void 0;
       if (intent === "receipt") return { ...PROTECTED_ROOMS.kassa, receiptValidationContext: receiptStageContext(file, content, config) };
       if (intent === "photo") return PROTECTED_ROOMS.otchet;
       // Personal receipt/photo routing is content-based. Masters do not need captions.
-      const kind = await personalImageKindForPreUpload(file, content, http, config, logger);
+      const kind = await personalImageKindForPreUpload(file, content, http, config, logger, diagnostic);
       if (kind === "mailing") {
         if (logger) logger.info(`Personal upload classified as mailing proof by image content: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
         return void 0;
@@ -3120,7 +3288,7 @@ var require_upload_duplicate_guard = __commonJS({
         // in the fast photo-forwarding gate. Otherwise a banking screen that
         // was correctly rejected as a work photo could fall through as an
         // unclassified image and never reach the receipt ledger or control.
-        const dedicatedPhotoKind = await requestOpenAiWorkPhotoCheck(file, content, http, config, logger);
+        const dedicatedPhotoKind = await requestOpenAiWorkPhotoCheck(file, content, http, config, logger, diagnostic);
         if (dedicatedPhotoKind === "work") {
           if (logger) logger.info(`Personal upload confirmed as work photo by dedicated classifier: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
           return PROTECTED_ROOMS.otchet;
@@ -5455,7 +5623,7 @@ var require_upload_duplicate_guard = __commonJS({
       await modify.getCreator().finish(modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("✅ ФОТО РАБОТЫ ПРИНЯТО"));
       return true;
     }
-    async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", processingStatusManager) {
+    async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", processingStatusManager, personalImageDiagnostic) {
       if (await isKnownArchiveRoom(message && message.room, read)) return false;
       const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
       if (isTarsAppMessage(message, appUser)) return false;
@@ -5540,7 +5708,7 @@ var require_upload_duplicate_guard = __commonJS({
               }
             }
           }
-          protectedRoom = preclassifiedRoom || await protectedRoomForPersonalFile(message, messageFile, content, intent, fallbackProtectedRoom, http, ocrConfig, logger);
+          protectedRoom = preclassifiedRoom || await protectedRoomForPersonalFile(message, messageFile, content, intent, fallbackProtectedRoom, http, ocrConfig, logger, personalImageDiagnostic);
           if (!protectedRoom) continue;
           const prevalidatedReceiptCheck = protectedRoom.prevalidatedReceiptCheck;
           const index = await getScopedIndex(protectedRoom);
@@ -6061,6 +6229,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (logger) logger.warn(`MEDIA_V2_SKIPPED message=${String(message.id || "none")} reason=no-image`);
         return { handled: false, status: "no-image" };
       }
+      const personalImageDiagnostic = createPersonalImageClassificationDiagnostic(personalImageDiagnosticSourceType(message));
       if (logger) logger.info(`MEDIA_V2_START message=${String(message.id || "none")} images=${imageFiles.length} intent=${forcedIntent || "automatic"}`);
       // Work photos have an independent receipt-safe route to result. The
       // forwarder checks visible salon-work signs first (person, hair, face,
@@ -6070,19 +6239,28 @@ var require_upload_duplicate_guard = __commonJS({
       // the older generic route could classify the photo correctly and then
       // block it during a second, narrower pre-upload check.
       if (forcedIntent !== "receipt") {
-        const photoResult = await fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent === "photo");
+        const photoResult = await fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent === "photo", personalImageDiagnostic);
         if (photoResult) {
           if (photoResult === true) await notifyWorkPhotoAccepted(message, read, modify);
+          if (photoResult === true) {
+            setPersonalImageFinalDiagnostic(personalImageDiagnostic, "work_photo", "dedicated-work-photo-check", "final");
+            emitPersonalImageClassificationDiagnostic(logger, personalImageDiagnostic);
+          }
           if (logger) logger.info(`MEDIA_V2_WORK_PHOTO_RESULT message=${String(message.id || "none")} result=${String(photoResult)}`);
           return { handled: true, status: photoResult === true ? "work-photo-forwarded" : String(photoResult), result: photoResult };
         }
       }
       const processingStatusManager = createReceiptProcessingStatusManager(message, read, persistence, modify, logger, allowProcessingStatus);
       try {
-        const result = await rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent, processingStatusManager);
+        const result = await rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent, processingStatusManager, personalImageDiagnostic);
         const handled = result === true || result === "processed";
         if (result === true) processingStatusManager.markAll("rejected_published", "ok");
         if (logger) logger.info(`MEDIA_V2_FINISH message=${String(message.id || "none")} handled=${handled} result=${String(result || "none")}`);
+        if (!handled && forcedIntent !== "receipt") {
+          const finalReason = personalImageDiagnostic.final_reason === "unknown" ? "unclassified" : personalImageDiagnostic.final_reason;
+          setPersonalImageFinalDiagnostic(personalImageDiagnostic, "unknown", finalReason, "final");
+          emitPersonalImageClassificationDiagnostic(logger, personalImageDiagnostic);
+        }
         return { handled, status: handled ? "processed" : "unclassified", result };
       } finally {
         await processingStatusManager.clearAll();
@@ -6700,6 +6878,15 @@ var require_upload_duplicate_guard = __commonJS({
       cleanupMailingProofForwardsInOtchet,
       detectPersonalMailingProof,
       personalImageKindForPreUpload,
+      requestOpenAiWorkPhotoCheck,
+      shouldForwardConfirmedWorkPhoto,
+      createPersonalImageClassificationDiagnostic,
+      personalImageDiagnosticSourceType,
+      capturePrimaryPersonalImageDiagnostic,
+      captureDedicatedWorkPhotoDiagnostic,
+      setPersonalImageFinalDiagnostic,
+      safePersonalImageDiagnosticPayload,
+      emitPersonalImageClassificationDiagnostic,
       fastForwardPersonalReportPhotos,
       publishPendingReportPhotos,
       resetInvisiblePermalinkForwards,

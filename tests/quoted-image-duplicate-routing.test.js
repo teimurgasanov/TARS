@@ -71,6 +71,10 @@ const processPersonalMediaV2 = new Function(
   'fastForwardPersonalReportPhotos',
   'rejectDuplicateMessage',
   'createReceiptProcessingStatusManager',
+  'createPersonalImageClassificationDiagnostic',
+  'personalImageDiagnosticSourceType',
+  'setPersonalImageFinalDiagnostic',
+  'emitPersonalImageClassificationDiagnostic',
   `${controllerBlock}; return processPersonalMediaV2;`
 )(
   () => true,
@@ -81,7 +85,11 @@ const processPersonalMediaV2 = new Function(
     duplicateImageIds = messageImageFiles(message).map((file) => file._id);
     return 'processed';
   },
-  () => ({ markAll() {}, async clearAll() {} })
+  () => ({ markAll() {}, async clearAll() {} }),
+  () => ({ final_reason: 'unknown' }),
+  () => 'original',
+  () => {},
+  () => {}
 );
 
 (async () => {

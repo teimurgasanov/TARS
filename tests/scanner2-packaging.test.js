@@ -11,8 +11,8 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "1297f47189532ad68a9e4afae01ee838010605d74ad9e1980f08099b36b6ae3d";
-const expectedManifestSha = "e1c6e5f99bac1d47fb8a5fc5bdc48ac29829145c0144b77cfd85dd21ce19a236";
+const expectedSourceSha = "6925c1e87996d85cad6799fc06852ae0a9be5f47b99dcd680cb63ca7ef435161";
+const expectedManifestSha = "37ffd0f00ecd958089d89e7d573f3c9243fa2ae9214f8fb0102a2573a2ccde0a";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
 function sha256(value) {
@@ -111,6 +111,11 @@ execFileSync(process.execPath, [path.join(root, "tests", "receipt-date-early-mis
   stdio: "pipe"
 });
 execFileSync(process.execPath, [path.join(root, "tests", "receipt-primary-reuse-status.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "work-photo-diagnostics.runtime.js")], {
   cwd: root,
   encoding: "utf8",
   stdio: "pipe"
