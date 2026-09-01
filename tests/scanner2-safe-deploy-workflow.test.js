@@ -36,7 +36,7 @@ assert.match(workflow, /scanner2-shadow:v1:/);
 assert.match(workflow, /evaluateRules\|resolveConflicts\|makeDecision\|runOfflineComparison\|runOfflineDataset/);
 
 assert.match(workflow, /for test_file in tests\/scanner2-\*\.test\.js/);
-assert.match(workflow, /test "\$scanner_count" -eq 17/);
+assert.match(workflow, /test "\$scanner_count" -eq 18/);
 assert.match(workflow, /test "\$legacy_count" -eq 77/);
 assert.match(workflow, /node --check tests\/scanner2-packaging\.test\.js/);
 assert.match(workflow, /git diff --check/);
@@ -51,8 +51,7 @@ assert.match(verifyCommit, /git merge-base --is-ancestor "\$TARGET_SHA" origin\/
 
 [
   "Validate Rocket.Chat deployment secrets",
-  "Authenticate to Rocket.Chat",
-  "Update private app through Rocket.Chat upload API"
+  "Authenticate, revoke previous sessions, update app, and logout"
 ].forEach((name) => {
   assert.ok(step(name).includes(manualGate), `${name} must have the manual DEPLOY gate`);
 });
@@ -62,7 +61,7 @@ assert.ok(firstSecret > workflow.indexOf("Validate Rocket.Chat deployment secret
 const beforeSecretGate = workflow.slice(0, workflow.indexOf("      - name: Validate Rocket.Chat deployment secrets"));
 assert.doesNotMatch(beforeSecretGate, /secrets\.ROCKETCHAT_|\/api\/v1\/login|\/api\/apps\/update/,
   "validation-only path must not inspect secrets or call Rocket.Chat");
-assert.match(step("Update private app through Rocket.Chat upload API"), /\/api\/apps\/update/);
+assert.match(step("Authenticate, revoke previous sessions, update app, and logout"), /\/api\/apps\/update/);
 
 assert.match(workflow, /uses: actions\/upload-artifact@v4[\s\S]*path: \$\{\{ env\.ZIP_PATH \}\}[\s\S]*retention-days: 2/);
 assert.match(step("Validation summary"), /Validation-only develop push completed\. No Rocket\.Chat deployment was attempted\./);

@@ -140,6 +140,7 @@ jobs:
           node --check tools/verify-tars-bundle.js
           node --check tests/scanner2-packaging.test.js
           node --check tests/scanner2-safe-deploy-workflow.test.js
+          node --check tests/scanner2-deploy-token-hygiene.test.js
           git diff --check
 
       - name: Run all Scanner 2.0 tests
@@ -152,7 +153,7 @@ jobs:
             node "$test_file"
             scanner_count=$((scanner_count + 1))
           done
-          test "$scanner_count" -eq 17
+          test "$scanner_count" -eq 18
           echo "SCANNER2_TEST_COUNT=$scanner_count" >> "$GITHUB_ENV"
 
       - name: Run 77 legacy TARS tests
@@ -268,7 +269,7 @@ jobs:
             *) echo "Deployment blocked: ROCKETCHAT_URL must use https://"; exit 1 ;;
           esac
 
-      - name: Authenticate to Rocket.Chat
+      - name: Authenticate, revoke previous sessions, update app, and logout
         if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY'
         shell: bash
         env:
@@ -277,6 +278,47 @@ jobs:
           ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
         run: |
           set -euo pipefail
+          AUTH_TOKEN=""
+          USER_ID=""
+          SESSION_OPEN=0
+          UPDATE_RESPONSE="$(mktemp "$RUNNER_TEMP/tars-update-response.XXXXXX")"
+          REVOKE_RESPONSE="$(mktemp "$RUNNER_TEMP/tars-revoke-response.XXXXXX")"
+          LOGOUT_RESPONSE="$(mktemp "$RUNNER_TEMP/tars-logout-response.XXXXXX")"
+
+          cleanup() {
+            original_status=$?
+            trap - EXIT
+            set +e
+            cleanup_failed=0
+            if [ "$SESSION_OPEN" -eq 1 ] && [ -n "$AUTH_TOKEN" ] && [ -n "$USER_ID" ]; then
+              LOGOUT_HTTP_CODE=$(curl --silent --show-error \
+                --output "$LOGOUT_RESPONSE" \
+                --write-out '%{http_code}' \
+                -X POST \
+                -H "X-Auth-Token: $AUTH_TOKEN" \
+                -H "X-User-Id: $USER_ID" \
+                "$ROCKETCHAT_URL/api/v1/logout")
+              logout_curl_status=$?
+              if [ "$logout_curl_status" -ne 0 ] || [ "$LOGOUT_HTTP_CODE" -lt 200 ] || [ "$LOGOUT_HTTP_CODE" -ge 300 ]; then
+                echo "Rocket.Chat logout cleanup failed; deployment session may still be active."
+                cleanup_failed=1
+              else
+                echo "Rocket.Chat deployment session logout: OK"
+              fi
+            fi
+            AUTH_TOKEN=""
+            USER_ID=""
+            rm -f "$UPDATE_RESPONSE" "$REVOKE_RESPONSE" "$LOGOUT_RESPONSE"
+            if [ "$original_status" -ne 0 ]; then
+              exit "$original_status"
+            fi
+            if [ "$cleanup_failed" -ne 0 ]; then
+              exit 1
+            fi
+            exit 0
+          }
+          trap cleanup EXIT
+
           LOGIN_JSON=$(curl --fail-with-body --silent --show-error \
             -H 'Content-Type: application/json' \
             --data "$(python3 - <<'PY'
@@ -287,19 +329,27 @@ jobs:
             "$ROCKETCHAT_URL/api/v1/login")
           AUTH_TOKEN=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("data",{}).get("authToken", ""))' <<<"$LOGIN_JSON")
           USER_ID=$(python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("data",{}).get("userId", ""))' <<<"$LOGIN_JSON")
+          LOGIN_JSON=""
           test -n "$AUTH_TOKEN" || { echo 'Login succeeded without authToken; deployment blocked'; exit 1; }
           test -n "$USER_ID" || { echo 'Login succeeded without userId; deployment blocked'; exit 1; }
-          echo "AUTH_TOKEN=$AUTH_TOKEN" >> "$GITHUB_ENV"
-          echo "USER_ID=$USER_ID" >> "$GITHUB_ENV"
+          echo "::add-mask::$AUTH_TOKEN"
+          echo "::add-mask::$USER_ID"
+          SESSION_OPEN=1
           echo 'Rocket.Chat authentication: OK'
 
-      - name: Update private app through Rocket.Chat upload API
-        if: github.event_name == 'workflow_dispatch' && inputs.confirm == 'DEPLOY'
-        shell: bash
-        env:
-          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
-        run: |
-          set -euo pipefail
+          REVOKE_HTTP_CODE=$(curl --silent --show-error \
+            --output "$REVOKE_RESPONSE" \
+            --write-out '%{http_code}' \
+            -X POST \
+            -H "X-Auth-Token: $AUTH_TOKEN" \
+            -H "X-User-Id: $USER_ID" \
+            "$ROCKETCHAT_URL/api/v1/users.logoutOtherClients")
+          if [ "$REVOKE_HTTP_CODE" -lt 200 ] || [ "$REVOKE_HTTP_CODE" -ge 300 ]; then
+            echo "Deployment blocked before apps/update: Rocket.Chat could not revoke previous deployment-user sessions (HTTP $REVOKE_HTTP_CODE)."
+            exit 1
+          fi
+          echo "Rocket.Chat previous deployment-user sessions revoked: OK"
+
           PERMISSIONS_JSON=$(python3 - <<'PY'
           import json
           app=json.load(open('app.json', encoding='utf-8'))
@@ -307,7 +357,7 @@ jobs:
           PY
           )
           HTTP_CODE=$(curl --silent --show-error \
-            --output /tmp/deploy-response.out \
+            --output "$UPDATE_RESPONSE" \
             --write-out '%{http_code}' \
             -X POST \
             -H "X-Auth-Token: $AUTH_TOKEN" \
@@ -319,15 +369,12 @@ jobs:
           echo "POST /api/apps/update -> HTTP $HTTP_CODE"
           if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
             echo 'Rocket.Chat rejected the private-app update. No retry will be attempted.'
-            python3 - <<'PY'
-          raw=open('/tmp/deploy-response.out','rb').read(2000)
-          print(raw.decode('utf-8','replace'))
-          PY
             exit 1
           fi
-          python3 - <<'PY'
+          UPDATE_RESPONSE="$UPDATE_RESPONSE" python3 - <<'PY'
           import json
-          raw=open('/tmp/deploy-response.out','rb').read()
+          import os
+          raw=open(os.environ['UPDATE_RESPONSE'],'rb').read()
           if not raw:
               print('Rocket.Chat returned success with an empty response body.')
           else:
