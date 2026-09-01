@@ -3489,6 +3489,14 @@ var require_upload_duplicate_guard = __commonJS({
       const successStatus = /"status"\s*:\s*"(?:success|успешно|исполнен|исполнено|выполнен|оплачен|completed)"/i.test(text);
       return Boolean(receiptSeen && receiptVisual && successStatus);
     }
+    function aiCandidateStronglyConfirmsReceiptDocument(candidate) {
+      if (!candidate || !candidate.aiReceipt || candidate.containerRejection || receiptStatusBlocks(candidate.statusRejection)) return false;
+      const text = String(candidate.text || "");
+      const receiptSeen = /"is_receipt"\s*:\s*true/i.test(text);
+      const receiptVisual = /"visual_type"\s*:\s*"(?:bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt)"/i.test(text);
+      const successStatus = /"status"\s*:\s*"(?:success|успешно|исполнен|исполнено|выполнен|оплачен|completed)"/i.test(text);
+      return Boolean(receiptSeen && receiptVisual && successStatus);
+    }
     function receiptCandidateAmountConflict(candidates, aiCandidate, requiredDate) {
       if (!aiCandidate || !isValidReceiptAmount(aiCandidate.receiptAmount)) return false;
       return (Array.isArray(candidates) ? candidates : []).some((candidate) => {
@@ -4215,6 +4223,33 @@ var require_upload_duplicate_guard = __commonJS({
           receiptIdentity: extractReceiptIdentity(statusCandidate.text, statusCandidate.receiptDate, statusCandidate.receiptAmount)
         });
       };
+      const returnDateMismatch = (candidate) => {
+        const dated = mergeCandidateForDecision(candidate);
+        if (!dated || !dated.receiptDate) return void 0;
+        return withShadowEvidence({
+          ok: false,
+          reason: `🚫 ДАТА ЧЕКА ${displayDate(dated.receiptDate)}, НУЖНА ${displayDate(requiredDate)}`,
+          receiptDate: dated.receiptDate,
+          receiptAmount: dated.receiptAmount,
+          receiptIdentity: extractReceiptIdentity(dated.text, dated.receiptDate, dated.receiptAmount)
+        });
+      };
+      const independentEarlyDateMismatch = (aiCandidate) => {
+        if (!hasYandex || !aiCandidateStronglyConfirmsReceiptDocument(aiCandidate)) return void 0;
+        const agreedDate = String(aiCandidate.receiptDate || "");
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(agreedDate) || agreedDate === requiredDate) return void 0;
+        const datedYandexCandidates = candidates.filter((candidate) => {
+          const source = String(candidate && candidate.receiptAmountSource || "");
+          return candidate && !candidate.combinedReceipt && source.indexOf("yandex:") === 0 && /^\d{4}-\d{2}-\d{2}$/.test(String(candidate.receiptDate || ""));
+        });
+        if (!datedYandexCandidates.length || datedYandexCandidates.some((candidate) => candidate.receiptDate !== agreedDate)) return void 0;
+        return datedYandexCandidates.find((candidate) => {
+          if (candidate.containerRejection || receiptStatusBlocks(candidate.statusRejection)) return false;
+          const text = String(candidate.text || "");
+          const successStatus = /успешно|исполнен[ао]?|выполнен[ао]?|оплачен[ао]?|платеж\s+выполнен|перевод\s+(?:выполнен|отправлен)|зачислен[ао]?|completed|success|successful|approved/i.test(text);
+          return looksLikeBankReceiptText(text) && successStatus;
+        });
+      };
       try {
         if (hasYandex) {
           for (const model of ["page", "page-column-sort", "table", "markdown"]) {
@@ -4246,6 +4281,8 @@ var require_upload_duplicate_guard = __commonJS({
             const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger);
             if (aiCandidate) candidates.push(aiCandidate);
             if (aiCandidate) legacyVisionResults.push(shadowObservation(aiCandidate, "primary"));
+            const earlyDateMismatch = independentEarlyDateMismatch(aiCandidate);
+            if (earlyDateMismatch) return returnDateMismatch(earlyDateMismatch);
             const amountCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, true);
             if (amountCandidate) candidates.push(amountCandidate);
             if (amountCandidate) legacyVisionResults.push(shadowObservation(amountCandidate, "amount_focus"));
@@ -4292,16 +4329,8 @@ var require_upload_duplicate_guard = __commonJS({
           receiptAmount: correctDate.receiptAmount,
           receiptIdentity: extractReceiptIdentity(correctDate.text, correctDate.receiptDate, correctDate.receiptAmount)
         });
-        const dated = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate));
-        if (dated) {
-          return withShadowEvidence({
-            ok: false,
-            reason: `🚫 ДАТА ЧЕКА ${displayDate(dated.receiptDate)}, НУЖНА ${displayDate(requiredDate)}`,
-            receiptDate: dated.receiptDate,
-            receiptAmount: dated.receiptAmount,
-            receiptIdentity: extractReceiptIdentity(dated.text, dated.receiptDate, dated.receiptAmount)
-          });
-        }
+        const dated = candidates.find((candidate) => candidate.receiptDate);
+        if (dated) return returnDateMismatch(dated);
         if (!candidates.length && failures.length) throw new Error(failures.join("; "));
         return withShadowEvidence({ ok: false, reason: "🚫 ДАТА ЧЕКА НЕ РАСПОЗНАНА" });
       } catch (error) {
