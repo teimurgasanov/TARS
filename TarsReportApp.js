@@ -1974,6 +1974,58 @@ var require_upload_duplicate_guard = __commonJS({
     }
     const IMAGE_CLASSIFICATION_SCHEMA_VERSION = "personal-image-classification-v1";
     const IMAGE_CLASSIFICATION_MODEL = "gpt-5.4-nano-2026-03-17";
+    const PRIMARY_IMAGE_VISION_MODEL = "gpt-5.6-sol";
+    const PRIMARY_IMAGE_VISION_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "kind", "confidence", "service_kind", "has_payment_ui", "has_receipt_layout",
+        "has_financial_document", "has_document_layout", "has_visible_client",
+        "has_visible_service_result", "has_visible_hair_result", "has_visible_nail_result",
+        "has_visible_brow_lash_result", "has_salon_context", "has_messaging_ui",
+        "is_receipt", "is_banking", "is_document", "has_receipt_text",
+        "is_mailing_proof", "is_screenshot_of_chat", "visual_type", "service_type",
+        "date", "amount", "amount_text", "amount_label", "status", "bank"
+      ],
+      properties: {
+        kind: { type: "string", enum: ["work_photo", "receipt", "bank_transfer", "mailing", "document", "unknown"] },
+        confidence: { type: "string", enum: ["high", "medium", "low"] },
+        service_kind: { type: "string", enum: ["hair", "nails", "pedicure", "brows_lashes", "other", "none"] },
+        has_payment_ui: { type: "boolean" },
+        has_receipt_layout: { type: "boolean" },
+        has_financial_document: { type: "boolean" },
+        has_document_layout: { type: "boolean" },
+        has_visible_client: { type: "boolean" },
+        has_visible_service_result: { type: "boolean" },
+        has_visible_hair_result: { type: "boolean" },
+        has_visible_nail_result: { type: "boolean" },
+        has_visible_brow_lash_result: { type: "boolean" },
+        has_salon_context: { type: "boolean" },
+        has_messaging_ui: { type: "boolean" },
+        is_receipt: { type: "boolean" },
+        is_banking: { type: "boolean" },
+        is_document: { type: "boolean" },
+        has_receipt_text: { type: "boolean" },
+        is_mailing_proof: { type: "boolean" },
+        is_screenshot_of_chat: { type: "boolean" },
+        visual_type: {
+          type: "string",
+          enum: [
+            "bank_receipt", "bank_app_screen", "receipt_on_phone", "qr_payment_receipt",
+            "mailing_proof_screenshot", "hair_work_photo", "nails_work_photo",
+            "brows_lashes_work_photo", "pedicure_work_photo", "work_photo", "salon_photo",
+            "chat_screenshot", "unknown"
+          ]
+        },
+        service_type: { type: "string", enum: ["haircut", "coloring", "manicure", "pedicure", "brows", "lashes", "unknown"] },
+        date: { anyOf: [{ type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }, { type: "null" }] },
+        amount: { anyOf: [{ type: "number" }, { type: "null" }] },
+        amount_text: { anyOf: [{ type: "string" }, { type: "null" }] },
+        amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
+        status: { type: "string", enum: ["success", "failed", "pending", "unknown"] },
+        bank: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
     const IMAGE_CLASSIFICATION_KINDS = ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other"];
     const IMAGE_CLASSIFICATION_REASON_CODES = ["RECEIPT_OR_PAYMENT", "WORK_PHOTO_HAIR", "WORK_PHOTO_NAILS", "WORK_PHOTO_BROWS", "WORK_PHOTO_OTHER", "MAILING_PROOF", "REPORT_OR_SCREENSHOT", "OTHER_IMAGE", "AMBIGUOUS"];
     const IMAGE_CLASSIFICATION_V1_SCHEMA = {
@@ -3875,6 +3927,11 @@ var require_upload_duplicate_guard = __commonJS({
     const personalImageKindCache = /* @__PURE__ */ new Map();
     const primaryVisionDecisionCache = /* @__PURE__ */ new Map();
     const primaryReceiptEvidenceCache = /* @__PURE__ */ new Map();
+    function primaryImageVisionKey(file, content, config) {
+      const uploadId = String(file && (file._id || file.id) || "").trim();
+      if (!content || !content.length) return "";
+      return `${uploadId}:${exactHash(content)}:${expectedReceiptDate(config)}:${PRIMARY_IMAGE_VISION_MODEL}`;
+    }
     function receiptPrimaryEvidenceKey(file, content, config) {
       const uploadId = String(file && (file._id || file.id) || "").trim();
       if (!uploadId || !content || !content.length) return "";
@@ -3925,7 +3982,7 @@ var require_upload_duplicate_guard = __commonJS({
         }
         return primaryVisionDecisionFromCandidate(void 0, "no_json");
       }
-      const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+      const model = PRIMARY_IMAGE_VISION_MODEL;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
       try {
@@ -3936,6 +3993,8 @@ var require_upload_duplicate_guard = __commonJS({
           },
           data: {
             model,
+            store: false,
+            reasoning: { effort: "none" },
             input: [{
               role: "user",
               content: [
@@ -3946,6 +4005,14 @@ var require_upload_duplicate_guard = __commonJS({
                 { type: "input_image", image_url: imageUrl, detail: "high" }
               ]
             }],
+            text: {
+              format: {
+                type: "json_schema",
+                name: "tars_primary_image_vision_v1",
+                strict: true,
+                schema: PRIMARY_IMAGE_VISION_SCHEMA
+              }
+            },
             max_output_tokens: 320
           },
           timeout: 14e3
@@ -4012,8 +4079,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (!config || !config.openaiApiKey || !content || !content.length || !http) {
         return primaryVisionDecisionFromCandidate(void 0, "no_json");
       }
-      const evidenceKey = receiptPrimaryEvidenceKey(file, content, config);
-      const key = evidenceKey || `${expectedReceiptDate(config)}:${exactHash(content)}`;
+      const key = primaryImageVisionKey(file, content, config);
       let cached = primaryVisionDecisionCache.get(key);
       const cacheHit = Boolean(cached && Date.now() - Number(cached.createdAt || 0) < 10 * 60 * 1e3);
       capturePersonalImageCacheTelemetry(diagnostic, "primary_cache", cacheHit);
@@ -7867,6 +7933,8 @@ var require_upload_duplicate_guard = __commonJS({
       cleanupMailingProofForwardsInOtchet,
       IMAGE_CLASSIFICATION_V1_SCHEMA,
       IMAGE_CLASSIFICATION_MODEL,
+      PRIMARY_IMAGE_VISION_MODEL,
+      PRIMARY_IMAGE_VISION_SCHEMA,
       parseImageClassification,
       invalidImageClassification,
       requestOpenAiImageClassificationUncached,

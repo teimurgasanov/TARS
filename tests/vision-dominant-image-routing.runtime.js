@@ -47,10 +47,13 @@ function dedicatedPayload(overrides = {}) {
 function provider(primary, dedicated = dedicatedPayload()) {
   const calls = [];
   const imageUrls = [];
+  const requests = [];
   return {
     calls,
     imageUrls,
+    requests,
     async post(_url, options) {
+      requests.push(options && options.data);
       const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
       const role = prompt.includes("строгую классификацию изображения") ? "dedicated" : "primary";
       calls.push(role);
@@ -103,6 +106,15 @@ const logger = { info() {}, warn() {}, error() {} };
       has_visible_service_result: true
     }));
     const decision = await guard.primaryVisionDecisionForImage(source.file, source.content, http, config, logger);
+    const request = http.requests[0];
+    assert.strictEqual(guard.PRIMARY_IMAGE_VISION_MODEL, "gpt-5.6-sol", "primary Vision must use the maximum-quality model");
+    assert.strictEqual(request.model, "gpt-5.6-sol", `${label} must use the maximum-quality model`);
+    assert.strictEqual(request.store, false, `${label} must not store provider input`);
+    assert.deepStrictEqual(request.reasoning, { effort: "none" }, `${label} must use deterministic no-reasoning classification`);
+    assert.strictEqual(request.text.format.type, "json_schema", `${label} must use Structured Outputs`);
+    assert.strictEqual(request.text.format.strict, true, `${label} must enforce the classification schema`);
+    assert.strictEqual(request.text.format.schema.additionalProperties, false, `${label} schema must reject unexpected fields`);
+    assert.strictEqual(request.input[0].content[1].detail, "high", `${label} must inspect the high-detail image`);
     assert.strictEqual(guard.primaryVisionDominantKind(decision), "photo", `${label} must be WORK_PHOTO`);
     const routed = await guard.shouldForwardConfirmedWorkPhoto(source.file, source.content, http, config, logger);
     assert.deepStrictEqual(routed, { forward: true, reason: "primary-vision-high-work-photo" });
