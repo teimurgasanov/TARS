@@ -4898,6 +4898,132 @@ var require_upload_duplicate_guard = __commonJS({
       // layouts alone are still one provider and cannot form a consensus.
       return hasConflict && confirmedReceiptAmount(candidates, requiredDate, allowOpenAiPair) === void 0;
     }
+    const RECEIPT_TARGETED_DATE_AMOUNT_MODEL = "gpt-5.6-sol";
+    const RECEIPT_TARGETED_DATE_AMOUNT_MIN_CONFIDENCE = 0.9;
+    const RECEIPT_TARGETED_DATE_AMOUNT_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: ["operation_date", "operation_time", "amount", "currency", "confidence"],
+      properties: {
+        operation_date: { anyOf: [{ type: "string" }, { type: "null" }] },
+        operation_time: { anyOf: [{ type: "string" }, { type: "null" }] },
+        amount: { anyOf: [{ type: "number" }, { type: "string" }, { type: "null" }] },
+        currency: { type: "string", enum: ["RUB", "unknown"] },
+        confidence: { type: "number", minimum: 0, maximum: 1 }
+      }
+    };
+    function receiptTargetedHasExactKeys(value, expectedKeys) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+      const actual = Object.keys(value).sort();
+      const expected = expectedKeys.slice().sort();
+      return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+    }
+    function normalizeReceiptTargetedAmount(value) {
+      if (typeof value === "number") return Number.isFinite(value) && value > 0 ? Math.round(value * 100) / 100 : void 0;
+      if (typeof value !== "string") return void 0;
+      let source = value.trim().replace(/[\u00a0\u202f\s]/g, "").replace(/(?:₽|руб(?:\.?|лей)?|rub|rur)$/i, "");
+      if (!source) return void 0;
+      if (/^\d{1,3}(?:,\d{3})+$/.test(source)) source = source.replace(/,/g, "");
+      else if (/^\d{1,3}(?:\.\d{3})+$/.test(source)) source = source.replace(/\./g, "");
+      else source = source.replace(",", ".");
+      if (!/^\d+(?:\.\d{1,2})?$/.test(source)) return void 0;
+      const amount = Number(source);
+      return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : void 0;
+    }
+    function normalizeReceiptTargetedTime(value) {
+      if (value === null || value === void 0) return void 0;
+      const match = String(value).trim().match(/(?:^|\D)([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?(?:\D|$)/);
+      if (!match) return void 0;
+      return `${String(Number(match[1])).padStart(2, "0")}:${match[2]}`;
+    }
+    function parseReceiptTargetedDateAmount(input, requiredDate) {
+      let value = input;
+      if (typeof input === "string") {
+        try {
+          value = JSON.parse(input);
+        } catch (_2) {
+          return void 0;
+        }
+      }
+      if (!receiptTargetedHasExactKeys(value, ["operation_date", "operation_time", "amount", "currency", "confidence"])) return void 0;
+      if (value.operation_date !== null && typeof value.operation_date !== "string") return void 0;
+      if (value.operation_time !== null && typeof value.operation_time !== "string") return void 0;
+      if (value.amount !== null && typeof value.amount !== "number" && typeof value.amount !== "string") return void 0;
+      if (value.currency !== "RUB" && value.currency !== "unknown") return void 0;
+      if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) return void 0;
+      const operationDate = normalizeOpenAiDate(value.operation_date, requiredDate) || extractReceiptDate(value.operation_date, requiredDate);
+      const operationTime = normalizeReceiptTargetedTime(value.operation_time || value.operation_date);
+      const amount = value.currency === "RUB" ? normalizeReceiptTargetedAmount(value.amount) : void 0;
+      return { operationDate, operationTime, amount, currency: value.currency, confidence: value.confidence };
+    }
+    function receiptTargetedRetryableStatus(statusCode) {
+      return statusCode === 429 || statusCode >= 500 && statusCode <= 599;
+    }
+    function receiptTargetedTimeout(error) {
+      return /(?:timeout|timed\s*out|etimedout)/i.test(String(error && (error.code || error.message) || error || ""));
+    }
+    async function requestOpenAiReceiptDateAmountFallback(file, content, http, config, requiredDate, logger, attempt = 0) {
+      if (!config || !config.openaiApiKey || !content || !content.length || !http) return void 0;
+      const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
+      let response;
+      try {
+        response = await http.post("https://api.openai.com/v1/responses", {
+          headers: { Authorization: "Bearer " + config.openaiApiKey, "Content-Type": "application/json" },
+          data: {
+            model: RECEIPT_TARGETED_DATE_AMOUNT_MODEL,
+            store: false,
+            reasoning: { effort: "none" },
+            input: [{
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: "Изображение уже независимо признано банковским чеком или подтверждением оплаты. Не классифицируй тип изображения. Найди только дату и время совершения операции, итоговую сумму операции и валюту. Документ может быть снят под углом, с бликами или показан на экране телефона: внимательно рассмотри область самого чека. Дату вроде «2 сентября 2026 в 11:00» нормализуй как operation_date=2026-09-02 и operation_time=11:00. Для суммы используй только итог, Сумма операции, Сумма перевода, Сумма платежа или Сумма списания. Не принимай за сумму время, номер карты, счёта, телефона, документа, операции, код платежа, комиссию или баланс. Если поле не читается надёжно, верни null; не угадывай. currency=RUB только при явных ₽, руб, RUB/RUR или однозначном рублёвом банковском чеке, иначе unknown. confidence отражает уверенность именно в возвращённых date/amount."
+                },
+                { type: "input_image", image_url: imageUrl, detail: "high" }
+              ]
+            }],
+            text: {
+              format: {
+                type: "json_schema",
+                name: "receipt_targeted_date_amount_v1",
+                strict: true,
+                schema: RECEIPT_TARGETED_DATE_AMOUNT_SCHEMA
+              }
+            },
+            max_output_tokens: 160
+          },
+          timeout: 14e3
+        });
+      } catch (error) {
+        if (attempt < 1 && receiptTargetedTimeout(error)) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          return requestOpenAiReceiptDateAmountFallback(file, content, http, config, requiredDate, logger, attempt + 1);
+        }
+        if (logger) logger.warn(`Targeted receipt field extraction failed kind=${receiptTargetedTimeout(error) ? "timeout" : "other"}`);
+        return void 0;
+      }
+      const statusCode = Number(response && response.statusCode || 0);
+      if (statusCode < 200 || statusCode >= 300) {
+        if (attempt < 1 && receiptTargetedRetryableStatus(statusCode)) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          return requestOpenAiReceiptDateAmountFallback(file, content, http, config, requiredDate, logger, attempt + 1);
+        }
+        if (logger) logger.warn(`Targeted receipt field extraction HTTP status=${statusCode || "unknown"}`);
+        return void 0;
+      }
+      let payload = response.data || response.content || response;
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch (_2) {
+          return void 0;
+        }
+      }
+      const parsed = parseReceiptTargetedDateAmount(openAiReceiptOutputText(payload), requiredDate);
+      if (!parsed && logger) logger.warn("Targeted receipt field extraction returned invalid structured output");
+      return parsed;
+    }
     async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false, focusDate = false, diagnostic, diagnosticRole = "") {
       if (!config || !config.openaiApiKey || !content || !content.length) return void 0;
       const primaryModel = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
@@ -5723,6 +5849,51 @@ var require_upload_duplicate_guard = __commonJS({
             receiptAmount: conflicting && conflicting.receiptAmount,
             receiptIdentity: conflicting ? extractReceiptIdentity(conflicting.text, conflicting.receiptDate, conflicting.receiptAmount) : void 0
           });
+        }
+        const targetedBaseCandidate = candidates.find((candidate) => {
+          if (!candidate || candidate.combinedReceipt || candidate.containerRejection || receiptStatusBlocks(candidate.statusRejection)) return false;
+          if (aiCandidateStronglyConfirmsReceiptDocument(candidate)) return true;
+          const text = String(candidate.text || "");
+          return looksLikeBankReceiptText(text) && /успешно|исполнен[ао]?|выполнен[ао]?|оплачен[ао]?|платеж\s+выполнен|перевод\s+(?:выполнен|отправлен)|зачислен[ао]?|completed|success|successful|approved/i.test(text);
+        });
+        const recognizedDates = candidates.filter((candidate) => candidate && !candidate.combinedReceipt && /^\d{4}-\d{2}-\d{2}$/.test(String(candidate.receiptDate || ""))).map((candidate) => candidate.receiptDate);
+        const recognizedAmounts = candidates.filter((candidate) => candidate && !candidate.combinedReceipt && isValidReceiptAmount(candidate.receiptAmount)).map((candidate) => Number(candidate.receiptAmount));
+        const dateMissing = recognizedDates.length === 0;
+        const amountMissing = recognizedAmounts.length === 0;
+        if (hasOpenAi && targetedBaseCandidate && (dateMissing || amountMissing)) {
+          const targeted = await requestOpenAiReceiptDateAmountFallback(file, content, http, config, requiredDate, logger);
+          if (targeted && targeted.confidence >= RECEIPT_TARGETED_DATE_AMOUNT_MIN_CONFIDENCE) {
+            const uniqueDates = Array.from(new Set(recognizedDates));
+            const uniqueAmounts = recognizedAmounts.filter((amount, index) => recognizedAmounts.findIndex((other) => sameReceiptAmount(amount, other)) === index);
+            const dateConflict = uniqueDates.length > 1 || uniqueDates.length === 1 && targeted.operationDate && uniqueDates[0] !== targeted.operationDate;
+            const amountConflict = uniqueAmounts.length > 1 || uniqueAmounts.length === 1 && isValidReceiptAmount(targeted.amount) && !sameReceiptAmount(uniqueAmounts[0], targeted.amount);
+            if (!dateConflict && !amountConflict) {
+              const completedDate = uniqueDates[0] || targeted.operationDate;
+              const completedAmount = uniqueAmounts[0] || targeted.amount;
+              const targetedCandidate = {
+                text: String(targetedBaseCandidate.text || ""),
+                receiptDate: completedDate,
+                receiptAmount: completedAmount,
+                receiptAmountSource: `openai:${RECEIPT_TARGETED_DATE_AMOUNT_MODEL}:targeted`,
+                statusRejection: targetedBaseCandidate.statusRejection || "",
+                containerRejection: targetedBaseCandidate.containerRejection || "",
+                aiReceipt: true,
+                targetedReceiptFallback: true
+              };
+              candidates.push(targetedCandidate);
+              addCombinedCandidate();
+              if (completedDate && completedDate !== requiredDate) return returnDateMismatch(targetedCandidate);
+              if (completedDate === requiredDate && isValidReceiptAmount(completedAmount)) {
+                return withShadowEvidence({
+                  ok: true,
+                  receiptDate: completedDate,
+                  receiptAmount: completedAmount,
+                  receiptIdentity: extractReceiptIdentity(targetedCandidate.text, completedDate, completedAmount),
+                  receiptWarning: targetedCandidate.statusRejection || ""
+                });
+              }
+            }
+          }
         }
         const correctDate = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate));
         if (correctDate) return withShadowEvidence({
@@ -7945,6 +8116,9 @@ var require_upload_duplicate_guard = __commonJS({
       processPersonalMediaV2,
       validateReceiptDate,
       validateReceiptStrict,
+      parseReceiptTargetedDateAmount,
+      requestOpenAiReceiptDateAmountFallback,
+      RECEIPT_TARGETED_DATE_AMOUNT_MODEL,
       receiptStageContext,
       createReceiptProcessingStatusManager,
       seedExistingPhotos,
