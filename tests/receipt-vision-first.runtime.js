@@ -141,6 +141,17 @@ async function run(label, scenario) {
   assert.strictEqual(ocrSeven.result.receiptAmount, 1e3);
   assert(ocrSeven.logs.some((line) => /RECEIPT_VISION_FIELDS_V1 authority=high .*amount_disagreement=true/.test(line)), "C: disagreement must be telemetry-only");
 
+  const sber = await run("sber-angled-glare", {
+    vision: visionFields(1300, 0.98, { operation_time: "11:00" }),
+    ocrAmount: 1
+  });
+  assert.strictEqual(sber.result.ok, true, "H: Sber receipt must be accepted");
+  assert.strictEqual(sber.result.receiptDate, "2026-09-02", "H: high-confidence Vision date must remain authoritative");
+  assert.strictEqual(sber.result.receiptAmount, 1300, "H: high-confidence Vision amount must remain authoritative");
+  assert(![0, 1, 300].includes(sber.result.receiptAmount), "H: OCR fragments must never replace Vision amount 1300");
+  assert.strictEqual(sber.calls.filter((call) => call === "vision-fields").length, 1, "H: receipt fields must use one structured Vision call");
+  assert(sber.logs.some((line) => /RECEIPT_VISION_FIELDS_V1 authority=high .*amount_disagreement=true/.test(line)), "H: OCR amount 1 disagreement must be telemetry-only");
+
   const ocrZero = await run("ocr-zero", { vision: visionFields(900), ocrAmount: 0 });
   assert.strictEqual(ocrZero.result.ok, true, "D: Vision must supply the amount when OCR returns zero");
   assert.strictEqual(ocrZero.result.receiptAmount, 900);
