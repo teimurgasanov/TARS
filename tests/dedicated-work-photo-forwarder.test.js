@@ -10,8 +10,8 @@ assert.strictEqual((h.match(/personalImageKindForPreUpload\(/g) || []).length, 1
 assert.strictEqual((h.match(/primaryVisionDecisionForImage\(/g) || []).length, 1, 'work-photo routing must obtain one cached primary Vision decision');
 assert.match(h, /const dominantKind = primaryVisionDominantKind\(primaryDecision\)[\s\S]*dominantKind === "photo"[\s\S]*primary-vision-high-work-photo/,
   'high-confidence clean work photos must win before the dedicated fallback');
-assert.match(h, /if \(options\.manualPhotoSafetyOnly\)[\s\S]*\} else \{[\s\S]*personalImageKindForPreUpload/,
-  'manual safety and automatic fallback classification must remain mutually exclusive');
+assert.match(h, /if \(options\.manualPhotoSafetyOnly\)[\s\S]*return \{ forward: false, reason: "manual-photo-safety-inconclusive" \};[\s\S]*personalImageKindForPreUpload/,
+  'manual V3 safety must terminate before the legacy fallback classifier');
 assert(h.includes('requestOpenAiWorkPhotoCheck'), 'unknown images must receive a dedicated work-photo check');
 assert(!source.includes('parsed.kind === "hair" ? 0.7 : 0.8'), 'confirmed work photos must not be rejected by an extra confidence threshold');
 assert(source.includes('parsed.is_work_photo === true && parsed.has_visible_client === true && parsed.has_visible_service_area === true && knownServiceArea'), 'work photos must require a visible client and a known salon service area');

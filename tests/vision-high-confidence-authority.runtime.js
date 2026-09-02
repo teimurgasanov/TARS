@@ -184,8 +184,8 @@ const logger = { info() {}, warn() {}, error() {} };
     "incidental financial text must not be a work-photo veto");
   assert.match(sourceText, /const authoritativeWorkPhoto = state === "parsed" && requestedClass === "work_photo" && confidence === "high" && !financialBlock/,
     "HIGH WORK_PHOTO must become authoritative before secondary semantic checks");
-  assert.match(sourceText, /if \(decision\.kind === "work_photo"\) return "photo"/,
-    "dominant HIGH WORK_PHOTO must not require a second service-area confirmation");
+  assert.match(sourceText, /const route = routeVisionDecision\(decision\)/,
+    "dominant HIGH WORK_PHOTO must use the isolated V3 router without a second service-area confirmation");
   assert.match(sourceText, /primary-vision-high-work-photo/,
     "HIGH WORK_PHOTO must remain terminal before the dedicated fallback");
 

@@ -131,7 +131,7 @@ function createRuntime({ directMessages, roomMessages }) {
   app.handleMonthlyScheduleMessage = async () => false;
   app.handleMasterChatTextMessage = async () => false;
   app.handleLatenessTextMessage = async () => false;
-  app.isPersonalReportRoom = () => false;
+  app.isPersonalReportRoom = () => true;
   app.isReportRequestText = () => false;
   app.refreshPersonalReportButton = async () => false;
   app.receiptWasAcceptedForMessage = async () => false;
@@ -187,18 +187,19 @@ function assertPrivacy(events, forbiddenValues) {
     await mobile.app.executePostMessageSent(preliminary, mobile.read, {}, mobile.persistence, mobile.modify);
     const mobileEvents = telemetryEvents(mobile.logs);
     const stages = mobileEvents.map((event) => event.payload.stage);
-    for (const stage of ["event_received", "media_resolved", "gate_reached", "publish_attempted", "publish_success", "state_written"]) {
+    for (const stage of ["event_received", "media_resolved"]) {
       assert.ok(stages.includes(stage), `mobile executePostMessageSent must emit ${stage}`);
     }
     assert.ok(!stages.includes("media_not_resolved"));
-    assert.ok(stages.indexOf("gate_reached") > stages.indexOf("media_resolved"), "gate must be observable only after media resolves");
+    assert.ok(!stages.includes("gate_reached"), "post-upload manual selection state must remain disabled in the preselected V3 flow");
     const resolved = mobileEvents.find((event) => event.payload.stage === "media_resolved").payload;
     assert.strictEqual(resolved.resolved_image_count_bucket, "1");
     assert.strictEqual(resolved.source_type, "original");
-    const written = mobileEvents.find((event) => event.payload.stage === "state_written").payload;
-    assert.strictEqual(written.selection_state, "created");
-    assert.strictEqual(written.publisher_result, "success");
-    assert.strictEqual(mobile.published.filter((message) => message.text === "Что вы отправили?").length, 1);
+    const uploadMenus = mobile.published.filter((message) => message.text === "ВЫБЕРИТЕ ТИП ЗАГРУЗКИ");
+    assert.strictEqual(uploadMenus.length, 1,
+      "an upload without a preselected intent must publish the three-button pre-upload menu and run no pipeline");
+    const menuLabels = (uploadMenus[0].blocks || []).flatMap((block) => block.elements || []).map((element) => element && element.text && element.text.text);
+    assert.deepStrictEqual(menuLabels, ["📸 ФОТО", "🧾 ЧЕК", "✉️ РАССЫЛКА"]);
     assert.ok(observedDelays.includes(750), "current media resolver retry delay must remain 750 ms");
     assertPrivacy(mobileEvents, [room.id, room.slugifiedName, sender.id, sender.username, preliminary.id, originalFile.id, originalFile.name, "private-url-secret"]);
 

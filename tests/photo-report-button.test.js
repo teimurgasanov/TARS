@@ -19,11 +19,13 @@ assert.match(source, /finalKind === "mailing"/);
 assert.match(source, /✅ ФОТО РАБОТЫ ПРИНЯТО/);
 assert.match(source, /✅ РАССЫЛКИ ПРИНЯТЫ/);
 assert.match(source, /📸 Отправьте фото выполненной работы\./);
-assert.match(source, /🧾 РЕЖИМ ЧЕКОВ ВКЛЮЧЁН НА 10 МИНУТ/);
+assert.match(source, /🧾 Отправьте чек\./);
 assert.match(source, /✉️ Отправьте скриншот рассылки\./);
 
 const personalLinkBlock = source.slice(source.indexOf("async sendPersonalReportLink("), source.indexOf("async publishDefaultTable("));
 assert.doesNotMatch(personalLinkBlock, /UPLOAD_MENU_ACTION/);
-assert.doesNotMatch(personalLinkBlock, /PHOTO_REPORT_ACTION|RECEIPT_UPLOAD_ACTION|MAILING_UPLOAD_ACTION/);
+assert.match(personalLinkBlock, /PHOTO_REPORT_ACTION/);
+assert.match(personalLinkBlock, /RECEIPT_UPLOAD_ACTION/);
+assert.match(personalLinkBlock, /MAILING_UPLOAD_ACTION/);
 
-console.log("PASS: persistent report menu has one upload button with three disposable choices");
+console.log("PASS: persistent report menu has three direct pre-upload choices");

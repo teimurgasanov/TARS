@@ -17,16 +17,23 @@ const postBlock = source.slice(postStart, postEnd);
 const classifyStart = source.indexOf('async function personalImageKindForPreUploadUncached');
 const classifyEnd = source.indexOf('async function personalImageKindForPreUpload(', classifyStart);
 const classifyBlock = source.slice(classifyStart, classifyEnd);
+const menuStart = source.indexOf('async handleUploadMenuButton');
+const menuEnd = source.indexOf('async handlePhotoReportButton', menuStart);
+const menuBlock = source.slice(menuStart, menuEnd);
 
-assert.doesNotMatch(linkBlock, /UPLOAD_MENU_ACTION|➕ ЗАГРУЗИТЬ|📸 ФОТО|🧾 ЧЕК|✉️ РАССЫЛКА/);
+assert.doesNotMatch(linkBlock, /UPLOAD_MENU_ACTION|➕ ЗАГРУЗИТЬ/);
+for (const label of ['📸 ФОТО', '🧾 ЧЕК', '✉️ РАССЫЛКА']) assert.match(linkBlock, new RegExp(label));
 assert.doesNotMatch(promptBlock, /newButtonElement|UPLOAD_MENU_ACTION/);
 assert.match(selectionBlock, /Что вы отправили\?/);
 assert.match(selectionBlock, /MANUAL_IMAGE_RECEIPT_ACTION/);
 assert.match(selectionBlock, /MANUAL_IMAGE_PHOTO_ACTION/);
 assert.match(selectionBlock, /MANUAL_IMAGE_MAILING_ACTION/);
-assert.match(postBlock, /if \(hasPersonalImageUpload\) \{[\s\S]*primaryVisionDecisionForPersonalMessage[\s\S]*if \(!visionRoute\) \{[\s\S]*ensureManualImageSelection[\s\S]*return;/);
-assert(postBlock.indexOf('primaryVisionDecisionForPersonalMessage') < postBlock.indexOf('ensureManualImageSelection'), 'primary Vision must precede the manual fallback');
+for (const label of ['📸 ФОТО', '🧾 ЧЕК', '✉️ РАССЫЛКА']) assert.match(menuBlock, new RegExp(label));
+assert.match(postBlock, /const intentCount = \[explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent\]\.filter\(Boolean\)\.length/);
+assert.match(postBlock, /if \(intentCount !== 1\) \{[\s\S]*handleUploadMenuButton[\s\S]*return;/);
+assert.doesNotMatch(postBlock, /ensureManualImageSelection/);
+assert(postBlock.indexOf('intentCount !== 1') < postBlock.indexOf('primaryVisionDecisionForPersonalMessage'), 'one preselected type must precede primary Vision');
 assert.match(classifyBlock, /primaryVisionDecisionForImage[\s\S]*primaryVisionDominantKind\(primaryDecision\)[\s\S]*if \(dominantKind\) return dominantKind;[\s\S]*if \(ocrReceipt\) return "receipt";/);
 assert.match(source, /for \(const messageFile of imageFiles\)/);
 
-console.log('PASS: old upload menu stays hidden and inconclusive personal images use one compact manual fallback');
+console.log('PASS: three pre-upload choices gate one Vision-confirmed image pipeline');

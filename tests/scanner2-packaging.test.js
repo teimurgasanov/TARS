@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "d4ac623f3772059afc31978f5050cc5aa8b9b0ec58006b34a0927dee679ddbd0";
+const expectedSourceSha = "a85363e50e6952e08b333b18dba56e69cba21be825bd99455a3bf307f53b6434";
 const expectedManifestSha = "8f185228b8b89720c1da0d54d41d8f3d81809bc7b2abf59754832d15acaf0592";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
@@ -71,6 +71,13 @@ assert.match(productionSource, /shouldSampleShadowCase\s*\(/, "production source
 assert.match(productionSource, /scanner2-shadow:v1:index/, "production source must maintain an isolated bounded-retention index");
 assert.match(productionSource, /PERSONAL_IMAGE_PIPELINE_V2/, "production source must include privacy-safe source/MIME telemetry");
 assert.match(productionSource, /MANUAL_IMAGE_SELECTION_V1/, "production source must include privacy-safe manual selection telemetry");
+assert.match(productionSource, /personal-image-router-v3/, "production source must load the isolated primary Vision type router");
+assert.match(productionSource, /intentCount !== 1/, "production source must require exactly one preselected upload type");
+assert.doesNotMatch(
+  productionSource.slice(productionSource.indexOf("async executePostMessageSent"), productionSource.indexOf("async receiptOcrConfig")),
+  /ensureManualImageSelection/,
+  "production execution must not use the old post-upload classifier selection"
+);
 assert.match(productionSource, /id:\s*"scanner2_shadow_sample_percent"[\s\S]*packageValue:\s*"0"/,
   "packaged sampling must remain write-disabled by default");
 ["evaluateRules", "resolveConflicts", "makeDecision", "runOfflineComparison", "runOfflineDataset"].forEach((name) => {
@@ -143,6 +150,16 @@ execFileSync(process.execPath, [path.join(root, "tests", "vision-dominant-image-
   stdio: "pipe"
 });
 execFileSync(process.execPath, [path.join(root, "tests", "vision-high-confidence-authority.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "personal-image-router-v3.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "preselected-image-type-routing.runtime.js")], {
   cwd: root,
   encoding: "utf8",
   stdio: "pipe"

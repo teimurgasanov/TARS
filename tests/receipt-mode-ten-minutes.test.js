@@ -13,6 +13,6 @@ const handlerStart = source.indexOf("async handleReceiptUploadButton");
 const handlerEnd = source.indexOf("async handleMailingUploadButton", handlerStart);
 const handler = source.slice(handlerStart, handlerEnd);
 assert(handler.includes("expiresAt: Date.now() + 10 * 60 * 1e3"), "receipt mode must expire after ten minutes");
-assert(handler.includes("РЕЖИМ ЧЕКОВ ВКЛЮЧЁН НА 10 МИНУТ"), "legacy receipt buttons must remain backward compatible");
+assert(handler.includes("🧾 Отправьте чек."), "direct receipt choice must request one image without exposing legacy mode semantics");
 
-console.log("PASS: hidden legacy receipt intent remains compatible and cannot leak into later uploads");
+console.log("PASS: one-shot receipt intent retains a bounded safety expiry and cannot leak into later uploads");

@@ -314,14 +314,16 @@ const logger = { info() {}, warn() {}, error() {} };
   const postStart = productionSource.indexOf("async executePostMessageSent");
   const postEnd = productionSource.indexOf("async receiptOcrConfig", postStart);
   const postBlock = productionSource.slice(postStart, postEnd);
-  assert.ok(postBlock.indexOf("primaryVisionDecisionForPersonalMessage") < postBlock.indexOf("ensureManualImageSelection"),
-    "primary Vision must run before the manual fallback gate");
-  assert.match(postBlock, /if \(!visionRoute\) \{[\s\S]*ensureManualImageSelection[\s\S]*return;/,
-    "only inconclusive primary Vision may show manual buttons");
-  assert.match(postBlock, /visionRoute === "receipt" \? "receipt" : visionRoute === "photo" \? "photo"/,
-    "high receipt/work-photo classes must enter exactly one existing pipeline");
-  assert.match(postBlock, /visionRoute === "mailing"[\s\S]*detectPersonalMailingProof/,
-    "high mailing must enter the existing mailing pipeline");
+  assert.ok(postBlock.indexOf("intentCount !== 1") < postBlock.indexOf("primaryVisionDecisionForPersonalMessage"),
+    "one explicit pre-upload choice must exist before primary Vision runs");
+  assert.doesNotMatch(postBlock, /ensureManualImageSelection/,
+    "the old post-upload selection gate must not remain in the runtime path");
+  assert.match(postBlock, /const selectedRoute = explicitPhotoIntent \? "photo" : explicitTransferIntent \? "receipt" : "mailing"/,
+    "Vision must confirm the one user-selected route");
+  assert.match(postBlock, /if \(!visionRoute \|\| visionRoute !== selectedRoute\)/,
+    "an unconfirmed or mismatched image must fail closed before a pipeline starts");
+  assert.match(postBlock, /explicitTransferIntent \? "receipt" : explicitPhotoIntent \? "photo"/,
+    "a confirmed selection must enter exactly one existing receipt or photo pipeline");
   const mediaStart = productionSource.indexOf("async function processPersonalMediaV2");
   const mediaEnd = productionSource.indexOf("function isTodayTransferSumRequest", mediaStart);
   const mediaBlock = productionSource.slice(mediaStart, mediaEnd);

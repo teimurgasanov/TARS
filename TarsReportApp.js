@@ -1099,6 +1099,10 @@ var require_upload_duplicate_guard = __commonJS({
       shouldSampleShadowCase,
       safeShadowRetentionCleanup
     } = require("./scanner2/shadow-sampling");
+    var {
+      parseVisionTypeResponse,
+      routeVisionDecision
+    } = require("./scanner2/personal-image-router-v3");
     function rightRotate(value, amount) {
       return value >>> amount | value << 32 - amount;
     }
@@ -2075,16 +2079,20 @@ var require_upload_duplicate_guard = __commonJS({
         }
       }
       const dominantKind = primaryVisionDominantKind(primaryDecision);
+      if (options.manualPhotoSafetyOnly) {
+        if (primaryDecision && (primaryDecision.financial_block || primaryDecision.is_document)) {
+          return { forward: false, reason: "document-or-screen" };
+        }
+        if (primaryDecision && primaryDecision.parser_state === "parsed") {
+          return { forward: true, reason: "manual-photo-safety-clean" };
+        }
+        return { forward: false, reason: "manual-photo-safety-inconclusive" };
+      }
       if (dominantKind === "photo") return { forward: true, reason: "primary-vision-high-work-photo" };
       if (dominantKind === "receipt") return { forward: false, reason: "receipt" };
       if (dominantKind === "mailing") return { forward: false, reason: "mailing" };
       let finalKind;
-      if (options.manualPhotoSafetyOnly) {
-        finalKind = primaryDecision && primaryDecision.kind === "work_photo" ? "photo" : primaryDecision && primaryDecision.kind || "unknown";
-        if (primaryDecision && (primaryDecision.financial_block || primaryDecision.is_document)) return { forward: false, reason: "document-or-screen" };
-      } else {
-        finalKind = await personalImageKindForPreUpload(file, content, http, config, logger, activeDiagnostic);
-      }
+      finalKind = await personalImageKindForPreUpload(file, content, http, config, logger, activeDiagnostic);
       if (finalKind === "receipt") return { forward: false, reason: "receipt" };
       if (finalKind === "mailing") return { forward: false, reason: "mailing" };
       const dedicatedPhotoKind = finalKind === "photo" || finalKind === "unknown" || !finalKind ? await requestOpenAiWorkPhotoCheck(file, content, http, config, logger, activeDiagnostic) : "";
@@ -2098,24 +2106,6 @@ var require_upload_duplicate_guard = __commonJS({
         return { forward: false, reason: "document-or-screen" };
       }
       if (finalKind === "photo" || finalKind === "unknown" || !finalKind) {
-        if (options.manualPhotoSafetyOnly) {
-          const safetyChecksComplete = Boolean(
-            activeDiagnostic &&
-            activeDiagnostic.primary_transport === "2xx" &&
-            activeDiagnostic.primary_parser === "parsed" &&
-            activeDiagnostic.dedicated_transport === "2xx" &&
-            activeDiagnostic.dedicated_parser === "parsed"
-          );
-          const financialBlock = Boolean(activeDiagnostic && (
-            activeDiagnostic.primary_is_receipt === true ||
-            activeDiagnostic.primary_is_document === true ||
-            activeDiagnostic.primary_is_mailing === true ||
-            activeDiagnostic.dedicated_document_block === true ||
-            activeDiagnostic.dedicated_banking_block === true
-          ));
-          if (safetyChecksComplete && !financialBlock) return { forward: true, reason: "manual-photo-safety-clean" };
-          return { forward: false, reason: financialBlock ? "document-or-screen" : "manual-photo-safety-inconclusive" };
-        }
         if (options.skipStrictReceiptFallback) return { forward: false, reason: "manual-work-photo-not-strictly-confirmed" };
         // A failed or inconclusive image check must never become a work photo
         // by exclusion. Run the receipt validator only to preserve the block
@@ -3279,11 +3269,8 @@ var require_upload_duplicate_guard = __commonJS({
       };
     }
     function primaryVisionDominantKind(decision) {
-      if (!decision || decision.confidence !== "high") return "";
-      if (decision.financial_block || decision.kind === "receipt" || decision.kind === "bank_transfer" || decision.kind === "document") return "receipt";
-      if (decision.kind === "work_photo") return "photo";
-      if (decision.kind === "mailing") return "mailing";
-      return "";
+      const route = routeVisionDecision(decision);
+      return route === "manual" ? "" : route;
     }
     function capturePrimaryVisionDecisionTelemetry(diagnostic, decision) {
       if (!diagnostic || !decision) return;
@@ -3612,6 +3599,98 @@ var require_upload_duplicate_guard = __commonJS({
       context.primaryConsumed = true;
       return { ...candidate };
     }
+    async function requestPrimaryImageTypeVision(file, content, http, config, logger, diagnostic, retryAttempt = 0) {
+      if (!config || !config.openaiApiKey || !content || !content.length || !http) {
+        if (diagnostic) {
+          diagnostic.primary_transport = "other_error";
+          diagnostic.primary_parser = "no_json";
+          diagnostic.primary_normalized_result = "unknown";
+        }
+        return primaryVisionDecisionFromCandidate(void 0, "no_json");
+      }
+      const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+      const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
+      let response;
+      try {
+        response = await http.post("https://api.openai.com/v1/responses", {
+          headers: {
+            Authorization: "Bearer " + config.openaiApiKey,
+            "Content-Type": "application/json"
+          },
+          data: {
+            model,
+            input: [{
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: 'Определи только основной тип изображения из личного чата салона. Верни один JSON без Markdown: {"kind":"work_photo|receipt|bank_transfer|mailing|document|unknown","confidence":"high|medium|low","service_kind":"hair|nails|pedicure|brows_lashes|other|none","has_payment_ui":boolean,"has_receipt_layout":boolean,"has_financial_document":boolean,"has_document_layout":boolean,"has_visible_client":boolean,"has_visible_service_result":boolean,"is_receipt":boolean,"visual_type":"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown","date":"YYYY-MM-DD|null","amount":number|null,"status":"success|failed|pending|unknown","bank":"string|null"}. Главный объект и назначение кадра определяют kind. HIGH work_photo ставь, когда ясно виден результат парикмахерской или салонной услуги: форма стрижки, укладка, окрашивание, готовый маникюр, педикюр, брови или ресницы. Для такого решения кресло, инструменты, зеркало, интерьер и полное тело не обязательны. Отдельный текст, логотип, телефон или отсутствие рабочей зоны не являются причиной отклонить очевидный результат услуги. work_photo запрещён только при конкретно видимом банковском/payment UI, receipt layout, financial document или document layout. HIGH receipt или bank_transfer выбирай для банковского чека, перевода, квитанции или payment screen. HIGH mailing выбирай для очевидного скриншота рассылки. Обычный портрет без различимого результата услуги — unknown. Не выдумывай признаки. Поля date, amount, status и bank заполняй только для financial kind и только если они реально видны; они являются необязательной подсказкой для последующей проверки, а не решением о приёме.'
+                },
+                { type: "input_image", image_url: imageUrl, detail: "high" }
+              ]
+            }],
+            max_output_tokens: 320
+          },
+          timeout: 14e3
+        });
+      } catch (error) {
+        if (retryAttempt < 1) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          return requestPrimaryImageTypeVision(file, content, http, config, logger, diagnostic, retryAttempt + 1);
+        }
+        if (diagnostic) {
+          diagnostic.primary_transport = /timeout|timed\s*out|etimedout/i.test(String(error && error.message || error)) ? "timeout" : "other_error";
+          diagnostic.primary_parser = "no_json";
+          diagnostic.primary_normalized_result = "unknown";
+        }
+        throw error;
+      }
+      if (!response || response.statusCode < 200 || response.statusCode >= 300) {
+        if (response && (response.statusCode === 429 || response.statusCode >= 500) && retryAttempt < 1) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          return requestPrimaryImageTypeVision(file, content, http, config, logger, diagnostic, retryAttempt + 1);
+        }
+        if (diagnostic) {
+          diagnostic.primary_transport = response && response.statusCode === 429 ? "429" : response && response.statusCode >= 500 ? "5xx" : "other_error";
+          diagnostic.primary_parser = "no_json";
+          diagnostic.primary_normalized_result = "unknown";
+        }
+        throw new Error(`OpenAI image type HTTP ${response && response.statusCode || "unknown"}`);
+      }
+      let payload;
+      try {
+        payload = response.data || (response.content ? JSON.parse(response.content) : {});
+      } catch (error) {
+        if (diagnostic) {
+          diagnostic.primary_transport = "2xx";
+          diagnostic.primary_parser = "parse_error";
+          diagnostic.primary_normalized_result = "unknown";
+        }
+        throw error;
+      }
+      const outputText = openAiReceiptOutputText(payload);
+      const parsed = parseVisionTypeResponse(outputText);
+      if (diagnostic) {
+        diagnostic.primary_transport = "2xx";
+        diagnostic.primary_parser = personalImageParserEnum(parsed.parserState);
+        diagnostic.primary_normalized_result = parsed.decision && parsed.decision.kind === "bank_transfer" ? "receipt" : parsed.decision && parsed.decision.kind || "unknown";
+      }
+      if (!parsed.decision) return primaryVisionDecisionFromCandidate(void 0, parsed.parserState);
+      if (diagnostic) {
+        diagnostic.primary_is_receipt = /^(?:receipt|bank_transfer)$/.test(parsed.decision.kind);
+        diagnostic.primary_is_document = parsed.decision.is_document === true;
+        diagnostic.primary_is_work_photo = parsed.decision.kind === "work_photo";
+        diagnostic.primary_is_mailing = parsed.decision.kind === "mailing";
+        diagnostic.primary_kind = parsed.decision.kind === "work_photo" ? "photo" : parsed.decision.kind === "bank_transfer" ? "receipt" : parsed.decision.kind;
+      }
+      const optionalReceiptCandidate = openAiReceiptCandidateFromJson(parsed.payload, expectedReceiptDate(config));
+      if (optionalReceiptCandidate && /^(?:receipt|bank_transfer|document)$/.test(parsed.decision.kind)) {
+        optionalReceiptCandidate.receiptAmountSource = `openai:${model}`;
+        rememberPrimaryReceiptEvidence(file, content, config, optionalReceiptCandidate);
+      }
+      capturePrimaryVisionDecisionTelemetry(diagnostic, parsed.decision);
+      return parsed.decision;
+    }
     async function primaryVisionDecisionForImage(file, content, http, config, logger, diagnostic) {
       if (!config || !config.openaiApiKey || !content || !content.length || !http) {
         return primaryVisionDecisionFromCandidate(void 0, "no_json");
@@ -3623,15 +3702,7 @@ var require_upload_duplicate_guard = __commonJS({
       capturePersonalImageCacheTelemetry(diagnostic, "primary_cache", cacheHit);
       if (!cacheHit) {
         const cachedDiagnostic = createPersonalImageClassificationDiagnostic();
-        const promise = (async () => {
-          const candidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger, 0, false, false, cachedDiagnostic, "primary");
-          if (!candidate) return primaryVisionDecisionFromCandidate(void 0, "no_json");
-          rememberPrimaryReceiptEvidence(file, content, config, candidate);
-          capturePrimaryPersonalImageDiagnostic(cachedDiagnostic, candidate);
-          const decision = candidate.primaryVisionDecision || primaryVisionDecisionFromCandidate(candidate);
-          capturePrimaryVisionDecisionTelemetry(cachedDiagnostic, decision);
-          return decision;
-        })();
+        const promise = requestPrimaryImageTypeVision(file, content, http, config, logger, cachedDiagnostic);
         cached = { createdAt: Date.now(), promise, diagnostic: cachedDiagnostic };
         primaryVisionDecisionCache.set(key, cached);
         if (primaryVisionDecisionCache.size > 200) primaryVisionDecisionCache.delete(primaryVisionDecisionCache.keys().next().value);
@@ -7986,33 +8057,49 @@ var C = class extends j.App {
           }
           return;
         }
+        let explicitPhotoIntent = false;
+        let explicitTransferIntent = false;
+        let explicitMailingIntent = false;
         if (hasPersonalImageUpload) {
+          [explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent] = await Promise.all([
+            this.activePhotoReportIntent(n, e.room),
+            this.activeTransferReportIntent(n, e.room),
+            this.activeMailingReportIntent(n, e.room)
+          ]);
+          const intentCount = [explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent].filter(Boolean).length;
+          if (intentCount !== 1) {
+            // New V3 contract: the user chooses the pipeline before upload.
+            // No automatic classifier or downstream pipeline runs without one
+            // unambiguous active intent.
+            await this.handleUploadMenuButton(n, r, { room: e.room, user: e.sender });
+            return;
+          }
           primaryRoutingDiagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(e));
-          let primaryDecision;
           try {
-            primaryDecision = await G.primaryVisionDecisionForPersonalMessage(e, n, t, i, this.getLogger(), primaryRoutingDiagnostic);
+            const primaryDecision = await G.primaryVisionDecisionForPersonalMessage(e, n, t, i, this.getLogger(), primaryRoutingDiagnostic);
             visionRoute = G.primaryVisionDominantKind(primaryDecision);
           } catch (visionError) {
-            this.getLogger().warn(`Primary Vision automatic routing failed; using manual fallback: ${visionError && visionError.message || visionError}`);
+            this.getLogger().warn(`Primary Vision intent verification failed: ${visionError && visionError.message || visionError}`);
           }
-          if (!visionRoute) {
-            primaryRoutingDiagnostic.fallback_required = true;
-            primaryRoutingDiagnostic.final_route = "manual_selection";
-            G.setPersonalImageFinalDiagnostic(primaryRoutingDiagnostic, "unknown", "unclassified", "primary");
-            primaryRoutingDiagnostic.final_route = "manual_selection";
-            G.emitPersonalImageClassificationDiagnostic(this.getLogger(), primaryRoutingDiagnostic);
-            await this.ensureManualImageSelection(n, s, r, e, {
-              event_kind: G.manualImageSelectionEventKind(e),
-              media_signal: hasInitialMediaSignal,
-              expect_media: hasInitialMediaSignal,
-              resolved_image_count_bucket: G.manualImageSelectionImageCountBucket(resolvedImages.length),
-              source_type: G.personalImageDiagnosticSourceType(e)
-            });
+          const selectedRoute = explicitPhotoIntent ? "photo" : explicitTransferIntent ? "receipt" : "mailing";
+          if (!visionRoute || visionRoute !== selectedRoute) {
+            if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
+            if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);
+            if (explicitMailingIntent) await this.clearMailingReportIntent(s, e.room);
+            if (primaryRoutingDiagnostic) {
+              primaryRoutingDiagnostic.fallback_required = true;
+              G.setPersonalImageFinalDiagnostic(primaryRoutingDiagnostic, "unknown", "unclassified", "primary");
+              G.emitPersonalImageClassificationDiagnostic(this.getLogger(), primaryRoutingDiagnostic);
+            }
+            const mismatchText = selectedRoute === "photo"
+              ? "⚠️ Фото работы не принято: Vision не подтвердил фото результата услуги или обнаружил документ/платёжный экран."
+              : selectedRoute === "receipt"
+                ? "⚠️ Чек не принят: Vision не подтвердил финансовый документ."
+                : "⚠️ Рассылка не принята: Vision не подтвердил скриншот рассылки.";
+            if (appUser) await r.getCreator().finish(r.getCreator().startMessage().setSender(appUser).setRoom(e.room).setText(mismatchText));
             return;
           }
         }
-        const explicitTransferIntent = hasPersonalImageUpload && !visionRoute && await this.activeTransferReportIntent(n, e.room);
-        const explicitMailingIntent = hasPersonalImageUpload && !visionRoute && await this.activeMailingReportIntent(n, e.room);
         if (explicitMailingIntent) {
           const mailingWorkday = this.reportWorkday();
           const mailingFile = e.file || Array.isArray(e.files) && e.files[0] || {};
@@ -8036,36 +8123,6 @@ var C = class extends j.App {
           await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
           return;
         }
-        if (hasPersonalImageUpload && (visionRoute === "mailing" || !visionRoute && !explicitTransferIntent && G.directFileIntent(e) !== "receipt" && G.directFileIntent(e) !== "photo")) {
-          const autoMailingProof = await G.detectPersonalMailingProof(e, n, t, i, this.getLogger());
-          if (autoMailingProof) {
-            const mailingWorkday = this.reportWorkday();
-            const existingMailings = await n.getPersistenceReader().readByAssociation(this.mailingProofIndexAssociation(mailingWorkday));
-            const alreadyRecorded = (existingMailings || []).some((entry) => entry && entry.roomId === e.room.id && String(entry.uploadId || "") === autoMailingProof.uploadId);
-            if (!alreadyRecorded) {
-              await s.createWithAssociation({
-                userId: e.sender && e.sender.id || "",
-                username: e.sender && e.sender.username || "",
-                userName: e.sender && e.sender.name || "",
-                roomId: e.room.id,
-                uploadId: autoMailingProof.uploadId,
-                workday: mailingWorkday,
-                source: "automatic-mailing-proof",
-                createdAt: Date.now()
-              }, this.mailingProofIndexAssociation(mailingWorkday));
-              const appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();
-              if (appUser) await r.getCreator().finish(r.getCreator().startMessage().setSender(appUser).setRoom(e.room).setText("✅ РАССЫЛКИ ПРИНЯТЫ"));
-            }
-            if (primaryRoutingDiagnostic) {
-              primaryRoutingDiagnostic.fallback_required = false;
-              G.setPersonalImageFinalDiagnostic(primaryRoutingDiagnostic, "mailing", "mailing", "primary");
-              G.emitPersonalImageClassificationDiagnostic(this.getLogger(), primaryRoutingDiagnostic);
-            }
-            await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
-            return;
-          }
-        }
-        const explicitPhotoIntent = hasPersonalImageUpload && (visionRoute === "photo" || !visionRoute && (G.directFileIntent(e) === "photo" || await this.activePhotoReportIntent(n, e.room)));
       if (uploadEventKey && !postMessageClaimToken) {
         postMessageClaimToken = await G.claimPostMessage(e, n, s, this.getLogger());
         if (!postMessageClaimToken) {
@@ -8078,7 +8135,7 @@ var C = class extends j.App {
           this.getLogger().info(`POST_PROBE_CONTINUE_PERSONAL_IMAGE_WITHOUT_CLAIM invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
         }
       }
-      const mediaV2 = await G.processPersonalMediaV2(e, n, s, r, this.getLogger(), t, i, visionRoute === "receipt" ? "receipt" : visionRoute === "photo" ? "photo" : explicitTransferIntent ? "receipt" : explicitPhotoIntent ? "photo" : "", Boolean(postMessageClaimToken));
+      const mediaV2 = await G.processPersonalMediaV2(e, n, s, r, this.getLogger(), t, i, explicitTransferIntent ? "receipt" : explicitPhotoIntent ? "photo" : "", Boolean(postMessageClaimToken));
       if (mediaV2.handled) {
         if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
         if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);
@@ -8518,8 +8575,11 @@ var C = class extends j.App {
       } catch (error) {
         this.getLogger().warn(`Primary Vision manual routing failed; preserving legacy fallback: ${error && error.message || error}`);
       }
-      const dominantKind = G.primaryVisionDominantKind(primaryDecision);
-      const routedType = dominantKind || selectedType;
+      // A manual selection is offered only when the primary classifier did not
+      // produce a terminal HIGH route. Preserve the explicit user choice; the
+      // primary decision remains a positive financial/document safety guard
+      // for the photo path, not a second competing type selector.
+      const routedType = selectedType;
       if (routedType === "receipt") {
         const result = await G.processPersonalMediaV2(sourceMessage, read, persistence, modify, this.getLogger(), http, config, "receipt", true);
         outcome = result && result.handled ? "receipt-processed" : "not-receipt";
@@ -8582,6 +8642,9 @@ var C = class extends j.App {
   async removeUploadTypeMenu(modify, data) {
     const message = data && data.message;
     if (!modify || !message || !message.sender) return;
+    // The three direct choices also live on the persistent personal report
+    // launcher. Only the temporary fallback menu may be deleted after a click.
+    if (String(message.text || "") !== "ВЫБЕРИТЕ ТИП ЗАГРУЗКИ") return;
     try {
       await modify.getDeleter().deleteMessage(message, message.sender);
     } catch (error) {
@@ -8647,7 +8710,7 @@ var C = class extends j.App {
     }, association);
     const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
     if (appUser) await modify.getCreator().finish(
-      modify.getCreator().startMessage().setSender(appUser).setRoom(data.room).setText("🧾 РЕЖИМ ЧЕКОВ ВКЛЮЧЁН НА 10 МИНУТ\nМожно отправить один или несколько чеков разными сообщениями.")
+      modify.getCreator().startMessage().setSender(appUser).setRoom(data.room).setText("🧾 Отправьте чек.")
     );
     await this.removeUploadTypeMenu(modify, data);
   }
@@ -10641,6 +10704,11 @@ var C = class extends j.App {
         `[*🟧 ЗАПОЛНИТЬ / ИСПРАВИТЬ ${I}*](${d})`
       )
     });
+    u.addActionsBlock({ elements: [
+      u.newButtonElement({ actionId: PHOTO_REPORT_ACTION, text: u.newPlainTextObject("📸 ФОТО"), value: "work-photo" }),
+      u.newButtonElement({ actionId: RECEIPT_UPLOAD_ACTION, text: u.newPlainTextObject("🧾 ЧЕК"), value: "receipt" }),
+      u.newButtonElement({ actionId: MAILING_UPLOAD_ACTION, text: u.newPlainTextObject("✉️ РАССЫЛКА"), value: "mailing" })
+    ] });
     // Create the new report launcher first; only remove the previous one once
     // the new message is confirmed, so a failed creation never hides the form.
     let f = n.getCreator().startMessage().setSender(m).setRoom(s).setText(`ЗАПОЛНИТЬ / ИСПРАВИТЬ ${I}`).setBlocks(u), h = await n.getCreator().finish(f);

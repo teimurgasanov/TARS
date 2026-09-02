@@ -269,13 +269,23 @@ async function createSelection(state) {
     { manualPhotoSafetyOnly: true }
   );
   assert.deepStrictEqual(cleanDecision, { forward: true, reason: "manual-photo-safety-clean" });
-  assert.strictEqual(cleanCalls.length, 3, "the existing dedicated safety guard keeps its two attempts");
+  assert.strictEqual(cleanCalls.length, 1, "the V3 primary safety result replaces the old competing dedicated classifier");
   assert.ok(cleanCalls.every((url) => /api\.openai\.com/.test(url)), "manual photo safety must not invoke receipt OCR/Yandex");
   const financialCalls = [];
   const financialDecision = await photo.guard.shouldForwardConfirmedWorkPhoto(
     { _id: "manual-bank", name: "manual-bank.jpg", type: "image/jpeg" },
     Buffer.from("manual-bank-screen"),
-    safetyProvider(primaryPayload({ is_receipt: true, visual_type: "bank_app_screen", amount: 1200 }), dedicatedPayload({ is_receipt_or_banking: true }), financialCalls),
+    safetyProvider(primaryPayload({
+      is_receipt: true,
+      visual_type: "bank_app_screen",
+      kind: "bank_transfer",
+      confidence: "high",
+      is_banking: true,
+      is_document: true,
+      has_payment_ui: true,
+      has_receipt_text: true,
+      amount: 1200
+    }), dedicatedPayload({ is_receipt_or_banking: true }), financialCalls),
     safetyConfig,
     quietLogger,
     true,
@@ -283,16 +293,19 @@ async function createSelection(state) {
     { manualPhotoSafetyOnly: true }
   );
   assert.strictEqual(financialDecision.forward, false);
+  assert.strictEqual(financialCalls.length, 1, "positive financial evidence must block manual photo without a secondary classifier");
   assert.strictEqual(financialDecision.reason, "document-or-screen");
   assert.strictEqual(financialCalls.length, 1, "a primary financial block must stop before further work-photo processing");
 
   const source = fs.readFileSync("TarsReportApp.js", "utf8");
   const postBlock = source.slice(source.indexOf("async executePostMessageSent"), source.indexOf("photoReportIntentAssociation", source.indexOf("async executePostMessageSent")));
-  assert.match(postBlock, /if \(hasPersonalImageUpload\) \{[\s\S]*ensureManualImageSelection[\s\S]*return;/);
-  assert.ok(postBlock.indexOf("ensureManualImageSelection") < postBlock.indexOf("detectPersonalMailingProof"), "selection gate must precede automatic classification");
+  assert.match(postBlock, /const intentCount = \[explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent\]\.filter\(Boolean\)\.length/);
+  assert.match(postBlock, /if \(intentCount !== 1\) \{[\s\S]*handleUploadMenuButton[\s\S]*return;/);
+  assert.doesNotMatch(postBlock, /ensureManualImageSelection/, "post-upload manual selection must be disabled");
+  assert.ok(postBlock.indexOf("intentCount !== 1") < postBlock.indexOf("primaryVisionDecisionForPersonalMessage"), "preselected intent must be required before Vision and every downstream pipeline");
   assert.doesNotMatch(source, /(evaluateRules|resolveConflicts|makeDecision|runOfflineComparison|runOfflineDataset)\s*\(/);
 
-  console.log("PASS: inconclusive personal images use one idempotent manual fallback before a guarded existing pipeline");
+  console.log("PASS: three-button preselection chooses one pipeline and V3 Vision provides the safety confirmation");
 })().catch((error) => {
   console.error(error && error.stack || error);
   process.exitCode = 1;
