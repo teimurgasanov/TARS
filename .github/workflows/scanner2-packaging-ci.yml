@@ -25,6 +25,7 @@ on:
       - fix/preselected-photo-financial-veto-only
       - fix/photo-button-vision-safety-only
       - feature/image-classification-v1-shadow
+      - fix/receipt-openai-unavailable-fallback
   pull_request:
   workflow_dispatch:
 
@@ -84,6 +85,8 @@ jobs:
       || github.base_ref == 'fix/photo-button-vision-safety-only'
       || github.head_ref == 'feature/image-classification-v1-shadow'
       || github.base_ref == 'feature/image-classification-v1-shadow'
+      || github.head_ref == 'fix/receipt-openai-unavailable-fallback'
+      || github.base_ref == 'fix/receipt-openai-unavailable-fallback'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
