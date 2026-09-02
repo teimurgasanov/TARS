@@ -15,6 +15,7 @@ on:
       - feature/manual-image-type-selection
       - integration/manual-selection-current-develop
       - feature/vision-dominant-image-routing
+      - integration/vision-dominant-current-develop
   pull_request:
   workflow_dispatch:
 
@@ -54,6 +55,8 @@ jobs:
       || github.base_ref == 'integration/manual-selection-current-develop'
       || github.head_ref == 'feature/vision-dominant-image-routing'
       || github.base_ref == 'feature/vision-dominant-image-routing'
+      || github.head_ref == 'integration/vision-dominant-current-develop'
+      || github.base_ref == 'integration/vision-dominant-current-develop'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
