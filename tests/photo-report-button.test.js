@@ -22,10 +22,10 @@ assert.match(source, /📸 Отправьте фото выполненной р
 assert.match(source, /🧾 Отправьте чек\./);
 assert.match(source, /✉️ Отправьте скриншот рассылки\./);
 
-const personalLinkBlock = source.slice(source.indexOf("async sendPersonalReportLink("), source.indexOf("async publishDefaultTable("));
-assert.doesNotMatch(personalLinkBlock, /UPLOAD_MENU_ACTION/);
-assert.match(personalLinkBlock, /PHOTO_REPORT_ACTION/);
-assert.match(personalLinkBlock, /RECEIPT_UPLOAD_ACTION/);
-assert.match(personalLinkBlock, /MAILING_UPLOAD_ACTION/);
+const selectorBlock = source.slice(source.indexOf("async sendPersonalImageSelector("), source.indexOf("cashLauncherAssociation()"));
+assert.match(selectorBlock, /PHOTO_REPORT_ACTION/);
+assert.match(selectorBlock, /RECEIPT_UPLOAD_ACTION/);
+assert.match(selectorBlock, /MAILING_UPLOAD_ACTION/);
+assert.match(source, /await this\.sendPersonalImageSelector\(e, n, t, s\);/);
 
-console.log("PASS: persistent report menu has three direct pre-upload choices");
+console.log("PASS: standalone persistent selector has three direct pre-upload choices");

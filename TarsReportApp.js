@@ -9413,6 +9413,10 @@ var C = class extends j.App {
         await this.removeLegacyPersonalReportMenus(e, n, s);
         await this.sendReportMenu(e, n, s, targetUser);
       }
+      // Keep the upload selector independent from the report profile and as
+      // the newest launcher in the room. App updates refresh known rooms, so
+      // masters do not need to type a command before choosing an image type.
+      await this.sendPersonalImageSelector(e, n, t, s);
       return true;
     } catch (o) {
       this.getLogger().warn(`Could not refresh personal report button: ${o && o.message || o}`);
@@ -9422,6 +9426,7 @@ var C = class extends j.App {
   async refreshKnownPersonalReportRooms(e, n, t) {
     if (!e || !n || !t) return 0;
     let s = 0;
+    const seenRoomIds = new Set();
     try {
       const r = await e.getPersistenceReader().readByAssociation(this.privateCashRoomsAssociation());
       for (const a of r || []) {
@@ -9429,6 +9434,7 @@ var C = class extends j.App {
         try {
           const o = await e.getRoomReader().getById(a.roomId);
           if (!o || !this.isPersonalReportRoom(o)) continue;
+          seenRoomIds.add(String(o.id));
           let c;
           try {
             c = a.masterUserId ? await e.getUserReader().getById(a.masterUserId) : void 0;
@@ -9440,6 +9446,24 @@ var C = class extends j.App {
           if (await this.refreshPersonalReportButton(e, n, t, o, c, true)) s += 1;
         } catch (o) {
           this.getLogger().warn(`Could not refresh known personal report room ${a.roomId}: ${o && o.message || o}`);
+        }
+      }
+      // A room created before the registry existed may be absent from
+      // private-cash-rooms:v1. Recover configured master rooms by their stable
+      // tars-<username> name so the selector is visible immediately on update.
+      const settings = e.getEnvironmentReader().getSettings();
+      const configured = this.splitPrivateChatUsernames(String(await settings.getValueById("master_private_chat_usernames") || ""));
+      const prefix = String(await settings.getValueById("master_private_chat_prefix") || "tars-");
+      for (const username of configured) {
+        try {
+          const user = await e.getUserReader().getByUsername(String(username || "").replace(/^@/, ""));
+          const room = await e.getRoomReader().getByName(this.normalizePrivateChatRoomName(prefix, username));
+          if (!user || !room || !this.isPersonalReportRoom(room) || seenRoomIds.has(String(room.id))) continue;
+          seenRoomIds.add(String(room.id));
+          await this.rememberPrivateCashRoom(e, t, user, room);
+          if (await this.refreshPersonalReportButton(e, n, t, room, user, true)) s += 1;
+        } catch (configuredRoomError) {
+          this.getLogger().warn(`Could not refresh configured personal report room: ${configuredRoomError && configuredRoomError.message || configuredRoomError}`);
         }
       }
     } catch (r) {
@@ -10048,6 +10072,7 @@ var C = class extends j.App {
               const z = await this.getReportProfile(e, K.id, N.id);
               if (z) await this.sendPersonalReportLink(e, n, t, N, K, z);
               else await this.sendReportMenu(e, n, N, K);
+              await this.sendPersonalImageSelector(e, n, t, N);
             }
           } catch (N) {
             this.getLogger().warn(`Could not refresh report button for ${P}: ${N && N.message || N}`);
@@ -10169,6 +10194,49 @@ var C = class extends j.App {
       y.RocketChatAssociationModel.MISC,
       `report-button:${e}:${n}`
     );
+  }
+  personalImageSelectorAssociation(roomId) {
+    return new y.RocketChatAssociationRecord(
+      y.RocketChatAssociationModel.MISC,
+      `personal-image-selector:v3:${roomId}`
+    );
+  }
+  async sendPersonalImageSelector(read, modify, persistence, room) {
+    if (!read || !modify || !persistence || !room || !room.id || !this.isPersonalReportRoom(room)) return false;
+    const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
+    if (!appUser) return false;
+    const blocks = modify.getCreator().getBlockBuilder();
+    blocks.addSectionBlock({ text: blocks.newMarkdownTextObject("*Что вы отправите?*") });
+    blocks.addActionsBlock({ elements: [
+      blocks.newButtonElement({ actionId: PHOTO_REPORT_ACTION, text: blocks.newPlainTextObject("📸 ФОТО"), value: "work-photo" }),
+      blocks.newButtonElement({ actionId: RECEIPT_UPLOAD_ACTION, text: blocks.newPlainTextObject("🧾 ЧЕК"), value: "receipt" }),
+      blocks.newButtonElement({ actionId: MAILING_UPLOAD_ACTION, text: blocks.newPlainTextObject("✉️ РАССЫЛКА"), value: "mailing" })
+    ] });
+    const messageId = await modify.getCreator().finish(
+      modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText("Что вы отправите?").setBlocks(blocks)
+    );
+    if (!messageId) {
+      this.getLogger().warn("Personal image selector was not created; keeping the previous selector");
+      return false;
+    }
+    const association = this.personalImageSelectorAssociation(room.id);
+    try {
+      const previous = await read.getPersistenceReader().readByAssociation(association);
+      for (const record of previous || []) {
+        if (!record || !record.messageId || String(record.messageId) === String(messageId)) continue;
+        try {
+          const oldMessage = await read.getMessageReader().getById(record.messageId);
+          if (oldMessage) await modify.getDeleter().deleteMessage(oldMessage, oldMessage.sender);
+        } catch (error) {
+          this.getLogger().warn(`Could not remove previous personal image selector: ${error && error.message || error}`);
+        }
+      }
+      await persistence.removeByAssociation(association);
+      await persistence.createWithAssociation({ roomId: room.id, messageId, createdAt: Date.now() }, association);
+    } catch (error) {
+      this.getLogger().warn(`Could not persist personal image selector: ${error && error.message || error}`);
+    }
+    return true;
   }
   cashLauncherAssociation() {
     return new y.RocketChatAssociationRecord(
@@ -10704,11 +10772,6 @@ var C = class extends j.App {
         `[*🟧 ЗАПОЛНИТЬ / ИСПРАВИТЬ ${I}*](${d})`
       )
     });
-    u.addActionsBlock({ elements: [
-      u.newButtonElement({ actionId: PHOTO_REPORT_ACTION, text: u.newPlainTextObject("📸 ФОТО"), value: "work-photo" }),
-      u.newButtonElement({ actionId: RECEIPT_UPLOAD_ACTION, text: u.newPlainTextObject("🧾 ЧЕК"), value: "receipt" }),
-      u.newButtonElement({ actionId: MAILING_UPLOAD_ACTION, text: u.newPlainTextObject("✉️ РАССЫЛКА"), value: "mailing" })
-    ] });
     // Create the new report launcher first; only remove the previous one once
     // the new message is confirmed, so a failed creation never hides the form.
     let f = n.getCreator().startMessage().setSender(m).setRoom(s).setText(`ЗАПОЛНИТЬ / ИСПРАВИТЬ ${I}`).setBlocks(u), h = await n.getCreator().finish(f);
@@ -11529,6 +11592,7 @@ var S = class extends A.ApiEndpoint {
     if (O) {
       try {
         await this.reportApp.sendPersonalReportLink(t, s, a, O, R, I);
+        await this.reportApp.sendPersonalImageSelector(t, s, a, O);
       } catch (z) {
         this.reportApp.getLogger().warn(`Could not refresh personal report button: ${z && z.message || z}`);
       }

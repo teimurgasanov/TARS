@@ -21,6 +21,7 @@ on:
       - fix/vision-maximum-authority
       - integration/vision-maximum-authority-current-develop
       - feature/personal-image-router-v3
+      - fix/personal-image-selector-visible
   pull_request:
   workflow_dispatch:
 
@@ -72,6 +73,8 @@ jobs:
       || github.base_ref == 'integration/vision-maximum-authority-current-develop'
       || github.head_ref == 'feature/personal-image-router-v3'
       || github.base_ref == 'feature/personal-image-router-v3'
+      || github.head_ref == 'fix/personal-image-selector-visible'
+      || github.base_ref == 'fix/personal-image-selector-visible'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

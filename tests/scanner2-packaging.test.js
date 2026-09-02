@@ -11,8 +11,8 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "a85363e50e6952e08b333b18dba56e69cba21be825bd99455a3bf307f53b6434";
-const expectedManifestSha = "035cad5e47af0bc5529ad9f9d7b18792f461eb455eae8d0cfedb86ac58c0745f";
+const expectedSourceSha = "4185b5858a3d9cc40c85153397f22e1ebaa3c8ede97635f0cb1e4931a628c1b2";
+const expectedManifestSha = "a17cf2d462bca19b5fb0c321ebac1caf3ecfbf5115593f1920abdbb15f3f66fd";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
 function sha256(value) {
@@ -73,6 +73,8 @@ assert.match(productionSource, /PERSONAL_IMAGE_PIPELINE_V2/, "production source 
 assert.match(productionSource, /MANUAL_IMAGE_SELECTION_V1/, "production source must include privacy-safe manual selection telemetry");
 assert.match(productionSource, /personal-image-router-v3/, "production source must load the isolated primary Vision type router");
 assert.match(productionSource, /intentCount !== 1/, "production source must require exactly one preselected upload type");
+assert.match(productionSource, /personal-image-selector:v3:/, "production source must persist one standalone personal image selector");
+assert.match(productionSource, /await this\.sendPersonalImageSelector\(e, n, t, s\);/, "personal room refresh must publish the selector without a command");
 assert.doesNotMatch(
   productionSource.slice(productionSource.indexOf("async executePostMessageSent"), productionSource.indexOf("async receiptOcrConfig")),
   /ensureManualImageSelection/,
@@ -82,6 +84,12 @@ assert.match(productionSource, /id:\s*"scanner2_shadow_sample_percent"[\s\S]*pac
   "packaged sampling must remain write-disabled by default");
 ["evaluateRules", "resolveConflicts", "makeDecision", "runOfflineComparison", "runOfflineDataset"].forEach((name) => {
   assert.doesNotMatch(productionSource, new RegExp(`\\b${name}\\s*\\(`), "production source must not run Scanner 2.0 decision logic: " + name);
+});
+
+execFileSync(process.execPath, [path.join(root, "tests", "personal-image-selector-visible.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
 });
 
 const entrySource = fs.readFileSync(path.join(root, "tools", "tars-build-entry.js"), "utf8");

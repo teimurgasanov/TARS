@@ -6,9 +6,15 @@ const linkStart = source.indexOf("async sendPersonalReportLink");
 const linkEnd = source.indexOf("async sendReportMenu", linkStart);
 const linkBlock = source.slice(linkStart, linkEnd);
 assert(!linkBlock.includes('newPlainTextObject("➕ ЗАГРУЗИТЬ")'), "personal report menu must not add a nested upload launcher");
+assert(!linkBlock.includes("PHOTO_REPORT_ACTION"), "report launcher must not duplicate the standalone image selector");
+
+const selectorStart = source.indexOf("async sendPersonalImageSelector");
+const selectorEnd = source.indexOf("cashLauncherAssociation", selectorStart);
+const selectorBlock = source.slice(selectorStart, selectorEnd);
 for (const label of ["📸 ФОТО", "🧾 ЧЕК", "✉️ РАССЫЛКА"]) {
-  assert(linkBlock.includes(`newPlainTextObject("${label}")`), `persistent menu missing ${label}`);
+  assert(selectorBlock.includes(`newPlainTextObject("${label}")`), `standalone selector missing ${label}`);
 }
+assert(selectorBlock.includes('setText("Что вы отправите?")'), "standalone selector prompt missing");
 
 const menuStart = source.indexOf("async handleUploadMenuButton");
 const menuEnd = source.indexOf("async handlePhotoReportButton", menuStart);
@@ -25,4 +31,4 @@ assert(source.includes('explicitTransferIntent ? "receipt" : explicitPhotoIntent
 assert(source.includes("removeUploadTypeMenu(modify, data)"), "temporary menu must disappear after a choice");
 assert(source.includes('if (String(message.text || "") !== "ВЫБЕРИТЕ ТИП ЗАГРУЗКИ") return;'), "persistent three-button launcher must survive a choice");
 
-console.log("PASS: personal report menu exposes three direct pre-upload choices with legacy actions compatible");
+console.log("PASS: standalone personal image selector exposes three direct pre-upload choices");
