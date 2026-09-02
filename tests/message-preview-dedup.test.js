@@ -63,6 +63,16 @@ assert.deepStrictEqual(
   'attachment.file thumb without imageUrl must still be suppressed when its original is present'
 );
 
+const mobileThumbBeforeOriginal = messageFiles({
+  file: { _id: 'preview-0200', name: 'thumb-IMG_0200.jpg', type: 'image/jpeg' },
+  files: [{ _id: 'original-0200', name: 'IMG_0200.jpg', type: 'image/jpeg' }]
+});
+assert.deepStrictEqual(
+  mobileThumbBeforeOriginal.map((file) => file._id),
+  ['original-0200'],
+  'a mobile message.file thumbnail must never be OCRed when files contains the original upload'
+);
+
 const twoOriginals = messageFiles({
   files: [
     { _id: 'first', name: 'same.jpg', type: 'image/jpeg' },

@@ -101,6 +101,18 @@ function fakeRead({ direct = [], room = [] } = {}) {
   const lonePreviewResult = await resolver(preview, fakeRead({ direct: [preview], room: [[preview]] }), logger, 1, 0, true);
   assert.strictEqual(lonePreviewResult.__mediaV2PreviewOnly, true, "a lone imageUrl must be marked for fallback processing after the original wait");
 
+  const thumbFilePreview = {
+    ...base,
+    id: "thumb-file-event",
+    file: { id: "thumb-upload", name: "thumb-IMG_FULL.jpg", type: "image/jpeg" }
+  };
+  const originalFileMessage = {
+    ...thumbFilePreview,
+    file: { id: "original-upload", name: "IMG_FULL.jpg", type: "image/jpeg" }
+  };
+  const originalAfterThumb = await resolver(thumbFilePreview, fakeRead({ direct: [originalFileMessage], room: [[]] }), logger, 1, 0, true);
+  assert.strictEqual(originalAfterThumb.file.id, "original-upload", "a thumb-* message.file must wait for the full original instead of being treated as canonical");
+
   const olderSibling = { ...sibling, createdAt: new Date("2026-08-30T11:59:59.000Z") };
   const olderResult = await resolver(base, fakeRead({ direct: [base], room: [[base, olderSibling]] }), logger, 1, 0, false);
   assert.strictEqual(olderResult.id, "origin", "an older room photo must never be claimed by a new message");

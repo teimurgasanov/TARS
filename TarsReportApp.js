@@ -3107,6 +3107,8 @@ var require_upload_duplicate_guard = __commonJS({
         const titleValue = String(title && typeof title === "object" ? title.value : title || "");
         return String(file && (file.name || titleValue || file.url || file.path) || "").split("?")[0].split("/").pop().trim().toLowerCase();
       };
+      const generatedPreviewName = (file) => /^thumb[-_]/i.test(normalizedFileName(file));
+      const previewOriginalName = (file) => normalizedFileName(file).replace(/^thumb[-_]/i, "");
       const addFile = (file, authoritative = false) => {
         if (!file) return;
         const id = String(file._id || file.id || file.url || file.path || file.name || file.title || "");
@@ -3187,7 +3189,11 @@ var require_upload_duplicate_guard = __commonJS({
           visitAttachment(attachment);
         }
       }
-      return files;
+      const canonicalNames = {};
+      for (const file of files) {
+        if (!generatedPreviewName(file)) canonicalNames[normalizedFileName(file)] = true;
+      }
+      return files.filter((file) => !generatedPreviewName(file) || !canonicalNames[previewOriginalName(file)]);
     }
     function fileLooksLikeImage(file) {
       if (!file) return false;
@@ -3205,18 +3211,25 @@ var require_upload_duplicate_guard = __commonJS({
     }
     async function resolvePersonalImageMessageV2(initialMessage, read, logger, maxAttempts = 16, delayMs = 750, expectMedia = true) {
       if (!initialMessage || !isPersonalTarsRoom(initialMessage.room)) return initialMessage;
+      const isGeneratedPreviewReference = (file) => {
+        if (!file) return false;
+        const title = file.title;
+        const titleValue = String(title && typeof title === "object" ? title.value : title || "");
+        const name = String(file.name || titleValue || file.url || file.path || "").split("?")[0].split("/").pop();
+        return /^thumb[-_]/i.test(name);
+      };
       const isImageReference = (file) => {
         if (!file) return false;
         if (/^image\//i.test(String(file.type || file.mimeType || ""))) return true;
         return /\.(?:jpe?g|png|webp|gif|heic|heif)$/i.test(String(file.name || file.title || file.url || file.path || "").split("?")[0]);
       };
       const hasCanonicalImageReference = (message) => {
-        if (message && message.file && isImageReference(message.file)) return true;
-        if (message && Array.isArray(message.files) && message.files.some(isImageReference)) return true;
+        if (message && message.file && isImageReference(message.file) && !isGeneratedPreviewReference(message.file)) return true;
+        if (message && Array.isArray(message.files) && message.files.some((file) => isImageReference(file) && !isGeneratedPreviewReference(file))) return true;
         const visit = (attachment) => {
           if (!attachment) return false;
-          if (attachment.file && isImageReference(attachment.file)) return true;
-          if (Array.isArray(attachment.files) && attachment.files.some(isImageReference)) return true;
+          if (attachment.file && isImageReference(attachment.file) && !isGeneratedPreviewReference(attachment.file)) return true;
+          if (Array.isArray(attachment.files) && attachment.files.some((file) => isImageReference(file) && !isGeneratedPreviewReference(file))) return true;
           if (attachment.title && typeof attachment.title === "object" && attachment.title.link || attachment.title_link) return true;
           return Array.isArray(attachment.attachments) && attachment.attachments.some(visit);
         };
@@ -5055,8 +5068,19 @@ var require_upload_duplicate_guard = __commonJS({
       if (token.indexOf("дек") === 0) return 12;
       return void 0;
     }
+    function normalizeReceiptDateNumericConfusables(text) {
+      return String(text || "")
+        .replace(/[ОоO](?=[0-9])/g, "0")
+        .replace(/([0-9])[ОоO]/g, (_match, digit) => `${digit}0`)
+        .replace(/[ІI|l](?=[0-9])/g, "1")
+        .replace(/([0-9])[ІI|l]/g, (_match, digit) => `${digit}1`)
+        .replace(/[Зз](?=[0-9])/g, "3")
+        .replace(/([0-9])[Зз]/g, (_match, digit) => `${digit}3`)
+        .replace(/[Бб](?=[0-9])/g, "6")
+        .replace(/([0-9])[Бб]/g, (_match, digit) => `${digit}6`);
+    }
     function extractReceiptDate(text, requiredDate = "") {
-      const source = normalizeReceiptDateText(text);
+      const source = normalizeReceiptDateText(normalizeReceiptDateNumericConfusables(text));
       const required = /^\d{4}-\d{2}-\d{2}$/.test(String(requiredDate || "")) ? String(requiredDate) : "";
       const russianMonths = {
         "\u044f\u043d\u0432\u0430\u0440\u044f": 1, "\u044f\u043d\u0432\u0430\u0440\u044c": 1,

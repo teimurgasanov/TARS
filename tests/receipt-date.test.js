@@ -27,4 +27,16 @@ assert.strictEqual(
   undefined
 );
 
+assert.strictEqual(
+  extractReceiptDate('Чек по операции О2 сентября 2О26 12:03:24 (МСК)', '2026-09-02'),
+  '2026-09-02',
+  'OCR O/0 substitutions in a labeled Russian receipt date must be normalized'
+);
+
+assert.strictEqual(
+  extractReceiptDate('Дата операции О2.О9.2О26', '2026-09-02'),
+  '2026-09-02',
+  'OCR O/0 substitutions in a labeled numeric receipt date must be normalized'
+);
+
 console.log('PASS: extractReceiptDate');
