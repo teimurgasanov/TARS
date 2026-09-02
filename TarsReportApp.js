@@ -1975,6 +1975,28 @@ var require_upload_duplicate_guard = __commonJS({
     const IMAGE_CLASSIFICATION_SCHEMA_VERSION = "personal-image-classification-v1";
     const IMAGE_CLASSIFICATION_MODEL = "gpt-5.4-nano-2026-03-17";
     const PRIMARY_IMAGE_VISION_MODEL = "gpt-5.6-sol";
+    const RECEIPT_VISION_ENGINE_MIN_CONFIDENCE = 0.9;
+    const RECEIPT_VISION_ENGINE_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "is_receipt", "bank_or_provider", "operation_date", "operation_time",
+        "amount", "currency", "status", "amount_label", "confidence",
+        "ambiguity_reason"
+      ],
+      properties: {
+        is_receipt: { type: "boolean" },
+        bank_or_provider: { anyOf: [{ type: "string" }, { type: "null" }] },
+        operation_date: { anyOf: [{ type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }, { type: "null" }] },
+        operation_time: { anyOf: [{ type: "string", pattern: "^[0-9]{2}:[0-9]{2}(?::[0-9]{2})?$" }, { type: "null" }] },
+        amount: { anyOf: [{ type: "number", exclusiveMinimum: 0 }, { type: "null" }] },
+        currency: { type: "string", enum: ["RUB", "unknown"] },
+        status: { type: "string", enum: ["success", "failed", "unknown"] },
+        amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
+        confidence: { type: "number", minimum: 0, maximum: 1 },
+        ambiguity_reason: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
     const PRIMARY_IMAGE_VISION_SCHEMA = {
       type: "object",
       additionalProperties: false,
@@ -4794,6 +4816,152 @@ var require_upload_duplicate_guard = __commonJS({
       if (dotted) return alignReceiptDateToRequiredYear(normalizedDate(dotted[3], dotted[2], dotted[1]), requiredDate);
       return void 0;
     }
+    function receiptVisionEngineNullableString(value, maxLength = 160) {
+      if (value === null) return void 0;
+      if (typeof value !== "string") return null;
+      const normalized = value.trim();
+      if (!normalized || normalized.length > maxLength) return null;
+      return normalized;
+    }
+    function receiptVisionAmountLabelSupportsTotal(value) {
+      const label = String(value || "").trim().toLowerCase().replace(/ё/g, "е");
+      if (!label) return false;
+      const totalMeaning = /(?:итог(?:о)?|сумма|amount|total|к\s+оплате|списан(?:о|ие)|перевод(?:а)?|платеж(?:а)?)/i.test(label);
+      if (!totalMeaning) return false;
+      return !/(?:комисс|fee|баланс|balance|остаток|телефон|phone|номер\s+(?:карты|операции|документа|счета)|card\s*(?:number|no)|operation\s*(?:id|number)|document\s*(?:id|number)|время|time|дата|date)/i.test(label);
+    }
+    function parseReceiptVisionEngineV1(input) {
+      let value = input;
+      if (typeof input === "string") {
+        try {
+          value = JSON.parse(input);
+        } catch (_2) {
+          return void 0;
+        }
+      }
+      const keys = [
+        "is_receipt", "bank_or_provider", "operation_date", "operation_time",
+        "amount", "currency", "status", "amount_label", "confidence",
+        "ambiguity_reason"
+      ];
+      if (!imageClassificationHasExactKeys(value, keys)) return void 0;
+      if (typeof value.is_receipt !== "boolean") return void 0;
+      if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) return void 0;
+      const bankOrProvider = receiptVisionEngineNullableString(value.bank_or_provider);
+      const amountLabel = receiptVisionEngineNullableString(value.amount_label);
+      const ambiguityReason = receiptVisionEngineNullableString(value.ambiguity_reason, 240);
+      if (bankOrProvider === null || amountLabel === null || ambiguityReason === null) return void 0;
+      const operationDate = value.operation_date === null ? void 0 : String(value.operation_date || "");
+      if (operationDate) {
+        const match = operationDate.match(/^(20\d{2})-(\d{2})-(\d{2})$/);
+        if (!match || normalizedDate(match[1], match[2], match[3]) !== operationDate) return void 0;
+      } else if (value.operation_date !== null) {
+        return void 0;
+      }
+      const operationTime = value.operation_time === null ? void 0 : String(value.operation_time || "");
+      if (operationTime && !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(operationTime)) return void 0;
+      if (!operationTime && value.operation_time !== null) return void 0;
+      const amount = value.amount === null ? void 0 : receiptAmountFromAiValue(value.amount);
+      if (value.amount !== null && !isValidReceiptAmount(amount)) return void 0;
+      if (["RUB", "unknown"].indexOf(value.currency) === -1) return void 0;
+      if (["success", "failed", "unknown"].indexOf(value.status) === -1) return void 0;
+      return {
+        isReceipt: value.is_receipt,
+        bankOrProvider,
+        operationDate,
+        operationTime,
+        amount,
+        currency: value.currency,
+        status: value.status,
+        amountLabel,
+        confidence: value.confidence,
+        ambiguityReason
+      };
+    }
+    function receiptVisionEngineIsAuthoritative(result) {
+      return Boolean(
+        result &&
+        result.isReceipt === true &&
+        result.confidence >= RECEIPT_VISION_ENGINE_MIN_CONFIDENCE &&
+        /^20\d{2}-\d{2}-\d{2}$/.test(String(result.operationDate || "")) &&
+        isValidReceiptAmount(result.amount) &&
+        result.currency === "RUB" &&
+        ["success", "failed"].indexOf(result.status) !== -1 &&
+        !result.ambiguityReason &&
+        receiptVisionAmountLabelSupportsTotal(result.amountLabel)
+      );
+    }
+    function receiptVisionEngineIsAuthoritativeNonReceipt(result) {
+      return Boolean(
+        result &&
+        result.isReceipt === false &&
+        result.confidence >= RECEIPT_VISION_ENGINE_MIN_CONFIDENCE &&
+        !result.operationDate &&
+        !result.operationTime &&
+        !isValidReceiptAmount(result.amount) &&
+        result.currency === "unknown" &&
+        result.status === "unknown" &&
+        !result.amountLabel &&
+        !result.ambiguityReason
+      );
+    }
+    function receiptVisionEngineRetryableStatus(statusCode) {
+      return statusCode === 429 || statusCode >= 500 && statusCode <= 599;
+    }
+    async function requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt = 0) {
+      if (!config || !config.openaiApiKey || !content || !content.length || !http) return void 0;
+      const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+      const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
+      let response;
+      try {
+        response = await http.post("https://api.openai.com/v1/responses", {
+          headers: { Authorization: "Bearer " + config.openaiApiKey, "Content-Type": "application/json" },
+          data: {
+            model,
+            store: false,
+            input: [{
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: "Проанализируй всё изображение как единый банковский документ, включая чек на экране второго телефона, поворот, перспективу, блики и мелкий текст. Определи, является ли изображение подтверждением завершённой банковской операции, и извлеки дату, время и ИМЕННО итоговую сумму операции. Допустимые смысловые подписи: Сумма операции, Сумма перевода, Сумма платежа, Сумма списания, Итог, Итого, К оплате и их явные банковские аналоги. Никогда не выбирай комиссию, баланс, остаток, телефон, номер карты или последние четыре цифры, номер операции, документа, счёта, QR/СБП идентификатор, код, дату, время или случайное одиночное число. Если рядом несколько денежных значений, amount — только значение итоговой операции, а amount_label — подпись непосредственно этого значения. Нормализуй ₽, руб., RUB и RUR в currency=RUB. operation_date верни YYYY-MM-DD, operation_time — HH:MM или HH:MM:SS. Если итоговая сумма, дата или смысл документа не видны надёжно, не угадывай: верни null/unknown, снизь confidence и укажи краткий ambiguity_reason. ambiguity_reason=null только для внутренне согласованного результата."
+                },
+                { type: "input_image", image_url: imageUrl, detail: "high" }
+              ]
+            }],
+            text: { format: { type: "json_schema", name: "receipt_vision_engine_v1", strict: true, schema: RECEIPT_VISION_ENGINE_SCHEMA } },
+            max_output_tokens: 260
+          },
+          timeout: 14e3
+        });
+      } catch (error) {
+        const timeout = /(?:timeout|timed\s*out|etimedout)/i.test(String(error && (error.code || error.message) || error || ""));
+        if (timeout && attempt < 1) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt + 1);
+        }
+        if (logger) logger.warn(`Receipt Vision Engine unavailable attempt=${attempt + 1} kind=${timeout ? "timeout" : "other"}`);
+        return void 0;
+      }
+      const statusCode = Number(response && response.statusCode || 0);
+      if (statusCode < 200 || statusCode >= 300) {
+        if (receiptVisionEngineRetryableStatus(statusCode) && attempt < 1) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt + 1);
+        }
+        if (logger) logger.warn(`Receipt Vision Engine unavailable attempt=${attempt + 1} status=${statusCode || "unknown"}`);
+        return void 0;
+      }
+      let payload = response.data || response.content || response;
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch (_2) {
+          return void 0;
+        }
+      }
+      return parseReceiptVisionEngineV1(openAiReceiptOutputText(payload));
+    }
     function normalizeOpenAiStatus(value) {
       return String(value || "").trim().toLowerCase().replace(/ё/g, "е");
     }
@@ -5519,6 +5687,8 @@ var require_upload_duplicate_guard = __commonJS({
       const legacyOcrResults = [];
       const legacyVisionResults = [];
       let yandexLayoutResult = "error";
+      let receiptVisionAuthority;
+      let receiptVisionNonReceiptAuthority = false;
       const candidateConfirmsFinancialDocument = (candidate) => {
         if (!candidate || candidate.combinedReceipt) return false;
         const text = String(candidate.text || "");
@@ -5629,7 +5799,95 @@ var require_upload_duplicate_guard = __commonJS({
           return looksLikeBankReceiptText(text) && successStatus;
         });
       };
+      const receiptVisionIdentityText = () => candidates.filter((candidate) => candidate && !candidate.combinedReceipt && !candidate.receiptVisionAuthority).map((candidate) => String(candidate.text || "")).filter(Boolean).concat(receiptVisionAuthority ? [String(receiptVisionAuthority.text || "")] : []).join("\n");
+      const logReceiptVisionEngineDisagreement = () => {
+        if (!receiptVisionAuthority || !logger) return;
+        const comparable = candidates.filter((candidate) => candidate && !candidate.combinedReceipt && !candidate.receiptVisionAuthority);
+        const dateDisagreement = comparable.some((candidate) => /^\d{4}-\d{2}-\d{2}$/.test(String(candidate.receiptDate || "")) && candidate.receiptDate !== receiptVisionAuthority.receiptDate);
+        const amountDisagreement = comparable.some((candidate) => isValidReceiptAmount(candidate.receiptAmount) && !sameReceiptAmount(candidate.receiptAmount, receiptVisionAuthority.receiptAmount));
+        const authorityBlocks = receiptStatusBlocks(receiptVisionAuthority.statusRejection);
+        const statusDisagreement = comparable.some((candidate) => receiptStatusBlocks(candidate.statusRejection) !== authorityBlocks);
+        logger.info(`RECEIPT_VISION_ENGINE_V1 authority=high date_disagreement=${dateDisagreement} amount_disagreement=${amountDisagreement} status_disagreement=${statusDisagreement}`);
+      };
+      const returnReceiptVisionAuthority = () => {
+        if (!receiptVisionAuthority) return void 0;
+        const hardContainer = returnContainer();
+        if (hardContainer) return hardContainer;
+        const identityText = receiptVisionIdentityText();
+        if (receiptVisionAuthority.receiptDate !== requiredDate) {
+          const mismatch = returnDateMismatch({ ...receiptVisionAuthority, text: identityText });
+          if (mismatch && receiptVisionAuthority.receiptTime) mismatch.receiptTime = receiptVisionAuthority.receiptTime;
+          return mismatch;
+        }
+        if (receiptStatusBlocks(receiptVisionAuthority.statusRejection)) {
+          return withShadowEvidence({
+            ok: false,
+            reason: receiptVisionAuthority.statusRejection,
+            receiptDate: receiptVisionAuthority.receiptDate,
+            receiptTime: receiptVisionAuthority.receiptTime,
+            receiptAmount: receiptVisionAuthority.receiptAmount,
+            receiptIdentity: extractReceiptIdentity(identityText, receiptVisionAuthority.receiptDate, receiptVisionAuthority.receiptAmount)
+          });
+        }
+        const blockingStatus = candidates.find((candidate) => candidate && !candidate.combinedReceipt && !candidate.receiptVisionAuthority && receiptStatusBlocks(candidate.statusRejection));
+        if (blockingStatus) {
+          return withShadowEvidence({
+            ok: false,
+            reason: blockingStatus.statusRejection,
+            receiptDate: receiptVisionAuthority.receiptDate,
+            receiptTime: receiptVisionAuthority.receiptTime,
+            receiptAmount: receiptVisionAuthority.receiptAmount,
+            receiptIdentity: extractReceiptIdentity(identityText, receiptVisionAuthority.receiptDate, receiptVisionAuthority.receiptAmount)
+          });
+        }
+        return withShadowEvidence({
+          ok: true,
+          receiptDate: receiptVisionAuthority.receiptDate,
+          receiptTime: receiptVisionAuthority.receiptTime,
+          receiptAmount: receiptVisionAuthority.receiptAmount,
+          receiptIdentity: extractReceiptIdentity(identityText, receiptVisionAuthority.receiptDate, receiptVisionAuthority.receiptAmount),
+          receiptWarning: ""
+        });
+      };
       try {
+        if (hasOpenAi) {
+          const visionStartedAt = Date.now();
+          logReceiptStage(logger, stageContext, "receipt_vision_engine_start");
+          const visionResult = await requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger);
+          logReceiptStage(logger, stageContext, "receipt_vision_engine_end", visionStartedAt, visionResult ? "ok" : "fallback");
+          if (receiptVisionEngineIsAuthoritative(visionResult)) {
+            receiptVisionAuthority = {
+              text: JSON.stringify({
+                is_receipt: true,
+                bank_or_provider: visionResult.bankOrProvider || null,
+                operation_date: visionResult.operationDate,
+                operation_time: visionResult.operationTime || null,
+                amount: visionResult.amount,
+                currency: visionResult.currency,
+                status: visionResult.status,
+                amount_label: visionResult.amountLabel,
+                confidence: visionResult.confidence,
+                ambiguity_reason: null
+              }),
+              receiptDate: visionResult.operationDate,
+              receiptTime: visionResult.operationTime,
+              receiptAmount: visionResult.amount,
+              receiptAmountSource: `openai:${String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini"}:receipt_vision_engine_v1`,
+              statusRejection: visionResult.status === "failed" ? "🚫 ЧЕК НЕ ПРОШЁЛ ПРОВЕРКУ" : "",
+              containerRejection: "",
+              aiReceipt: true,
+              receiptVisionAuthority: true
+            };
+            candidates.push(receiptVisionAuthority);
+            legacyVisionResults.push(shadowObservation(receiptVisionAuthority, "receipt_vision_engine_v1"));
+          } else if (receiptVisionEngineIsAuthoritativeNonReceipt(visionResult)) {
+            receiptVisionNonReceiptAuthority = true;
+          }
+        }
+        if (receiptVisionNonReceiptAuthority) {
+          if (logger) logger.info("RECEIPT_VISION_ENGINE_V1 authority=high classification=not_receipt");
+          return withShadowEvidence({ ok: false, reason: "⚠️ Чек не принят: Vision не подтвердил финансовый документ." });
+        }
         if (hasYandex) {
           const yandexStartedAt = Date.now();
           logReceiptStage(logger, stageContext, "yandex_validation_start");
@@ -5661,6 +5919,10 @@ var require_upload_duplicate_guard = __commonJS({
           addCombinedCandidate();
           if (diagnostic) diagnostic.yandex_layout_result = yandexLayoutResult;
           logReceiptStage(logger, stageContext, "yandex_validation_end", yandexStartedAt, failures.length ? "partial" : "ok");
+        }
+        if (receiptVisionAuthority) {
+          logReceiptVisionEngineDisagreement();
+          return returnReceiptVisionAuthority();
         }
         if (hasOpenAi) {
           try {
@@ -7959,6 +8221,8 @@ var require_upload_duplicate_guard = __commonJS({
       IMAGE_CLASSIFICATION_MODEL,
       PRIMARY_IMAGE_VISION_MODEL,
       PRIMARY_IMAGE_VISION_SCHEMA,
+      RECEIPT_VISION_ENGINE_MIN_CONFIDENCE,
+      RECEIPT_VISION_ENGINE_SCHEMA,
       parseImageClassification,
       invalidImageClassification,
       requestOpenAiImageClassificationUncached,
@@ -7968,6 +8232,11 @@ var require_upload_duplicate_guard = __commonJS({
       recordImageClassificationV1ShadowObservation,
       maybeRunImageClassificationV1Shadow,
       scheduleImageClassificationV1Shadow,
+      parseReceiptVisionEngineV1,
+      receiptVisionAmountLabelSupportsTotal,
+      receiptVisionEngineIsAuthoritative,
+      receiptVisionEngineIsAuthoritativeNonReceipt,
+      requestOpenAiReceiptVisionEngineV1,
       detectPersonalMailingProof,
       personalImageKindForPreUpload,
       primaryVisionDecisionFromCandidate,
