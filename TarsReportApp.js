@@ -2379,7 +2379,7 @@ var require_upload_duplicate_guard = __commonJS({
     async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger, explicitPhotoIntent = false, diagnostic, options = {}) {
       const activeDiagnostic = diagnostic || options.manualPhotoSafetyOnly && createPersonalImageClassificationDiagnostic() || void 0;
       let primaryDecision = options.primaryVisionDecision;
-      if (!primaryDecision && config && config.openaiApiKey) {
+      if (!primaryDecision && options.primaryVisionAttempted !== true && config && config.openaiApiKey) {
         try {
           primaryDecision = await primaryVisionDecisionForImage(file, content, http, config, logger, activeDiagnostic);
         } catch (error) {
@@ -2393,6 +2393,10 @@ var require_upload_duplicate_guard = __commonJS({
         }
         if (primaryDecision && primaryDecision.parser_state === "parsed") {
           return { forward: true, reason: "manual-photo-safety-clean" };
+        }
+        if (options.allowYandexSafetyFallback === true) {
+          const yandexSafety = await manualPhotoYandexSafetyCheck(file, content, http, config, logger, activeDiagnostic);
+          return { forward: yandexSafety.safe, reason: yandexSafety.reason };
         }
         return { forward: false, reason: "manual-photo-safety-inconclusive" };
       }
@@ -2460,9 +2464,9 @@ var require_upload_duplicate_guard = __commonJS({
       const visionSafetyOnly = explicitPhotoIntent && options.manualPhotoSafetyOnly === true;
       const intent = directFileIntent(message);
       // After an explicit PHOTO button choice, filename/message heuristics are
-      // not classifiers and must not veto the upload. Primary Vision below is
-      // the sole type-safety authority: only positive financial/document
-      // evidence can block the work-photo route.
+      // not classifiers and must not veto the upload. Primary Vision remains
+      // authoritative when available; the Yandex OCR safety gate is used only
+      // when that provider cannot return a decision.
       if (!visionSafetyOnly && (intent === "mailing" || intent === "receipt")) return false;
       if (!visionSafetyOnly && blocksPersonalPhotoForwardingText(normalizedMessageDescriptor(message))) return false;
       const imageFiles = messageImageFiles(message);
@@ -3700,7 +3704,7 @@ var require_upload_duplicate_guard = __commonJS({
     function setPersonalImageFinalDiagnostic(diagnostic, classification, reason, stage) {
       if (!diagnostic) return;
       diagnostic.final_classification = personalImageDiagnosticEnum(classification, ["work_photo", "receipt", "document", "mailing", "unknown"]);
-      diagnostic.final_reason = personalImageDiagnosticEnum(reason, ["primary-vision-high-work-photo", "dedicated-work-photo-check", "work-photo-not-strictly-confirmed", "strict-receipt-check", "document-or-screen", "receipt", "mailing", "unclassified", "unknown"]);
+      diagnostic.final_reason = personalImageDiagnosticEnum(reason, ["primary-vision-high-work-photo", "manual-photo-yandex-safety-clean", "dedicated-work-photo-check", "work-photo-not-strictly-confirmed", "strict-receipt-check", "document-or-screen", "receipt", "mailing", "unclassified", "unknown"]);
       diagnostic.processing_stage = personalImageDiagnosticEnum(stage, ["primary", "dedicated", "strict-receipt", "financial-route", "final"]);
       diagnostic.final_route = diagnostic.final_classification === "work_photo" ? "work_photo" : diagnostic.final_classification === "receipt" || diagnostic.final_classification === "document" ? "receipt" : diagnostic.final_classification === "mailing" ? "mailing" : "unknown";
     }
@@ -3720,7 +3724,7 @@ var require_upload_duplicate_guard = __commonJS({
       safe.dedicated_document_block = source.dedicated_document_block === true;
       safe.dedicated_banking_block = source.dedicated_banking_block === true;
       safe.final_classification = personalImageDiagnosticEnum(source.final_classification, ["work_photo", "receipt", "document", "mailing", "unknown"]);
-      safe.final_reason = personalImageDiagnosticEnum(source.final_reason, ["primary-vision-high-work-photo", "dedicated-work-photo-check", "work-photo-not-strictly-confirmed", "strict-receipt-check", "document-or-screen", "receipt", "mailing", "unclassified", "unknown"]);
+      safe.final_reason = personalImageDiagnosticEnum(source.final_reason, ["primary-vision-high-work-photo", "manual-photo-yandex-safety-clean", "dedicated-work-photo-check", "work-photo-not-strictly-confirmed", "strict-receipt-check", "document-or-screen", "receipt", "mailing", "unclassified", "unknown"]);
       safe.processing_stage = personalImageDiagnosticEnum(source.processing_stage, ["primary", "dedicated", "strict-receipt", "financial-route", "final"]);
       return PERSONAL_IMAGE_DIAGNOSTIC_KEYS.reduce((payload, key) => {
         payload[key] = safe[key];
@@ -3774,7 +3778,7 @@ var require_upload_duplicate_guard = __commonJS({
         fallback_required: source.fallback_required === false || source.fallback_required === "false" ? "false" : "true",
         final_route: personalImageDiagnosticEnum(source.final_route, ["receipt", "work_photo", "mailing", "manual_selection", "unknown"]),
         final_classification: personalImageDiagnosticEnum(source.final_classification, ["work_photo", "receipt", "document", "mailing", "unknown"]),
-        final_reason: personalImageDiagnosticEnum(source.final_reason, ["primary-vision-high-work-photo", "dedicated-work-photo-check", "work-photo-not-strictly-confirmed", "strict-receipt-check", "document-or-screen", "receipt", "mailing", "unclassified", "unknown"])
+        final_reason: personalImageDiagnosticEnum(source.final_reason, ["primary-vision-high-work-photo", "manual-photo-yandex-safety-clean", "dedicated-work-photo-check", "work-photo-not-strictly-confirmed", "strict-receipt-check", "document-or-screen", "receipt", "mailing", "unclassified", "unknown"])
       };
       return safe;
     }
@@ -4625,6 +4629,33 @@ var require_upload_duplicate_guard = __commonJS({
         throw new Error(`OCR HTTP ${response && response.statusCode || "unknown"} (${model})`);
       }
       return response.data || (response.content ? JSON.parse(response.content) : {});
+    }
+    async function manualPhotoYandexSafetyCheck(file, content, http, config, logger, diagnostic) {
+      if (!content || !content.length || !http || !config || !config.apiKey || !config.folderId) {
+        return { safe: false, reason: "manual-photo-safety-inconclusive" };
+      }
+      let successfulLayouts = 0;
+      let sawReadableText = false;
+      for (const model of ["page", "page-column-sort"]) {
+        try {
+          const payload = await requestReceiptOcr(file, content, http, config, model);
+          const text = receiptOcrText(payload);
+          successfulLayouts += 1;
+          if (String(text || "").trim()) sawReadableText = true;
+          if (looksLikeBankReceiptText(text) || receiptContainerScreenshotRejection(text)) {
+            if (diagnostic) diagnostic.yandex_layout_result = "success";
+            return { safe: false, reason: "document-or-screen" };
+          }
+        } catch (error) {
+          if (logger) logger.warn(`Manual photo Yandex safety check failed (${model}): ${error && error.message || error}`);
+        }
+      }
+      if (!successfulLayouts) {
+        if (diagnostic) diagnostic.yandex_layout_result = "error";
+        return { safe: false, reason: "manual-photo-safety-inconclusive" };
+      }
+      if (diagnostic) diagnostic.yandex_layout_result = sawReadableText ? "success" : "empty";
+      return { safe: true, reason: "manual-photo-yandex-safety-clean" };
     }
     function receiptImageMimeType(file, content) {
       const detected = detectedPersonalImageMimeByMagicBytes(content);
@@ -7174,13 +7205,15 @@ var require_upload_duplicate_guard = __commonJS({
           forcedIntent === "photo" ? {
             skipStrictReceiptFallback: true,
             manualPhotoSafetyOnly: true,
-            primaryVisionDecision: routingOptions.primaryVisionDecision
+            primaryVisionDecision: routingOptions.primaryVisionDecision,
+            primaryVisionAttempted: routingOptions.primaryVisionAttempted === true,
+            allowYandexSafetyFallback: routingOptions.allowYandexSafetyFallback === true
           } : {}
         );
         if (photoResult) {
           if (photoResult === true) await notifyWorkPhotoAccepted(message, read, modify);
           if (photoResult === true) {
-            const finalPhotoReason = personalImageDiagnostic.final_reason === "primary-vision-high-work-photo" ? "primary-vision-high-work-photo" : "dedicated-work-photo-check";
+            const finalPhotoReason = personalImageDiagnostic.final_reason === "primary-vision-high-work-photo" || personalImageDiagnostic.final_reason === "manual-photo-yandex-safety-clean" ? personalImageDiagnostic.final_reason : "dedicated-work-photo-check";
             setPersonalImageFinalDiagnostic(personalImageDiagnostic, "work_photo", finalPhotoReason, "final");
             emitPersonalImageClassificationDiagnostic(logger, personalImageDiagnostic);
           }
@@ -7189,7 +7222,8 @@ var require_upload_duplicate_guard = __commonJS({
         }
         // A user-selected PHOTO must never fall through into receipt OCR just
         // because the report publisher or upload forwarder could not finish.
-        // Vision has already performed the only permitted type-safety check.
+        // The selected photo has already passed either Vision or the bounded
+        // fail-closed Yandex OCR safety check.
         if (forcedIntent === "photo") {
           if (logger) logger.warn(`MEDIA_V2_WORK_PHOTO_STOP message=${String(message.id || "none")} result=not-forwarded`);
           return { handled: true, status: "work-photo-not-forwarded", result: false };
@@ -7847,6 +7881,7 @@ var require_upload_duplicate_guard = __commonJS({
       primaryVisionDecisionForImage,
       primaryVisionDecisionForPersonalMessage,
       requestOpenAiWorkPhotoCheck,
+      manualPhotoYandexSafetyCheck,
       shouldForwardConfirmedWorkPhoto,
       createPersonalImageClassificationDiagnostic,
       personalImageDiagnosticSourceType,
@@ -8458,14 +8493,15 @@ var C = class extends j.App {
           // For an explicit PHOTO choice Vision is a positive safety veto, not
           // a second mandatory classifier. A parsed UNKNOWN/low-confidence
           // result is allowed only when there is no financial/document/mailing
-          // evidence. Provider/parser failure still fails closed.
+          // evidence. If the provider is unavailable, the existing Yandex OCR
+          // guard performs a separate fail-closed financial/document check.
           const photoVisionBlocked = Boolean(selectedPrimaryDecision && (
             selectedPrimaryDecision.financial_block ||
             selectedPrimaryDecision.is_document ||
             /^(?:receipt|bank_transfer|document|mailing)$/.test(String(selectedPrimaryDecision.kind || ""))
           ));
           const selectionConfirmed = selectedRoute === "photo"
-            ? Boolean(selectedPrimaryDecision && selectedPrimaryDecision.parser_state === "parsed" && !photoVisionBlocked)
+            ? !photoVisionBlocked
             : Boolean(visionRoute && visionRoute === selectedRoute);
           if (!selectionConfirmed) {
             if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
@@ -8530,7 +8566,11 @@ var C = class extends j.App {
         i,
         explicitTransferIntent ? "receipt" : explicitPhotoIntent ? "photo" : "",
         Boolean(postMessageClaimToken),
-        { primaryVisionDecision: selectedPrimaryDecision }
+        {
+          primaryVisionDecision: selectedPrimaryDecision,
+          primaryVisionAttempted: hasPersonalImageUpload,
+          allowYandexSafetyFallback: explicitPhotoIntent
+        }
       );
       if (mediaV2.handled) {
         if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
@@ -8984,7 +9024,13 @@ var C = class extends j.App {
         if (!result || !result.handled) await this.publishManualImageSelectionText(read, modify, data.room, "⚠️ Это изображение не подтверждено как финансовый чек.");
       } else if (routedType === "photo") {
         statusMessageId = await this.publishManualImageSelectionText(read, modify, data.room, "⏳ Обрабатываю фото…");
-        const result = await G.fastForwardPersonalReportPhotos(sourceMessage, read, persistence, modify, this.getLogger(), http, config, true, diagnostic, { skipStrictReceiptFallback: true, manualPhotoSafetyOnly: true, primaryVisionDecision: primaryDecision });
+        const result = await G.fastForwardPersonalReportPhotos(sourceMessage, read, persistence, modify, this.getLogger(), http, config, true, diagnostic, {
+          skipStrictReceiptFallback: true,
+          manualPhotoSafetyOnly: true,
+          primaryVisionDecision: primaryDecision,
+          primaryVisionAttempted: true,
+          allowYandexSafetyFallback: true
+        });
         if (result === true) {
           await G.notifyWorkPhotoAccepted(sourceMessage, read, modify);
           outcome = "work-photo-forwarded";

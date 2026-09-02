@@ -50,7 +50,7 @@ function financialPayload() {
   };
 }
 
-function runtime(primaryPayload = workPhotoPayload(), options = {}) {
+function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
   const loaded = loadTrackedAppWithGuard();
   const app = Object.create(loaded.TarsReportApp.prototype);
   const file = { _id: "preselected-photo", id: "preselected-photo", name: "result.jpg", type: "image/jpeg", url: "/file-upload/preselected-photo/result.jpg" };
@@ -68,7 +68,7 @@ function runtime(primaryPayload = workPhotoPayload(), options = {}) {
     getRoomReader() {
       return {
         async getById(id) { return String(id) === room.id ? room : undefined; },
-        async getByName(name) { return options.reportRoomUnavailable ? undefined : /^(?:otchet|отч[её]?ты?)$/i.test(String(name)) ? reportRoom : undefined; },
+        async getByName(name) { return runtimeOptions.reportRoomUnavailable ? undefined : /^(?:otchet|отч[её]?ты?)$/i.test(String(name)) ? reportRoom : undefined; },
         async getMessages() { return []; }
       };
     },
@@ -109,14 +109,31 @@ function runtime(primaryPayload = workPhotoPayload(), options = {}) {
       if (/openai\.com/.test(String(url))) {
         const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
         providerCalls.push(prompt.includes("Определи только основной тип изображения") ? "image_type_v3" : "unexpected_openai");
-        return { statusCode: 200, data: { output_text: JSON.stringify(primaryPayload) } };
+        return runtimeOptions.openaiStatus
+          ? { statusCode: runtimeOptions.openaiStatus, data: {} }
+          : { statusCode: 200, data: { output_text: JSON.stringify(primaryPayload) } };
       }
       providerCalls.push("yandex");
-      return { statusCode: 200, data: {} };
+      if (runtimeOptions.yandexStatus) return { statusCode: runtimeOptions.yandexStatus, data: {} };
+      return {
+        statusCode: 200,
+        data: {
+          result: {
+            textAnnotation: { fullText: String(runtimeOptions.yandexText || "") }
+          }
+        }
+      };
     }
   };
   app.getLogger = () => ({ info() {}, warn() {}, error() {} });
-  app.receiptOcrConfig = async () => ({ openaiApiKey: "test", openaiReceiptModel: "gpt-4.1-mini", timeZone: "Europe/Samara", cutoffHour: 0 });
+  app.receiptOcrConfig = async () => ({
+    apiKey: "test-yandex",
+    folderId: "test-folder",
+    openaiApiKey: "test",
+    openaiReceiptModel: "gpt-4.1-mini",
+    timeZone: "Europe/Samara",
+    cutoffHour: 0
+  });
   app.activePhotoReportIntent = async () => true;
   app.activeTransferReportIntent = async () => false;
   app.activeMailingReportIntent = async () => false;
@@ -172,7 +189,26 @@ async function execute(state) {
   assert.ok(!financial.sent.some((message) => message.room === financial.reportRoom), "positive financial evidence must block the photo route");
   assert.ok(financial.sent.some((message) => /Фото работы не принято/.test(String(message.text || ""))), "financial veto must retain the existing safe rejection UX");
 
-  console.log("PASS: selected PHOTO uses one Vision financial/document veto, accepts safe parsed UNKNOWN, and makes zero receipt OCR/Yandex calls");
+  const openAiUnavailable = runtime(safeUnknownPhotoPayload(), { openaiStatus: 403 });
+  await execute(openAiUnavailable);
+  assert.deepStrictEqual(openAiUnavailable.providerCalls, ["image_type_v3", "yandex", "yandex"], "OpenAI failure must use one primary attempt followed by the bounded Yandex safety gate");
+  assert.ok(openAiUnavailable.sent.some((message) => message.room === openAiUnavailable.reportRoom), "explicit PHOTO must continue when Yandex finds no financial/document evidence");
+  assert.ok(openAiUnavailable.sent.some((message) => message.text === "✅ ФОТО РАБОТЫ ПРИНЯТО"), "safe Yandex fallback must retain the existing photo success result");
+
+  const openAiUnavailableFinancial = runtime(safeUnknownPhotoPayload(), {
+    openaiStatus: 403,
+    yandexText: "Сбербанк. Чек по операции. Перевод выполнен. Сумма 1200 ₽. 02.09.2026"
+  });
+  await execute(openAiUnavailableFinancial);
+  assert.deepStrictEqual(openAiUnavailableFinancial.providerCalls, ["image_type_v3", "yandex"], "positive Yandex financial evidence must block immediately");
+  assert.ok(!openAiUnavailableFinancial.sent.some((message) => message.room === openAiUnavailableFinancial.reportRoom), "financial image must never enter the report-photo route");
+
+  const allProvidersUnavailable = runtime(safeUnknownPhotoPayload(), { openaiStatus: 403, yandexStatus: 503 });
+  await execute(allProvidersUnavailable);
+  assert.strictEqual(allProvidersUnavailable.providerCalls.filter((call) => call === "image_type_v3").length, 1, "a failed primary Vision request must not be repeated");
+  assert.ok(!allProvidersUnavailable.sent.some((message) => message.room === allProvidersUnavailable.reportRoom), "the fallback must fail closed when Yandex is unavailable");
+
+  console.log("PASS: selected PHOTO uses one Vision attempt and a fail-closed Yandex safety fallback when OpenAI is unavailable");
 })().catch((error) => {
   console.error(error && error.stack || error);
   process.exitCode = 1;
