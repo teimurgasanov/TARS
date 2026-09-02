@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "51bef4fd2145739f374ef829aedc7e03f010156e6d0e1abfecf822f78285dd25";
+const expectedSourceSha = "9ddd273a1281108a251dae4ea94733af1e172b7b1ca33a2ca05efe9f27d4b949";
 const expectedManifestSha = "07e8c27709c789a8a08b3d8ef90157f9c69b4227712c5b5fe0543d06f0f678e7";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
