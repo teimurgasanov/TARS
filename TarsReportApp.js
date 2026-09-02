@@ -6825,7 +6825,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (logger) logger.info(`Deleted duplicate ${protectedRoom.kind} message from user ${message.sender.id || "unknown"}`);
       return true;
     }
-    async function processPersonalMediaV2(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", allowProcessingStatus = true) {
+    async function processPersonalMediaV2(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", allowProcessingStatus = true, routingOptions = {}) {
       if (!message || !isPersonalTarsRoom(message.room)) return { handled: false, status: "not-personal" };
       const imageFiles = messageImageFiles(message);
       if (!imageFiles.length) {
@@ -6842,7 +6842,22 @@ var require_upload_duplicate_guard = __commonJS({
       // the older generic route could classify the photo correctly and then
       // block it during a second, narrower pre-upload check.
       if (forcedIntent !== "receipt") {
-        const photoResult = await fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent === "photo", personalImageDiagnostic);
+        const photoResult = await fastForwardPersonalReportPhotos(
+          message,
+          read,
+          persistence,
+          modify,
+          logger,
+          http,
+          ocrConfig,
+          forcedIntent === "photo",
+          personalImageDiagnostic,
+          forcedIntent === "photo" ? {
+            skipStrictReceiptFallback: true,
+            manualPhotoSafetyOnly: true,
+            primaryVisionDecision: routingOptions.primaryVisionDecision
+          } : {}
+        );
         if (photoResult) {
           if (photoResult === true) await notifyWorkPhotoAccepted(message, read, modify);
           if (photoResult === true) {
@@ -8060,6 +8075,7 @@ var C = class extends j.App {
         let explicitPhotoIntent = false;
         let explicitTransferIntent = false;
         let explicitMailingIntent = false;
+        let selectedPrimaryDecision;
         if (hasPersonalImageUpload) {
           [explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent] = await Promise.all([
             this.activePhotoReportIntent(n, e.room),
@@ -8076,13 +8092,25 @@ var C = class extends j.App {
           }
           primaryRoutingDiagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(e));
           try {
-            const primaryDecision = await G.primaryVisionDecisionForPersonalMessage(e, n, t, i, this.getLogger(), primaryRoutingDiagnostic);
-            visionRoute = G.primaryVisionDominantKind(primaryDecision);
+            selectedPrimaryDecision = await G.primaryVisionDecisionForPersonalMessage(e, n, t, i, this.getLogger(), primaryRoutingDiagnostic);
+            visionRoute = G.primaryVisionDominantKind(selectedPrimaryDecision);
           } catch (visionError) {
             this.getLogger().warn(`Primary Vision intent verification failed: ${visionError && visionError.message || visionError}`);
           }
           const selectedRoute = explicitPhotoIntent ? "photo" : explicitTransferIntent ? "receipt" : "mailing";
-          if (!visionRoute || visionRoute !== selectedRoute) {
+          // For an explicit PHOTO choice Vision is a positive safety veto, not
+          // a second mandatory classifier. A parsed UNKNOWN/low-confidence
+          // result is allowed only when there is no financial/document/mailing
+          // evidence. Provider/parser failure still fails closed.
+          const photoVisionBlocked = Boolean(selectedPrimaryDecision && (
+            selectedPrimaryDecision.financial_block ||
+            selectedPrimaryDecision.is_document ||
+            /^(?:receipt|bank_transfer|document|mailing)$/.test(String(selectedPrimaryDecision.kind || ""))
+          ));
+          const selectionConfirmed = selectedRoute === "photo"
+            ? Boolean(selectedPrimaryDecision && selectedPrimaryDecision.parser_state === "parsed" && !photoVisionBlocked)
+            : Boolean(visionRoute && visionRoute === selectedRoute);
+          if (!selectionConfirmed) {
             if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
             if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);
             if (explicitMailingIntent) await this.clearMailingReportIntent(s, e.room);
@@ -8135,7 +8163,18 @@ var C = class extends j.App {
           this.getLogger().info(`POST_PROBE_CONTINUE_PERSONAL_IMAGE_WITHOUT_CLAIM invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
         }
       }
-      const mediaV2 = await G.processPersonalMediaV2(e, n, s, r, this.getLogger(), t, i, explicitTransferIntent ? "receipt" : explicitPhotoIntent ? "photo" : "", Boolean(postMessageClaimToken));
+      const mediaV2 = await G.processPersonalMediaV2(
+        e,
+        n,
+        s,
+        r,
+        this.getLogger(),
+        t,
+        i,
+        explicitTransferIntent ? "receipt" : explicitPhotoIntent ? "photo" : "",
+        Boolean(postMessageClaimToken),
+        { primaryVisionDecision: selectedPrimaryDecision }
+      );
       if (mediaV2.handled) {
         if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
         if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);

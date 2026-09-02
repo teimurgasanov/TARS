@@ -320,8 +320,12 @@ const logger = { info() {}, warn() {}, error() {} };
     "the old post-upload selection gate must not remain in the runtime path");
   assert.match(postBlock, /const selectedRoute = explicitPhotoIntent \? "photo" : explicitTransferIntent \? "receipt" : "mailing"/,
     "Vision must confirm the one user-selected route");
-  assert.match(postBlock, /if \(!visionRoute \|\| visionRoute !== selectedRoute\)/,
-    "an unconfirmed or mismatched image must fail closed before a pipeline starts");
+  assert.match(postBlock, /selectedRoute === "photo"[\s\S]*parser_state === "parsed"[\s\S]*!photoVisionBlocked/,
+    "a preselected photo must use parsed Vision as a financial\/document safety veto, not require a second positive classification");
+  assert.match(postBlock, /selectedPrimaryDecision\.financial_block[\s\S]*selectedPrimaryDecision\.is_document[\s\S]*receipt\|bank_transfer\|document\|mailing/,
+    "positive financial, document, or mailing evidence must still block the photo pipeline");
+  assert.match(postBlock, /Boolean\(visionRoute && visionRoute === selectedRoute\)/,
+    "receipt and mailing selections must still require an exact confident Vision route");
   assert.match(postBlock, /explicitTransferIntent \? "receipt" : explicitPhotoIntent \? "photo"/,
     "a confirmed selection must enter exactly one existing receipt or photo pipeline");
   const mediaStart = productionSource.indexOf("async function processPersonalMediaV2");

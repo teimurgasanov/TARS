@@ -23,7 +23,34 @@ function workPhotoPayload() {
   };
 }
 
-function runtime() {
+function safeUnknownPhotoPayload() {
+  return {
+    ...workPhotoPayload(),
+    kind: "unknown",
+    confidence: "low",
+    service_kind: "none",
+    has_visible_client: false,
+    has_visible_service_result: false,
+    visual_type: "unknown"
+  };
+}
+
+function financialPayload() {
+  return {
+    ...workPhotoPayload(),
+    kind: "receipt",
+    confidence: "high",
+    service_kind: "none",
+    has_payment_ui: true,
+    has_receipt_layout: true,
+    has_visible_client: false,
+    has_visible_service_result: false,
+    is_receipt: true,
+    visual_type: "bank_app_screen"
+  };
+}
+
+function runtime(primaryPayload = workPhotoPayload()) {
   const loaded = loadTrackedAppWithGuard();
   const app = Object.create(loaded.TarsReportApp.prototype);
   const file = { _id: "preselected-photo", id: "preselected-photo", name: "result.jpg", type: "image/jpeg", url: "/file-upload/preselected-photo/result.jpg" };
@@ -82,7 +109,7 @@ function runtime() {
       if (/openai\.com/.test(String(url))) {
         const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
         providerCalls.push(prompt.includes("Определи только основной тип изображения") ? "image_type_v3" : "unexpected_openai");
-        return { statusCode: 200, data: { output_text: JSON.stringify(workPhotoPayload()) } };
+        return { statusCode: 200, data: { output_text: JSON.stringify(primaryPayload) } };
       }
       providerCalls.push("yandex");
       return { statusCode: 200, data: {} };
@@ -104,8 +131,7 @@ function runtime() {
   return { app, http, message, modify, persistence, providerCalls, read, reportRoom, sent };
 }
 
-(async () => {
-  const state = runtime();
+async function execute(state) {
   const realSetTimeout = global.setTimeout;
   global.setTimeout = (callback, delay, ...args) => {
     if (Number(delay || 0) >= 60000) return { unref() {} };
@@ -116,11 +142,29 @@ function runtime() {
   } finally {
     global.setTimeout = realSetTimeout;
   }
+}
+
+(async () => {
+  const state = runtime();
+  await execute(state);
   assert.deepStrictEqual(state.providerCalls, ["image_type_v3"], "preselected photo must use one Vision confirmation and zero receipt OCR/Yandex calls");
   assert.ok(state.sent.some((message) => message.room === state.reportRoom), "confirmed photo must use the existing report route");
   assert.ok(state.sent.some((message) => message.text === "✅ ФОТО РАБОТЫ ПРИНЯТО"), "confirmed photo must retain the existing success result");
   assert.ok(!state.sent.some((message) => message.text === "Что вы отправили?"), "post-upload manual selection must stay disabled");
-  console.log("PASS: preselected photo intent is confirmed by one V3 Vision pass before exactly one existing pipeline");
+
+  const safeUnknown = runtime(safeUnknownPhotoPayload());
+  await execute(safeUnknown);
+  assert.deepStrictEqual(safeUnknown.providerCalls, ["image_type_v3"], "safe parsed UNKNOWN must not trigger a second classifier, receipt OCR, or Yandex");
+  assert.ok(safeUnknown.sent.some((message) => message.room === safeUnknown.reportRoom), "explicit PHOTO must continue to the photo route when Vision finds no financial/document evidence");
+  assert.ok(safeUnknown.sent.some((message) => message.text === "✅ ФОТО РАБОТЫ ПРИНЯТО"), "safe parsed UNKNOWN must produce the existing photo success result");
+
+  const financial = runtime(financialPayload());
+  await execute(financial);
+  assert.deepStrictEqual(financial.providerCalls, ["image_type_v3"], "financial veto must use only the primary Vision decision");
+  assert.ok(!financial.sent.some((message) => message.room === financial.reportRoom), "positive financial evidence must block the photo route");
+  assert.ok(financial.sent.some((message) => /Фото работы не принято/.test(String(message.text || ""))), "financial veto must retain the existing safe rejection UX");
+
+  console.log("PASS: selected PHOTO uses one Vision financial/document veto, accepts safe parsed UNKNOWN, and makes zero receipt OCR/Yandex calls");
 })().catch((error) => {
   console.error(error && error.stack || error);
   process.exitCode = 1;

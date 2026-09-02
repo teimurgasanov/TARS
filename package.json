@@ -1,6 +1,6 @@
 {
   "name": "tars-report-build",
-  "version": "0.10.29",
+  "version": "0.10.30",
   "private": true,
   "scripts": {
     "build": "./build-tars.sh",
