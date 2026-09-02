@@ -2116,6 +2116,170 @@ var require_upload_duplicate_guard = __commonJS({
       if (imageClassificationCache.size > 200) imageClassificationCache.delete(imageClassificationCache.keys().next().value);
       return promise;
     }
+    const IMAGE_CLASSIFICATION_V1_SHADOW_SCHEMA_VERSION = "personal-image-classification-v1-shadow-observation-v1";
+    const IMAGE_CLASSIFICATION_V1_SHADOW_NAMESPACE = "image-classification-v1-shadow:v1";
+    const IMAGE_CLASSIFICATION_V1_SHADOW_RETENTION_DAYS = 30;
+    const IMAGE_CLASSIFICATION_V1_SHADOW_MAX_RECORDS = 5e3;
+    const IMAGE_CLASSIFICATION_V1_SHADOW_MAX_DELETES = 32;
+    const IMAGE_CLASSIFICATION_V1_SHADOW_ERROR_CODES = [
+      "NONE",
+      "NOT_CONFIGURED",
+      "EMPTY_IMAGE",
+      "PROVIDER_TIMEOUT",
+      "PROVIDER_ERROR",
+      "PROVIDER_RETRY_EXHAUSTED",
+      "PROVIDER_HTTP_ERROR",
+      "INVALID_PROVIDER_RESPONSE",
+      "INVALID_JSON",
+      "INVALID_ROOT_PROPERTIES",
+      "INVALID_SCHEMA_VERSION",
+      "INVALID_KIND",
+      "INVALID_CONFIDENCE",
+      "INVALID_REASON_CODE",
+      "INVALID_SAFETY_PROPERTIES",
+      "INVALID_SAFETY_VALUE",
+      "INVALID_WORK_PHOTO_PROPERTIES",
+      "INVALID_WORK_PHOTO_CATEGORY",
+      "INVALID_WORK_PHOTO_CLIENT_TYPE",
+      "INVALID_WORK_PHOTO_SERVICE",
+      "UNEXPECTED_WORK_PHOTO",
+      "INVALID_CLASSIFICATION"
+    ];
+    function imageClassificationV1ShadowEnum(value, allowed, fallback) {
+      const normalized = String(value || "").trim().toLowerCase();
+      return allowed.indexOf(normalized) === -1 ? fallback : normalized;
+    }
+    function imageClassificationV1ShadowCaseId(content) {
+      if (!content || !content.length) return "";
+      return `img-${sha256Bytes(utf8Bytes(`${IMAGE_CLASSIFICATION_V1_SHADOW_NAMESPACE}:${exactHash(content)}`)).slice(0, 48)}`;
+    }
+    function normalizeCurrentImageClassificationV1Kind(decision) {
+      const kind = String(decision && decision.kind || "").trim().toLowerCase();
+      if (kind === "receipt" || kind === "bank_transfer") return "receipt";
+      if (kind === "work_photo") return "work_photo";
+      if (kind === "mailing") return "mailing_proof";
+      if (kind === "document") return "report_or_screenshot";
+      if (kind === "other") return "other";
+      return "unknown";
+    }
+    function sanitizeImageClassificationV1ShadowObservation(input) {
+      const source = input && typeof input === "object" ? input : {};
+      const result = source.classification && typeof source.classification === "object" ? source.classification : invalidImageClassification("INVALID_CLASSIFICATION");
+      const valid = result.valid === true && result.value && typeof result.value === "object";
+      const value = valid ? result.value : {};
+      const currentKind = imageClassificationV1ShadowEnum(source.current_kind, ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other", "unknown"], "unknown");
+      const newKind = valid ? imageClassificationV1ShadowEnum(value.kind, IMAGE_CLASSIFICATION_KINDS, "other") : null;
+      const rawErrorCode = String(result.errorCode || "INVALID_CLASSIFICATION").trim().toUpperCase();
+      const errorCode = valid ? "NONE" : IMAGE_CLASSIFICATION_V1_SHADOW_ERROR_CODES.indexOf(rawErrorCode) === -1 ? "INVALID_CLASSIFICATION" : rawErrorCode;
+      const workPhoto = valid && newKind === "work_photo" && value.work_photo ? {
+        category: imageClassificationV1ShadowEnum(value.work_photo.category, ["hair", "nails", "brows", "other"], "other"),
+        client_type: imageClassificationV1ShadowEnum(value.work_photo.client_type, ["male", "female", "unknown"], "unknown"),
+        service: imageClassificationV1ShadowEnum(value.work_photo.service, ["haircut", "coloring", "styling", "nails", "brows", "other"], "other")
+      } : null;
+      const safe = {
+        schema_version: IMAGE_CLASSIFICATION_V1_SHADOW_SCHEMA_VERSION,
+        captured_at: Number.isSafeInteger(source.captured_at) && source.captured_at >= 0 ? source.captured_at : Date.now(),
+        case_id: /^img-[a-f0-9]{48}$/.test(String(source.case_id || "")) ? String(source.case_id) : "",
+        model: IMAGE_CLASSIFICATION_MODEL,
+        current_kind: currentKind,
+        new_kind: newKind,
+        confidence: valid && typeof value.confidence === "number" && Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1 ? value.confidence : null,
+        work_photo: workPhoto,
+        safety: {
+          is_banking: valid && value.safety && value.safety.is_banking === true,
+          is_document: valid && value.safety && value.safety.is_document === true,
+          has_payment_ui: valid && value.safety && value.safety.has_payment_ui === true,
+          has_receipt_text: valid && value.safety && value.safety.has_receipt_text === true
+        },
+        reason_code: valid && IMAGE_CLASSIFICATION_REASON_CODES.indexOf(value.reason_code) !== -1 ? value.reason_code : null,
+        valid,
+        error_code: errorCode,
+        agreement: valid ? currentKind === newKind : false,
+        disagreement: valid ? currentKind !== newKind : false
+      };
+      return Object.freeze(safe);
+    }
+    function imageClassificationV1ShadowAssociation(caseId) {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `${IMAGE_CLASSIFICATION_V1_SHADOW_NAMESPACE}:${caseId}`);
+    }
+    function imageClassificationV1ShadowIndexAssociation() {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `${IMAGE_CLASSIFICATION_V1_SHADOW_NAMESPACE}:index`);
+    }
+    async function recordImageClassificationV1ShadowObservation(observation, read, persistence, options = {}) {
+      try {
+        if (!observation || !/^img-[a-f0-9]{48}$/.test(String(observation.case_id || "")) || !read || !persistence) return false;
+        const retentionDays = Number.isSafeInteger(options.retentionDays) && options.retentionDays > 0 ? options.retentionDays : IMAGE_CLASSIFICATION_V1_SHADOW_RETENTION_DAYS;
+        const maxRecords = Number.isSafeInteger(options.maxRecords) && options.maxRecords > 0 ? options.maxRecords : IMAGE_CLASSIFICATION_V1_SHADOW_MAX_RECORDS;
+        const maxDeletes = Number.isSafeInteger(options.maxDeletes) && options.maxDeletes > 0 ? options.maxDeletes : IMAGE_CLASSIFICATION_V1_SHADOW_MAX_DELETES;
+        await persistence.updateByAssociation(imageClassificationV1ShadowAssociation(observation.case_id), observation, true);
+        const indexAssociation = imageClassificationV1ShadowIndexAssociation();
+        const records = await read.getPersistenceReader().readByAssociation(indexAssociation);
+        const storedIndex = Array.isArray(records) && records.length && records[0] && Array.isArray(records[0].entries) ? records[0].entries : [];
+        const byCase = /* @__PURE__ */ new Map();
+        for (const entry of storedIndex) {
+          if (!entry || !/^img-[a-f0-9]{48}$/.test(String(entry.case_id || "")) || !Number.isSafeInteger(entry.captured_at) || entry.captured_at < 0) continue;
+          const previous = byCase.get(entry.case_id);
+          if (!previous || entry.captured_at > previous.captured_at) byCase.set(entry.case_id, { case_id: entry.case_id, captured_at: entry.captured_at });
+        }
+        byCase.set(observation.case_id, { case_id: observation.case_id, captured_at: observation.captured_at });
+        const cutoff = observation.captured_at - retentionDays * 24 * 60 * 60 * 1e3;
+        const ordered = Array.from(byCase.values()).sort((left, right) => right.captured_at - left.captured_at || left.case_id.localeCompare(right.case_id));
+        const active = ordered.filter((entry) => entry.captured_at >= cutoff);
+        const expired = ordered.filter((entry) => entry.captured_at < cutoff);
+        const kept = active.slice(0, maxRecords);
+        const overflow = active.slice(maxRecords);
+        const removals = overflow.concat(expired.slice(0, Math.max(0, maxDeletes - overflow.length)));
+        const pendingExpired = expired.slice(Math.max(0, maxDeletes - overflow.length));
+        for (const entry of removals) await persistence.removeByAssociation(imageClassificationV1ShadowAssociation(entry.case_id));
+        await persistence.updateByAssociation(indexAssociation, {
+          namespace: IMAGE_CLASSIFICATION_V1_SHADOW_NAMESPACE,
+          entries: kept.concat(pendingExpired)
+        }, true);
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    }
+    async function maybeRunImageClassificationV1Shadow(input) {
+      try {
+        if (!input || input.enabled !== true) return Object.freeze({ attempted: false, recorded: false });
+        if (!input.content || !input.content.length || !input.config || !input.config.openaiApiKey) return Object.freeze({ attempted: false, recorded: false });
+        const classification = typeof input.classify === "function"
+          ? await input.classify(input.file, input.content, input.http, input.config, input.logger)
+          : await requestOpenAiImageClassification(input.file, input.content, input.http, input.config, input.logger);
+        const observation = sanitizeImageClassificationV1ShadowObservation({
+          case_id: imageClassificationV1ShadowCaseId(input.content),
+          captured_at: Date.now(),
+          current_kind: normalizeCurrentImageClassificationV1Kind(input.currentPrimaryDecision),
+          classification
+        });
+        const recorder = typeof input.record === "function" ? input.record : recordImageClassificationV1ShadowObservation;
+        const recorded = await recorder(observation, input.read, input.persistence, input.retentionOptions);
+        return Object.freeze({ attempted: true, recorded: recorded === true, observation });
+      } catch (_error) {
+        if (input && input.logger && typeof input.logger.warn === "function") input.logger.warn("ImageClassificationV1 shadow failed open");
+        return Object.freeze({ attempted: true, recorded: false });
+      }
+    }
+    let imageClassificationV1ShadowQueue = Promise.resolve();
+    let imageClassificationV1ShadowPending = 0;
+    function scheduleImageClassificationV1Shadow(input) {
+      if (!input || input.enabled !== true || !input.content || !input.content.length || imageClassificationV1ShadowPending >= 4) return false;
+      imageClassificationV1ShadowPending += 1;
+      const run = imageClassificationV1ShadowQueue.then(
+        () => maybeRunImageClassificationV1Shadow(input),
+        () => maybeRunImageClassificationV1Shadow(input)
+      );
+      imageClassificationV1ShadowQueue = run.then(
+        () => {
+          imageClassificationV1ShadowPending -= 1;
+        },
+        () => {
+          imageClassificationV1ShadowPending -= 1;
+        }
+      );
+      return true;
+    }
     const RECEIPT_VISUAL_CRITERIA = "КРИТЕРИИ БАНКОВСКОГО ЧЕКА. Считай изображение чеком, банковской квитанцией или справкой по операции, если главным объектом является официальный банковский документ, банковский экран либо чек, открытый на экране другого телефона. Ищи совокупность признаков: название или логотип банка/платёжного сервиса; слова Чек, Квитанция, Справка по операции, Перевод, Платёж, Оплата, СБП или SberPay; дата и время операции; итоговая сумма рядом с ₽, руб, Р, RUB или RUR; статус Успешно, Исполнено, Выполнено, Оплачено, Completed или иной статус; отправитель, получатель, счёт/карта, номер операции, QR или СБП. Чек может быть повёрнут, снят под углом, с бликами, на белом PDF-листе или на экране телефона. Для классификации достаточно ясно видимого банковского интерфейса/документа и нескольких согласованных признаков; для зачёта суммы обязательно отдельно прочитай именно итог операции. Не считай чеком: одиночное число без банковского контекста, баланс, время, номер телефона/карты, обычную переписку, рассылку, интерфейс Rocket.Chat, фото человека или салонной работы. ";
     const WORK_PHOTO_VISUAL_CRITERIA = "СТРОГИЕ КРИТЕРИИ ФОТО РАБОТЫ САЛОНА. Считай изображение фото работы только когда одновременно выполнены все условия: 1) главным объектом является реальный человек целиком, клиент либо крупно показанная часть его тела; 2) ясно видна конкретная зона салонной услуги; 3) зона относится ровно к одному виду: HAIR — волосы, стрижка, окрашивание, укладка, причёска, затылок, виски или борода; NAILS — руки, пальцы или ногти; PEDICURE — стопы, пальцы ног или ногти на ногах; BROWS_LASHES — лицо крупно, глаза, брови или ресницы; 4) изображение не является документом, экраном телефона, скриншотом, перепиской или рекламным материалом. Не требуй коллаж до/после и не требуй идеального крупного плана, но человек и релевантная зона услуги должны быть реально видимы, а не предполагаться по обстановке. Обычный портрет без различимой зоны услуги, человек только на заднем плане, пустой интерьер, рабочее место, инструменты, товар или случайная фотография — не фото работы. Никогда не считай работой банковский чек, квитанцию, справку по операции, банковский экран, экран телефона, QR/СБП, документ, чек на экране другого телефона, переписку/рассылку или интерфейс Rocket.Chat. Если виден читаемый документ или экран с банковскими реквизитами, суммой, датой, статусом, отправителем или получателем, всегда классифицируй изображение как документ/чек, даже когда в кадре также видны руки или человек. При сомнении не подтверждай фото работы. ";
     async function requestOpenAiWorkPhotoCheckUncached(file, content, http, config, logger, diagnostic) {
@@ -3954,7 +4118,13 @@ var require_upload_duplicate_guard = __commonJS({
         }
       }
       if (!bestCandidate) return primaryVisionDecisionFromCandidate(void 0, "no_json");
-      if (diagnostic) diagnostic.source_type = bestCandidate.sourceType;
+      if (diagnostic) {
+        diagnostic.source_type = bestCandidate.sourceType;
+        // Runtime-only bridge for the passive shadow observer. These values
+        // are never included by the telemetry whitelist or persisted.
+        diagnostic._image_classification_v1_shadow_file = bestCandidate.file;
+        diagnostic._image_classification_v1_shadow_content = bestCandidate.content;
+      }
       capturePersonalImageSourceTelemetry(diagnostic, bestCandidate.file, bestCandidate.content);
       return primaryVisionDecisionForImage(bestCandidate.file, bestCandidate.content, http, config, logger, diagnostic);
     }
@@ -7665,6 +7835,11 @@ var require_upload_duplicate_guard = __commonJS({
       invalidImageClassification,
       requestOpenAiImageClassificationUncached,
       requestOpenAiImageClassification,
+      normalizeCurrentImageClassificationV1Kind,
+      sanitizeImageClassificationV1ShadowObservation,
+      recordImageClassificationV1ShadowObservation,
+      maybeRunImageClassificationV1Shadow,
+      scheduleImageClassificationV1Shadow,
       detectPersonalMailingProof,
       personalImageKindForPreUpload,
       primaryVisionDecisionFromCandidate,
@@ -7849,6 +8024,15 @@ var C = class extends j.App {
       public: false,
       i18nLabel: "openai_receipt_model_label",
       i18nDescription: "openai_receipt_model_description"
+    });
+    await e.settings.provideSetting({
+      id: "image_classification_v1_shadow_enabled",
+      type: z.SettingType.BOOLEAN,
+      packageValue: false,
+      required: false,
+      public: false,
+      i18nLabel: "image_classification_v1_shadow_enabled_label",
+      i18nDescription: "image_classification_v1_shadow_enabled_description"
     });
     await e.settings.provideSetting({
       id: "scanner2_shadow_mode",
@@ -8259,6 +8443,17 @@ var C = class extends j.App {
           } catch (visionError) {
             this.getLogger().warn(`Primary Vision intent verification failed: ${visionError && visionError.message || visionError}`);
           }
+          G.scheduleImageClassificationV1Shadow({
+            enabled: i.imageClassificationV1ShadowEnabled,
+            file: primaryRoutingDiagnostic && primaryRoutingDiagnostic._image_classification_v1_shadow_file,
+            content: primaryRoutingDiagnostic && primaryRoutingDiagnostic._image_classification_v1_shadow_content,
+            currentPrimaryDecision: selectedPrimaryDecision,
+            read: n,
+            persistence: s,
+            http: t,
+            config: i,
+            logger: this.getLogger()
+          });
           const selectedRoute = explicitPhotoIntent ? "photo" : explicitTransferIntent ? "receipt" : "mailing";
           // For an explicit PHOTO choice Vision is a positive safety veto, not
           // a second mandatory classifier. A parsed UNKNOWN/low-confidence
@@ -8376,11 +8571,13 @@ var C = class extends j.App {
     const t = String(await n.getValueById("receipt_timezone") || "");
     const cutoffSetting = await n.getValueById("receipt_workday_cutoff");
     const archiveEnabledSetting = await n.getValueById("receipt_archive_enabled");
+    const imageClassificationV1ShadowEnabledSetting = await n.getValueById("image_classification_v1_shadow_enabled");
     return {
       apiKey: String(await n.getValueById("yandex_ocr_api_key") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       folderId: String(await n.getValueById("yandex_ocr_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
       openaiReceiptModel: String(await n.getValueById("openai_receipt_model") || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
+      imageClassificationV1ShadowEnabled: imageClassificationV1ShadowEnabledSetting === true || String(imageClassificationV1ShadowEnabledSetting || "").toLowerCase() === "true",
       scanner2ShadowMode: String(await n.getValueById("scanner2_shadow_mode") || "OFF").toUpperCase() === "RECORD_ONLY" ? "RECORD_ONLY" : "OFF",
       scanner2ShadowHmacSecret: String(await n.getValueById("scanner2_shadow_hmac_secret") || ""),
       scanner2ShadowTokenKeyVersion: String(await n.getValueById("scanner2_shadow_token_key_version") || "k1").trim() || "k1",

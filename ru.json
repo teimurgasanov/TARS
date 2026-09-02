@@ -10,6 +10,8 @@
     "openai_receipt_api_key_description": "Необязательно. Используется как второй слой вместе с Yandex OCR: помогает проверить дату, сумму, статус и наличие текста",
     "openai_receipt_model_label": "Модель OpenAI для проверки чеков",
     "openai_receipt_model_description": "Например gpt-4.1-mini. Если пусто, используется gpt-4.1-mini",
+    "image_classification_v1_shadow_enabled_label": "Пассивный shadow ImageClassificationV1",
+    "image_classification_v1_shadow_enabled_description": "По умолчанию выключен. Выполняет безопасное обезличенное сравнение без изменения маршрутов и решений TARS",
     "scanner2_shadow_mode_label": "Режим теневого регистратора Scanner 2.0",
     "scanner2_shadow_mode_description": "По умолчанию OFF. RECORD_ONLY сохраняет обезличенные структурированные наблюдения, не меняя решений TARS",
     "scanner2_shadow_hmac_secret_label": "HMAC-секрет теневого регистратора Scanner 2.0",

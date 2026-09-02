@@ -188,7 +188,11 @@ async function run() {
   }
 
   const publicRequestOccurrences = source.match(/requestOpenAiImageClassification\s*\(/g) || [];
-  assert.strictEqual(publicRequestOccurrences.length, 1, "new classifier must have no production call sites");
+  assert.strictEqual(publicRequestOccurrences.length, 2, "new classifier must only be declared and called by the passive shadow runner");
+  const shadowRunnerStart = source.indexOf("async function maybeRunImageClassificationV1Shadow");
+  const shadowRunnerEnd = source.indexOf("let imageClassificationV1ShadowQueue", shadowRunnerStart);
+  assert(shadowRunnerStart >= 0 && shadowRunnerEnd > shadowRunnerStart, "passive shadow runner block not found");
+  assert(source.slice(shadowRunnerStart, shadowRunnerEnd).includes("requestOpenAiImageClassification"), "classifier call must remain isolated in the passive shadow runner");
 
   console.log("PASS: ImageClassificationV1 contract, request retries, cache and routing isolation");
 }
