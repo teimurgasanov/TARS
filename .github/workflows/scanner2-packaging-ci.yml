@@ -151,6 +151,13 @@ jobs:
           test "$scanner_count" -eq 22
           echo "SCANNER2_TEST_COUNT=$scanner_count" >> "$GITHUB_ENV"
 
+      - name: Run ImageClassificationV1 test
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/image-classification-v1.test.js
+          echo "IMAGE_CLASSIFICATION_V1_TEST_COUNT=1" >> "$GITHUB_ENV"
+
       - name: Run 77 legacy TARS tests
         shell: bash
         run: |
@@ -160,7 +167,7 @@ jobs:
             echo "==> $test_file"
             node "$test_file"
             legacy_count=$((legacy_count + 1))
-          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' | sort)
+          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' | sort)
           test "$legacy_count" -eq 77
           echo "LEGACY_TEST_COUNT=$legacy_count" >> "$GITHUB_ENV"
 
@@ -229,6 +236,7 @@ jobs:
             echo "| Bundled TarsReportApp.js SHA-256 | \`$BUNDLE_SHA256\` |"
             echo "| ZIP SHA-256 | \`$ZIP_SHA256\` |"
             echo "| Scanner 2.0 tests | $SCANNER2_TEST_COUNT |"
+            echo "| ImageClassificationV1 tests | $IMAGE_CLASSIFICATION_V1_TEST_COUNT |"
             echo "| Legacy tests | $LEGACY_TEST_COUNT |"
             echo
             echo "ZIP SHA-256 is diagnostic only; ZIP timestamps are not the reproducibility contract."
