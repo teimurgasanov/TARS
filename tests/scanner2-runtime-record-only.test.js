@@ -271,10 +271,10 @@ function onlyRecord(harness) {
   assert.match(source, /id:\s*"scanner2_shadow_max_records"[\s\S]*packageValue:\s*"5000"/);
 
   // Release candidate metadata is synchronized and preserves the 0.10.17 permission boundary.
-  assert.strictEqual(appManifest.version, "0.10.24");
-  assert.strictEqual(packageManifest.version, "0.10.24");
-  assert.strictEqual(packageLock.version, "0.10.24");
-  assert.strictEqual(packageLock.packages[""].version, "0.10.24");
+  assert.strictEqual(appManifest.version, "0.10.25");
+  assert.strictEqual(packageManifest.version, "0.10.25");
+  assert.strictEqual(packageLock.version, "0.10.25");
+  assert.strictEqual(packageLock.packages[""].version, "0.10.25");
   assert.deepStrictEqual(appManifest.permissions.map(({ name }) => name), baselinePermissions);
   console.log("PASS: Scanner 2.0 runtime recorder is privacy-gated, fail-open, and RECORD_ONLY");
 })().catch((error) => {
