@@ -50,13 +50,17 @@
 - Bundle SHA-256: `1f264a3292df1c975922ea88691a0cc8151fc0d712f1bb594aafbddd8521ba93`.
 - Local ZIP SHA-256: `e44b5f5eb114f33fbe9ecfea50b1656742a3b771c59544ad7a5ebf0046ffbb5e` (diagnostic only because ZIP timestamps vary).
 - Feature Packaging CI run `33607080882`: SUCCESS with `22` Scanner/runtime and `77` legacy tests.
+- Integration Packaging CI run `33607722129`: SUCCESS with `22` Scanner/runtime and `77` legacy tests.
+- Integration CI bundle SHA-256: `1f264a3292df1c975922ea88691a0cc8151fc0d712f1bb594aafbddd8521ba93`.
+- Integration CI ZIP SHA-256: `0bdad7a0e2edfcb4da04873ab76947eb5eb8e898841c742e3da379eeef153a3c` (diagnostic only).
 
 ## Risks
 
 - Regression risk: MEDIUM. The change intentionally broadens authority of a HIGH primary work-photo result, while retaining explicit positive financial/document vetoes.
 - Residual provider risk: incorrect HIGH classification without any positive financial/document flags can route an image as a work photo. Regression fixtures cover receipt, banking, payment-screen, and document evidence.
+- CI emitted a GitHub-hosted runner warning that JavaScript actions targeting Node.js 20 are being forced onto Node.js 24; the application test command itself reports Node.js `v20.20.2`. This does not affect the current result but should be handled in a separate workflow-maintenance task.
 - No deploy was performed.
 
 ## Next step
 
-Wait for the integration-branch Packaging CI. After review, merge to `develop` only under a separate explicit instruction; deploy remains a separate guarded action.
+After review, merge to `develop` only under a separate explicit instruction; deploy remains a separate guarded action.
