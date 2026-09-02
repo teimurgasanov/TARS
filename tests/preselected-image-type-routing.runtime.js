@@ -148,7 +148,7 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
   app.isReportRequestText = () => false;
   app.refreshPersonalReportButton = async () => false;
   app.refreshPreliminaryReportAnalysis = async () => false;
-  return { app, http, message, modify, persistence, providerCalls, read, reportRoom, sent };
+  return { app, http, message, modify, persistence, providerCalls, read, records, reportRoom, sent };
 }
 
 async function execute(state) {
@@ -222,6 +222,11 @@ async function execute(state) {
   assert.strictEqual(receiptWithVisionUnavailable.providerCalls.filter((call) => call === "image_type_v3").length, 1, "selected RECEIPT must make only one failed primary Vision attempt before strict validation");
   assert.ok(receiptWithVisionUnavailable.providerCalls.includes("yandex"), "selected RECEIPT must continue into the existing strict Yandex/OCR validation when primary Vision is unavailable");
   assert.ok(!receiptWithVisionUnavailable.sent.some((message) => /Vision не подтвердил финансовый документ/.test(String(message.text || ""))), "provider unavailability must not be reported as a negative Vision classification");
+  const receiptIndex = receiptWithVisionUnavailable.records.get("receipt-duplicate-index-v1") || [];
+  const acceptedReceipts = receiptIndex.flatMap((record) => Array.isArray(record && record.photos) ? record.photos : []).filter((entry) => entry && entry.source === "confirmed");
+  assert.strictEqual(acceptedReceipts.length, 1, "a strict Yandex receipt must be accepted when OpenAI is unavailable");
+  assert.strictEqual(acceptedReceipts[0].receiptDate, "2026-09-02");
+  assert.strictEqual(acceptedReceipts[0].receiptAmount, 1200);
 
   const nonReceiptSelectedAsReceipt = runtime(workPhotoPayload(), { intent: "receipt" });
   await execute(nonReceiptSelectedAsReceipt);

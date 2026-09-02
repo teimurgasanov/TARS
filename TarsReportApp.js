@@ -5419,6 +5419,7 @@ var require_upload_duplicate_guard = __commonJS({
       const requiredDate = expectedReceiptDate(config);
       const hasYandex = Boolean(config.apiKey && config.folderId);
       const hasOpenAi = Boolean(config.openaiApiKey);
+      let openAiUnavailable = false;
       const stageContext = validationContext || receiptStageContext(file, content, config);
       if (!hasYandex && !hasOpenAi) {
         return { ok: false, reason: "🚫 ПРОВЕРКА ДАТЫ ЧЕКА НЕ НАСТРОЕНА" };
@@ -5490,7 +5491,7 @@ var require_upload_duplicate_guard = __commonJS({
       };
       const returnAccepted = () => {
         if (receiptAmountsDisagree(candidates, requiredDate, !hasYandex)) return void 0;
-        const accepted = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate && !receiptStatusBlocks(candidate.statusRejection) && (!candidate.aiReceipt || aiCandidateStronglyAcceptsReceipt(candidate, requiredDate)) && (!hasOpenAi || receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate, !hasYandex))));
+        const accepted = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate && !receiptStatusBlocks(candidate.statusRejection) && (!candidate.aiReceipt || aiCandidateStronglyAcceptsReceipt(candidate, requiredDate)) && (!hasOpenAi || openAiUnavailable || receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate, !hasYandex))));
         if (!accepted || !isValidReceiptAmount(accepted.receiptAmount) || receiptStatusBlocks(accepted.statusRejection)) return void 0;
         return withShadowEvidence({
           ok: true,
@@ -5603,6 +5604,7 @@ var require_upload_duplicate_guard = __commonJS({
               if (dateCandidate) legacyVisionResults.push(shadowObservation(dateCandidate, "date_focus"));
             }
           } catch (aiError) {
+            openAiUnavailable = true;
             failures.push(String(aiError && aiError.message || aiError));
             if (logger) logger.warn(`OpenAI receipt double-check failed: ${aiError && aiError.message || aiError}`);
           }
