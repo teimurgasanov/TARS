@@ -8,6 +8,8 @@ function associationKey(association) {
 }
 
 function openAiPass(options) {
+  const format = options && options.data && options.data.text && options.data.text.format;
+  if (format && format.name === "receipt_vision_fields_v1") return "vision-fields";
   const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
   if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ")) return "date-focus";
   if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:")) return "amount-focus";
@@ -45,6 +47,9 @@ function provider(config, calls) {
       assert(String(url).includes("api.openai.com"), `unexpected provider URL: ${url}`);
       const pass = openAiPass(options);
       calls.push(pass);
+      if (pass === "vision-fields") {
+        return { statusCode: 200, data: { output_text: JSON.stringify({ is_receipt: true, operation_date: null, operation_time: null, amount: null, currency: "unknown", confidence: 0.5 }) } };
+      }
       return { statusCode: 200, data: { output_text: JSON.stringify(receiptPayload(requiredDate)) } };
     }
   };
@@ -68,7 +73,7 @@ async function verifyPrimaryReuse(guard) {
   const reusedContext = guard.receiptStageContext(reusedFile, reusedContent, config);
   const reusedResult = await guard.validateReceiptDate(reusedFile, reusedContent, provider(config, reusedCalls), config, logger, 0, reusedContext);
   assert.strictEqual(reusedResult.ok, true);
-  assert.deepStrictEqual(reusedCalls, ["primary", "amount-focus"], "classification primary must be reused and amount-focus must remain mandatory");
+  assert.deepStrictEqual(reusedCalls, ["primary", "vision-fields", "amount-focus"], "classification primary must be reused and low-confidence Vision must preserve amount-focus");
 
   const fallbackCalls = [];
   const fallbackFile = { _id: "fallback-upload", id: "fallback-upload", name: "receipt.jpg", type: "image/jpeg" };
@@ -80,7 +85,7 @@ async function verifyPrimaryReuse(guard) {
     logger
   );
   assert.strictEqual(fallbackResult.ok, true);
-  assert.deepStrictEqual(fallbackCalls, ["primary", "amount-focus"], "missing reusable evidence must retain the old provider path");
+  assert.deepStrictEqual(fallbackCalls, ["vision-fields", "primary", "amount-focus"], "missing reusable evidence must retain the old provider path");
 
   const mismatchCalls = [];
   const sourceFile = { _id: "source-upload", id: "source-upload", name: "receipt.jpg", type: "image/jpeg" };
@@ -90,7 +95,7 @@ async function verifyPrimaryReuse(guard) {
   const sourceContext = guard.receiptStageContext(sourceFile, mismatchContent, config);
   const mismatchResult = await guard.validateReceiptDate(targetFile, mismatchContent, provider(config, mismatchCalls), config, logger, 0, sourceContext);
   assert.strictEqual(mismatchResult.ok, true);
-  assert.deepStrictEqual(mismatchCalls, ["primary", "primary", "amount-focus"], "evidence from another upload must never be reused");
+  assert.deepStrictEqual(mismatchCalls, ["primary", "vision-fields", "primary", "amount-focus"], "evidence from another upload must never be reused");
 }
 
 async function verifyStatusIdempotency(guard) {

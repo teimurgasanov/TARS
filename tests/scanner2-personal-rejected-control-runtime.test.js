@@ -79,6 +79,18 @@ function runtimeScenario(guard, mode, suffix) {
             ].join("\n");
         return { statusCode: 200, data: { result: { textAnnotation: { fullText: text, blocks: [] } } } };
       }
+      const format = options && options.data && options.data.text && options.data.text.format;
+      if (format && format.name === "receipt_vision_fields_v1") {
+        providerCalls.push("openai:vision-fields");
+        return openAiResponse({
+          is_receipt: true,
+          operation_date: null,
+          operation_time: null,
+          amount: null,
+          currency: "unknown",
+          confidence: 0.5
+        });
+      }
       const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
       if (prompt.includes("строгую классификацию изображения")) {
         dedicatedCalls += 1;
