@@ -24,9 +24,9 @@ assert.match(selectionBlock, /Что вы отправили\?/);
 assert.match(selectionBlock, /MANUAL_IMAGE_RECEIPT_ACTION/);
 assert.match(selectionBlock, /MANUAL_IMAGE_PHOTO_ACTION/);
 assert.match(selectionBlock, /MANUAL_IMAGE_MAILING_ACTION/);
-assert.match(postBlock, /if \(hasPersonalImageUpload\) \{[\s\S]*ensureManualImageSelection[\s\S]*return;/);
-assert(postBlock.indexOf('ensureManualImageSelection') < postBlock.indexOf('detectPersonalMailingProof'), 'manual choice must gate all automatic image routing');
-assert.match(classifyBlock, /if \(aiReceipt\) return "receipt";[\s\S]*if \(aiPhoto\) return "photo";[\s\S]*if \(ocrReceipt\) return "receipt";/);
+assert.match(postBlock, /if \(hasPersonalImageUpload\) \{[\s\S]*primaryVisionDecisionForPersonalMessage[\s\S]*if \(!visionRoute\) \{[\s\S]*ensureManualImageSelection[\s\S]*return;/);
+assert(postBlock.indexOf('primaryVisionDecisionForPersonalMessage') < postBlock.indexOf('ensureManualImageSelection'), 'primary Vision must precede the manual fallback');
+assert.match(classifyBlock, /primaryVisionDecisionForImage[\s\S]*primaryVisionDominantKind\(primaryDecision\)[\s\S]*if \(dominantKind\) return dominantKind;[\s\S]*if \(ocrReceipt\) return "receipt";/);
 assert.match(source, /for \(const messageFile of imageFiles\)/);
 
-console.log('PASS: old upload menu stays hidden and every personal image is gated by one compact manual choice');
+console.log('PASS: old upload menu stays hidden and inconclusive personal images use one compact manual fallback');

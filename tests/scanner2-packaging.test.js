@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "cdbba1b000d50c5dbe9979fe8386026bfb955ed22f2c3ea401e1cd0d8710c844";
+const expectedSourceSha = "896d9898165b69548d9133457660b569cd92d2c9eda79ef47fb70c2924a1fb8a";
 const expectedManifestSha = "28983dfa1585e67985616b5d4ce373d2213de5b3997212616f74d5c07a083d3c";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
@@ -133,6 +133,11 @@ execFileSync(process.execPath, [path.join(root, "tests", "manual-image-type-sele
   stdio: "pipe"
 });
 execFileSync(process.execPath, [path.join(root, "tests", "manual-image-selection-telemetry.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "vision-dominant-image-routing.runtime.js")], {
   cwd: root,
   encoding: "utf8",
   stdio: "pipe"

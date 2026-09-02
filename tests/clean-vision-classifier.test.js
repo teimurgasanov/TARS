@@ -8,18 +8,18 @@ const cEnd = source.indexOf('async function personalImageIsReceiptForPreUpload',
 if (cStart < 0 || cEnd <= cStart) throw new Error('classifier block not found');
 const classifier = source.slice(cStart, cEnd);
 
+const primaryVision = classifier.indexOf('primaryVisionDecisionForImage');
+const dominantVision = classifier.indexOf('const dominantKind = primaryVisionDominantKind(primaryDecision)');
+const dominantReturn = classifier.indexOf('if (dominantKind) return dominantKind');
 const ocrMailing = classifier.indexOf('if (ocrMailing) return "mailing"');
-const aiMailing = classifier.indexOf('if (aiMailing) return "mailing"');
-const aiReceipt = classifier.indexOf('if (aiReceipt) return "receipt"');
 const ocrReceipt = classifier.indexOf('if (ocrReceipt) return "receipt"');
-const aiPhoto = classifier.indexOf('if (aiPhoto) return "photo"');
 const unknown = classifier.indexOf('return "unknown";');
-for (const [name, pos] of Object.entries({ocrMailing, aiMailing, aiReceipt, ocrReceipt, aiPhoto, unknown})) {
+for (const [name, pos] of Object.entries({primaryVision, dominantVision, dominantReturn, ocrMailing, ocrReceipt, unknown})) {
   assert(pos >= 0, `${name} branch missing`);
 }
-assert(aiMailing < aiReceipt, 'visual mailing must stay protected');
-assert(aiReceipt < aiPhoto, 'explicit visual receipt must beat visual work photo');
-assert(aiPhoto < ocrMailing, 'visual classification must run before OCR fallback');
+assert(primaryVision < dominantVision, 'one primary Vision pass must feed the dominant decision');
+assert(dominantVision < dominantReturn, 'normalized Vision decision must be checked before fallback');
+assert(dominantReturn < ocrMailing, 'high-confidence Vision classification must run before OCR fallback');
 assert(ocrMailing < ocrReceipt, 'OCR mailing fallback must stay protected');
 assert(ocrReceipt < unknown, 'unclassified images must become explicit unknown after OCR fallback');
 
@@ -37,6 +37,8 @@ function makeRouter(kind, dedicatedKind, receiptOk, calls) {
   return new Function(
     'isPersonalTarsRoom',
     'PROTECTED_ROOMS',
+    'primaryVisionDecisionForImage',
+    'primaryVisionDominantKind',
     'personalImageKindForPreUpload',
     'requestOpenAiWorkPhotoCheck',
     'validateReceiptStrict',
@@ -45,6 +47,8 @@ function makeRouter(kind, dedicatedKind, receiptOk, calls) {
   )(
     () => true,
     { kassa: { kind: 'receipt' }, otchet: { kind: 'photo' } },
+    async () => ({ kind: 'unknown', confidence: 'low' }),
+    () => '',
     async () => { calls.classifier += 1; return kind; },
     async () => { calls.workPhoto += 1; return dedicatedKind; },
     async () => { calls.receipt += 1; return { ok: receiptOk }; },

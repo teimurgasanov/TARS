@@ -119,7 +119,10 @@ function runtime(suffix) {
     counters.photo += 1;
     assert.strictEqual(explicit, true);
     assert.ok(_diagnostic, "manual photo safety checks must keep normalized diagnostic evidence");
-    assert.deepStrictEqual(options, { skipStrictReceiptFallback: true, manualPhotoSafetyOnly: true });
+    assert.strictEqual(options.skipStrictReceiptFallback, true);
+    assert.strictEqual(options.manualPhotoSafetyOnly, true);
+    assert.ok(options.primaryVisionDecision && options.primaryVisionDecision.kind === "unknown",
+      "manual fallback must carry the same upload-bound primary Vision decision");
     return suffix === "bank-as-photo" ? false : true;
   };
   guard.notifyWorkPhotoAccepted = async () => { counters.photoAccepted += 1; return true; };
@@ -223,6 +226,14 @@ async function createSelection(state) {
     amount_label: null,
     status: "unknown",
     bank: null,
+    kind: "unknown",
+    confidence: "low",
+    is_banking: false,
+    is_document: false,
+    has_visible_client: true,
+    has_visible_service_result: false,
+    has_payment_ui: false,
+    has_receipt_text: false,
     ...overrides
   });
   const dedicatedPayload = (overrides = {}) => ({
@@ -281,7 +292,7 @@ async function createSelection(state) {
   assert.ok(postBlock.indexOf("ensureManualImageSelection") < postBlock.indexOf("detectPersonalMailingProof"), "selection gate must precede automatic classification");
   assert.doesNotMatch(source, /(evaluateRules|resolveConflicts|makeDecision|runOfflineComparison|runOfflineDataset)\s*\(/);
 
-  console.log("PASS: each personal image requires one idempotent manual type selection before a guarded existing pipeline");
+  console.log("PASS: inconclusive personal images use one idempotent manual fallback before a guarded existing pipeline");
 })().catch((error) => {
   console.error(error && error.stack || error);
   process.exitCode = 1;

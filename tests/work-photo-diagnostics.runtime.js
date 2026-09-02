@@ -38,6 +38,14 @@ function primaryPayload(overrides = {}) {
     amount_label: null,
     status: "unknown",
     bank: null,
+    kind: "work_photo",
+    confidence: "medium",
+    is_banking: false,
+    is_document: false,
+    has_visible_client: true,
+    has_visible_service_result: true,
+    has_payment_ui: false,
+    has_receipt_text: false,
     ...overrides
   };
 }
@@ -119,7 +127,7 @@ function eventLogger(events) {
   const portraitProvider = classifierProvider(primaryPayload(), dedicatedPayload({ has_visible_service_area: false }));
   const primaryKind = await guard.personalImageKindForPreUpload(portraitFile, portraitContent, portraitProvider, config, quietLogger, portraitDiagnostic);
   const portraitResult = await guard.requestOpenAiWorkPhotoCheck(portraitFile, portraitContent, portraitProvider, config, quietLogger, portraitDiagnostic);
-  assert.strictEqual(primaryKind, "photo");
+  assert.strictEqual(primaryKind, "unknown", "medium-confidence primary result must continue through fallback");
   assert.strictEqual(portraitResult, "", "diagnostics must not relax the work-photo decision");
   assert.strictEqual(portraitDiagnostic.primary_is_work_photo, true);
   assert.strictEqual(portraitDiagnostic.dedicated_is_work_photo, true);

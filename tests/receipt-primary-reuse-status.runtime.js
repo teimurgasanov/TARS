@@ -26,7 +26,15 @@ function receiptPayload(date) {
     amount_text: "1200 RUB",
     amount_label: "amount",
     status: "success",
-    bank: "test-bank"
+    bank: "test-bank",
+    kind: "receipt",
+    confidence: "high",
+    is_banking: true,
+    is_document: true,
+    has_visible_client: false,
+    has_visible_service_result: false,
+    has_payment_ui: false,
+    has_receipt_text: true
   };
 }
 

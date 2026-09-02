@@ -10,5 +10,6 @@ assert(helper.includes('directUi && sentState'), 'Direct/Instagram UI with a sen
 assert(helper.includes('repeatedStates && (directUi || accountList)'), 'repeated mailing states must remain protected');
 const classifier = source.slice(source.indexOf('async function personalImageKindForPreUpload'), source.indexOf('async function personalImageIsReceiptForPreUpload'));
 assert(classifier.includes('if (ocrMailing) return "mailing"'), 'OCR mailing proof must block photo routing');
-assert(classifier.includes('if (aiMailing) return "mailing"'), 'AI mailing proof must block photo routing');
+assert(classifier.includes('const dominantKind = primaryVisionDominantKind(primaryDecision)'), 'AI mailing proof must use the normalized primary decision');
+assert(classifier.includes('if (dominantKind) return dominantKind'), 'high-confidence AI mailing proof must block photo routing before OCR');
 console.log('PASS: mailing screenshots stay out of result before photo fallback');

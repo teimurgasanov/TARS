@@ -30,6 +30,13 @@ const EXPECTED_FIELDS = [
   "receipt_openai_result",
   "yandex_layout_result",
   "strict_result",
+  "vision_class",
+  "vision_confidence",
+  "vision_service_kind",
+  "vision_safety_override",
+  "vision_source_original_or_preview",
+  "fallback_required",
+  "final_route",
   "final_classification",
   "final_reason"
 ];
@@ -68,6 +75,14 @@ function primaryPayload(overrides = {}) {
     amount_label: null,
     status: "unknown",
     bank: null,
+    kind: "work_photo",
+    confidence: "high",
+    is_banking: false,
+    is_document: false,
+    has_visible_client: true,
+    has_visible_service_result: true,
+    has_payment_ui: false,
+    has_receipt_text: false,
     ...overrides
   };
 }
@@ -217,6 +232,10 @@ function loggerFor(events) {
   assert.strictEqual(primaryDiagnostic.primary_transport, "2xx");
   assert.strictEqual(primaryDiagnostic.primary_parser, "parsed");
   assert.strictEqual(primaryDiagnostic.primary_normalized_result, "work_photo");
+  assert.strictEqual(primaryDiagnostic.vision_class, "work_photo");
+  assert.strictEqual(primaryDiagnostic.vision_confidence, "high");
+  assert.strictEqual(primaryDiagnostic.vision_service_kind, "hair");
+  assert.strictEqual(primaryDiagnostic.fallback_required, false);
   const cachedPrimaryDiagnostic = guard.createPersonalImageClassificationDiagnostic("original");
   await guard.personalImageKindForPreUpload(primaryFile, primaryContent, provider(primaryPayload()), config, quietLogger, cachedPrimaryDiagnostic);
   assert.strictEqual(cachedPrimaryDiagnostic.primary_cache, "hit");
