@@ -1975,6 +1975,47 @@ var require_upload_duplicate_guard = __commonJS({
     const IMAGE_CLASSIFICATION_SCHEMA_VERSION = "personal-image-classification-v1";
     const IMAGE_CLASSIFICATION_MODEL = "gpt-5.4-nano-2026-03-17";
     const PRIMARY_IMAGE_VISION_MODEL = "gpt-5.6-sol";
+    const YANDEX_AI_STUDIO_RESPONSES_URL = "https://ai.api.cloud.yandex.net/v1/responses";
+    const YANDEX_AI_STUDIO_DEFAULT_MODEL = "qwen3.6-35b-a3b";
+    function normalizedYandexAiStudioModel(value) {
+      const model = String(value || YANDEX_AI_STUDIO_DEFAULT_MODEL).trim().replace(/^gpt:\/\/[^/]+\//, "").replace(/\/latest$/, "");
+      return /^[A-Za-z0-9._-]{1,120}$/.test(model) ? model : YANDEX_AI_STUDIO_DEFAULT_MODEL;
+    }
+    function visionProviderForConfig(config, openAiModel) {
+      if (!config) return void 0;
+      const yandexKey = String(config.yandexAiStudioApiKey || "").trim();
+      const folderId = String(config.yandexAiStudioFolderId || "").trim();
+      if (yandexKey && /^[A-Za-z0-9_-]{6,80}$/.test(folderId)) {
+        const modelName = normalizedYandexAiStudioModel(config.yandexAiStudioModel);
+        return {
+          id: "yandex_ai_studio",
+          url: YANDEX_AI_STUDIO_RESPONSES_URL,
+          model: `gpt://${folderId}/${modelName}/latest`,
+          headers: { Authorization: "Api-Key " + yandexKey, "Content-Type": "application/json" },
+          includeImageDetail: false
+        };
+      }
+      const openAiKey = String(config.openaiApiKey || "").trim();
+      if (!openAiKey) return void 0;
+      return {
+        id: "openai",
+        url: "https://api.openai.com/v1/responses",
+        model: String(openAiModel || config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
+        headers: { Authorization: "Bearer " + openAiKey, "Content-Type": "application/json" },
+        includeImageDetail: true
+      };
+    }
+    function visionProviderConfigured(config) {
+      return Boolean(visionProviderForConfig(config));
+    }
+    function visionProviderCacheKey(config, openAiModel) {
+      const provider = visionProviderForConfig(config, openAiModel);
+      return provider ? `${provider.id}:${provider.model}` : "none";
+    }
+    function visionImageInput(provider, imageUrl) {
+      if (provider && provider.includeImageDetail) return { type: "input_image", image_url: imageUrl, detail: "high" };
+      return { type: "input_image", image_url: imageUrl };
+    }
     const PRIMARY_IMAGE_VISION_SCHEMA = {
       type: "object",
       additionalProperties: false,
@@ -2114,21 +2155,22 @@ var require_upload_duplicate_guard = __commonJS({
       return /(?:timeout|timed\s*out|etimedout)/i.test(String(error && (error.code || error.message) || error || ""));
     }
     async function requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt = 0) {
-      if (!config || !config.openaiApiKey || !content || !content.length || !http) return invalidImageClassification("NOT_CONFIGURED");
+      const provider = visionProviderForConfig(config, IMAGE_CLASSIFICATION_MODEL);
+      if (!provider || !content || !content.length || !http) return invalidImageClassification("NOT_CONFIGURED");
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
       try {
-        response = await http.post("https://api.openai.com/v1/responses", {
-          headers: { Authorization: "Bearer " + config.openaiApiKey, "Content-Type": "application/json" },
+        response = await http.post(provider.url, {
+          headers: provider.headers,
           data: {
-            model: IMAGE_CLASSIFICATION_MODEL,
+            model: provider.model,
             store: false,
             reasoning: { effort: "none" },
             input: [{
               role: "user",
               content: [
                 { type: "input_text", text: "Classify the actual image into exactly one allowed kind. Use work_photo only for a visible salon service result. For coloring, return service=coloring only; never infer a named technique such as Airtouch, balayage or shatush. Set confidence conservatively. Do not describe the image." },
-                { type: "input_image", image_url: imageUrl, detail: "high" }
+                visionImageInput(provider, imageUrl)
               ]
             }],
             text: { format: { type: "json_schema", name: "personal_image_classification_v1", strict: true, schema: IMAGE_CLASSIFICATION_V1_SCHEMA } },
@@ -2160,7 +2202,7 @@ var require_upload_duplicate_guard = __commonJS({
     const imageClassificationCache = /* @__PURE__ */ new Map();
     async function requestOpenAiImageClassification(file, content, http, config, logger) {
       if (!content || !content.length) return invalidImageClassification("EMPTY_IMAGE");
-      const key = `${IMAGE_CLASSIFICATION_SCHEMA_VERSION}:${IMAGE_CLASSIFICATION_MODEL}:${exactHash(content)}`;
+      const key = `${IMAGE_CLASSIFICATION_SCHEMA_VERSION}:${visionProviderCacheKey(config, IMAGE_CLASSIFICATION_MODEL)}:${exactHash(content)}`;
       const cached = imageClassificationCache.get(key);
       if (cached) return cached;
       const promise = requestOpenAiImageClassificationUncached(file, content, http, config, logger);
@@ -2295,7 +2337,7 @@ var require_upload_duplicate_guard = __commonJS({
     async function maybeRunImageClassificationV1Shadow(input) {
       try {
         if (!input || input.enabled !== true) return Object.freeze({ attempted: false, recorded: false });
-        if (!input.content || !input.content.length || !input.config || !input.config.openaiApiKey) return Object.freeze({ attempted: false, recorded: false });
+        if (!input.content || !input.content.length || !visionProviderConfigured(input.config)) return Object.freeze({ attempted: false, recorded: false });
         const classification = typeof input.classify === "function"
           ? await input.classify(input.file, input.content, input.http, input.config, input.logger)
           : await requestOpenAiImageClassification(input.file, input.content, input.http, input.config, input.logger);
@@ -2335,19 +2377,19 @@ var require_upload_duplicate_guard = __commonJS({
     const RECEIPT_VISUAL_CRITERIA = "КРИТЕРИИ БАНКОВСКОГО ЧЕКА. Считай изображение чеком, банковской квитанцией или справкой по операции, если главным объектом является официальный банковский документ, банковский экран либо чек, открытый на экране другого телефона. Ищи совокупность признаков: название или логотип банка/платёжного сервиса; слова Чек, Квитанция, Справка по операции, Перевод, Платёж, Оплата, СБП или SberPay; дата и время операции; итоговая сумма рядом с ₽, руб, Р, RUB или RUR; статус Успешно, Исполнено, Выполнено, Оплачено, Completed или иной статус; отправитель, получатель, счёт/карта, номер операции, QR или СБП. Чек может быть повёрнут, снят под углом, с бликами, на белом PDF-листе или на экране телефона. Для классификации достаточно ясно видимого банковского интерфейса/документа и нескольких согласованных признаков; для зачёта суммы обязательно отдельно прочитай именно итог операции. Не считай чеком: одиночное число без банковского контекста, баланс, время, номер телефона/карты, обычную переписку, рассылку, интерфейс Rocket.Chat, фото человека или салонной работы. ";
     const WORK_PHOTO_VISUAL_CRITERIA = "СТРОГИЕ КРИТЕРИИ ФОТО РАБОТЫ САЛОНА. Считай изображение фото работы только когда одновременно выполнены все условия: 1) главным объектом является реальный человек целиком, клиент либо крупно показанная часть его тела; 2) ясно видна конкретная зона салонной услуги; 3) зона относится ровно к одному виду: HAIR — волосы, стрижка, окрашивание, укладка, причёска, затылок, виски или борода; NAILS — руки, пальцы или ногти; PEDICURE — стопы, пальцы ног или ногти на ногах; BROWS_LASHES — лицо крупно, глаза, брови или ресницы; 4) изображение не является документом, экраном телефона, скриншотом, перепиской или рекламным материалом. Не требуй коллаж до/после и не требуй идеального крупного плана, но человек и релевантная зона услуги должны быть реально видимы, а не предполагаться по обстановке. Обычный портрет без различимой зоны услуги, человек только на заднем плане, пустой интерьер, рабочее место, инструменты, товар или случайная фотография — не фото работы. Никогда не считай работой банковский чек, квитанцию, справку по операции, банковский экран, экран телефона, QR/СБП, документ, чек на экране другого телефона, переписку/рассылку или интерфейс Rocket.Chat. Если виден читаемый документ или экран с банковскими реквизитами, суммой, датой, статусом, отправителем или получателем, всегда классифицируй изображение как документ/чек, даже когда в кадре также видны руки или человек. При сомнении не подтверждай фото работы. ";
     async function requestOpenAiWorkPhotoCheckUncached(file, content, http, config, logger, diagnostic) {
-      if (!config || !config.openaiApiKey || !content || !content.length || !http) return "";
-      const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+      const openAiModel = String(config && config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+      const provider = visionProviderForConfig(config, openAiModel);
+      if (!provider || !content || !content.length || !http) return "";
+      const model = provider.model;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
           if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
-          const response = await http.post("https://api.openai.com/v1/responses", {
-          headers: {
-            Authorization: "Bearer " + config.openaiApiKey,
-            "Content-Type": "application/json"
-          },
+          const response = await http.post(provider.url, {
+          headers: provider.headers,
           data: {
             model,
+            store: false,
             input: [{
               role: "user",
               content: [
@@ -2355,7 +2397,7 @@ var require_upload_duplicate_guard = __commonJS({
                   type: "input_text",
                   text: RECEIPT_VISUAL_CRITERIA + WORK_PHOTO_VISUAL_CRITERIA + 'Ты выполняешь строгую классификацию изображения для отчёта салона. is_work_photo=true разрешено только если одновременно has_visible_client=true, has_visible_service_area=true, kind выбран из hair, nails, pedicure, brows_lashes, а is_document_or_screen=false и is_receipt_or_banking=false. Любой читаемый банковский документ или банковский экран имеет приоритет над руками и людьми в кадре. При сомнении ставь is_work_photo=false. Верни только JSON без Markdown: {"is_work_photo":true|false,"is_document_or_screen":true|false,"is_receipt_or_banking":true|false,"has_visible_client":true|false,"has_visible_service_area":true|false,"kind":"hair|nails|pedicure|brows_lashes|other","confidence":0.0,"evidence":["короткий видимый признак"]}.'
                 },
-                { type: "input_image", image_url: imageUrl, detail: "high" }
+                visionImageInput(provider, imageUrl)
               ]
             }],
             max_output_tokens: 180
@@ -2408,7 +2450,7 @@ var require_upload_duplicate_guard = __commonJS({
     const workPhotoCheckCache = /* @__PURE__ */ new Map();
     async function requestOpenAiWorkPhotoCheck(file, content, http, config, logger, diagnostic) {
       if (!content || !content.length) return "";
-      const key = `${expectedReceiptDate(config)}:${exactHash(content)}`;
+      const key = `${expectedReceiptDate(config)}:${visionProviderCacheKey(config)}:${exactHash(content)}`;
       let cached = workPhotoCheckCache.get(key);
       const cacheHit = Boolean(cached && Date.now() - cached.createdAt < 10 * 60 * 1e3);
       capturePersonalImageCacheTelemetry(diagnostic, "dedicated_cache", cacheHit);
@@ -2431,7 +2473,7 @@ var require_upload_duplicate_guard = __commonJS({
     async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger, explicitPhotoIntent = false, diagnostic, options = {}) {
       const activeDiagnostic = diagnostic || options.manualPhotoSafetyOnly && createPersonalImageClassificationDiagnostic() || void 0;
       let primaryDecision = options.primaryVisionDecision;
-      if (!primaryDecision && options.primaryVisionAttempted !== true && config && config.openaiApiKey) {
+      if (!primaryDecision && options.primaryVisionAttempted !== true && visionProviderConfigured(config)) {
         try {
           primaryDecision = await primaryVisionDecisionForImage(file, content, http, config, logger, activeDiagnostic);
         } catch (error) {
@@ -3917,7 +3959,7 @@ var require_upload_duplicate_guard = __commonJS({
       let aiReceipt = false;
       let aiMailing = false;
       let aiPhoto = false;
-      if (config.openaiApiKey) {
+      if (visionProviderConfigured(config)) {
         try {
           const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger);
           if (aiCandidate) {
@@ -3943,13 +3985,13 @@ var require_upload_duplicate_guard = __commonJS({
     function primaryImageVisionKey(file, content, config) {
       const uploadId = String(file && (file._id || file.id) || "").trim();
       if (!content || !content.length) return "";
-      return `${uploadId}:${exactHash(content)}:${expectedReceiptDate(config)}:${PRIMARY_IMAGE_VISION_MODEL}`;
+      return `${uploadId}:${exactHash(content)}:${expectedReceiptDate(config)}:${visionProviderCacheKey(config, PRIMARY_IMAGE_VISION_MODEL)}`;
     }
     function receiptPrimaryEvidenceKey(file, content, config) {
       const uploadId = String(file && (file._id || file.id) || "").trim();
       if (!uploadId || !content || !content.length) return "";
       const model = String(config && config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
-      return `${uploadId}:${exactHash(content)}:${expectedReceiptDate(config)}:${model}`;
+      return `${uploadId}:${exactHash(content)}:${expectedReceiptDate(config)}:${visionProviderCacheKey(config, model)}`;
     }
     function receiptStageContext(file, content, config) {
       const evidenceKey = receiptPrimaryEvidenceKey(file, content, config);
@@ -3987,7 +4029,8 @@ var require_upload_duplicate_guard = __commonJS({
       return { ...candidate };
     }
     async function requestPrimaryImageTypeVision(file, content, http, config, logger, diagnostic, retryAttempt = 0) {
-      if (!config || !config.openaiApiKey || !content || !content.length || !http) {
+      const provider = visionProviderForConfig(config, PRIMARY_IMAGE_VISION_MODEL);
+      if (!provider || !content || !content.length || !http) {
         if (diagnostic) {
           diagnostic.primary_transport = "other_error";
           diagnostic.primary_parser = "no_json";
@@ -3995,15 +4038,12 @@ var require_upload_duplicate_guard = __commonJS({
         }
         return primaryVisionDecisionFromCandidate(void 0, "no_json");
       }
-      const model = PRIMARY_IMAGE_VISION_MODEL;
+      const model = provider.model;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
       try {
-        response = await http.post("https://api.openai.com/v1/responses", {
-          headers: {
-            Authorization: "Bearer " + config.openaiApiKey,
-            "Content-Type": "application/json"
-          },
+        response = await http.post(provider.url, {
+          headers: provider.headers,
           data: {
             model,
             store: false,
@@ -4015,7 +4055,7 @@ var require_upload_duplicate_guard = __commonJS({
                   type: "input_text",
                   text: 'Определи только основной тип изображения из личного чата салона. Верни один JSON без Markdown: {"kind":"work_photo|receipt|bank_transfer|mailing|document|unknown","confidence":"high|medium|low","service_kind":"hair|nails|pedicure|brows_lashes|other|none","has_payment_ui":boolean,"has_receipt_layout":boolean,"has_financial_document":boolean,"has_document_layout":boolean,"has_visible_client":boolean,"has_visible_service_result":boolean,"is_receipt":boolean,"visual_type":"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown","date":"YYYY-MM-DD|null","amount":number|null,"status":"success|failed|pending|unknown","bank":"string|null"}. Главный объект и назначение кадра определяют kind. HIGH work_photo ставь, когда ясно виден результат парикмахерской или салонной услуги: форма стрижки, укладка, окрашивание, готовый маникюр, педикюр, брови или ресницы. Для такого решения кресло, инструменты, зеркало, интерьер и полное тело не обязательны. Отдельный текст, логотип, телефон или отсутствие рабочей зоны не являются причиной отклонить очевидный результат услуги. work_photo запрещён только при конкретно видимом банковском/payment UI, receipt layout, financial document или document layout. HIGH receipt или bank_transfer выбирай для банковского чека, перевода, квитанции или payment screen. HIGH mailing выбирай для очевидного скриншота рассылки. Обычный портрет без различимого результата услуги — unknown. Не выдумывай признаки. Поля date, amount, status и bank заполняй только для financial kind и только если они реально видны; они являются необязательной подсказкой для последующей проверки, а не решением о приёме.'
                 },
-                { type: "input_image", image_url: imageUrl, detail: "high" }
+                visionImageInput(provider, imageUrl)
               ]
             }],
             text: {
@@ -4089,7 +4129,7 @@ var require_upload_duplicate_guard = __commonJS({
       return parsed.decision;
     }
     async function primaryVisionDecisionForImage(file, content, http, config, logger, diagnostic) {
-      if (!config || !config.openaiApiKey || !content || !content.length || !http) {
+      if (!visionProviderConfigured(config) || !content || !content.length || !http) {
         return primaryVisionDecisionFromCandidate(void 0, "no_json");
       }
       const key = primaryImageVisionKey(file, content, config);
@@ -4128,7 +4168,7 @@ var require_upload_duplicate_guard = __commonJS({
     async function personalImageKindForPreUploadUncached(file, content, http, config, logger, diagnostic) {
       if (!config || !content || !content.length) return void 0;
       let primaryDecision;
-      if (config.openaiApiKey) {
+      if (visionProviderConfigured(config)) {
         try {
           primaryDecision = await primaryVisionDecisionForImage(file, content, http, config, logger, diagnostic);
         } catch (error) {
@@ -4161,7 +4201,7 @@ var require_upload_duplicate_guard = __commonJS({
     }
     async function personalImageKindForPreUpload(file, content, http, config, logger, diagnostic) {
       if (!content || !content.length) return void 0;
-      const key = `${expectedReceiptDate(config)}:${exactHash(content)}`;
+      const key = `${expectedReceiptDate(config)}:${visionProviderCacheKey(config, PRIMARY_IMAGE_VISION_MODEL)}:${exactHash(content)}`;
       let cached = personalImageKindCache.get(key);
       const cacheHit = Boolean(cached && Date.now() - cached.createdAt < 10 * 60 * 1e3);
       capturePersonalImageCacheTelemetry(diagnostic, "primary_cache", cacheHit);
@@ -4899,22 +4939,23 @@ var require_upload_duplicate_guard = __commonJS({
       return hasConflict && confirmedReceiptAmount(candidates, requiredDate, allowOpenAiPair) === void 0;
     }
     async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false, focusDate = false, diagnostic, diagnosticRole = "") {
-      if (!config || !config.openaiApiKey || !content || !content.length) return void 0;
+      if (!config || !content || !content.length) return void 0;
       const primaryModel = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
-      const model = focusAmount || focusDate ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
+      const openAiModel = focusAmount || focusDate ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
+      const provider = visionProviderForConfig(config, openAiModel);
+      if (!provider) return void 0;
+      const model = provider.model;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       const primaryVisionContract = diagnosticRole === "primary" && !focusAmount && !focusDate ? ' ОСНОВНАЯ КЛАССИФИКАЦИЯ ТИПА: дополнительно обязательно верни class:"receipt|bank_transfer|work_photo|mailing|document|unknown", service_kind:"hair|nails|pedicure|brows_lashes|other|none", confidence:"high|medium|low", has_payment_ui:boolean, has_receipt_layout:boolean, has_financial_document:boolean, has_qr_payment_document:boolean, has_financial_text:boolean, has_document_layout:boolean, has_visible_client:boolean, has_visible_hair_result:boolean, has_visible_nail_result:boolean, has_visible_brow_lash_result:boolean, has_salon_context:boolean, has_messaging_ui:boolean. confidence=high разрешено только когда тип непосредственно и однозначно виден. Для work_photo high требуется ясно видимый результат услуги; кресло, инструменты, зеркало, рабочая зона и интерьер не обязательны. Крупный план готовых ногтей, педикюра, бровей или ресниц достаточен без полного человека. Для hair должны быть видны клиент и выраженная форма стрижки, укладки или окрашивания. Work_photo блокируют только конкретные видимые признаки: банковский/payment UI, receipt layout, financial/document layout, QR/payment document или явный экран банковского приложения. Просто текст, логотип, телефон в кадре, человек или фон не блокируют work_photo без таких конкретных признаков. Обычный портрет без различимого результата услуги и пустой интерьер означают class=unknown. ' : "";
       const focusedPrompt = focusDate ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ: не копируй предыдущий ответ и не подставляй дату загрузки. Документ может занимать небольшую часть фотографии и быть открыт на экране другого телефона. Сначала найди границы экрана телефона и область банковского документа внутри него, мысленно приблизь её и проверь верхнюю часть чека и строки Дата, Дата операции, Операция совершена, Чек по операции или Сформировано. Перепиши только реально видимую календарную дату операции в формате YYYY-MM-DD. Не принимай время в строке состояния телефона, дату сообщения или номер документа за дату чека. Остальные поля прочитай как обычно. " : focusAmount ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА: не копируй предыдущий ответ. Изображение может быть повёрнуто на 90, 180 или 270 градусов — мысленно разверни его и проверь все ориентации. Сначала найди на самом чеке подписи даты, статуса и итоговой суммы, затем верни JSON. Внимательно увеличь область с итогом и обязательно перечитай сумму операции. Ищи подписи ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания. Верни amount числом без пробелов и знака валюты. Не используй комиссию, баланс, время, номер карты, документа или квитанции. " : "Изображение чека может быть снято боком или вверх ногами. Перед чтением определи ориентацию и мысленно поверни его на 90, 180 или 270 градусов. Сначала прочитай видимые подписи даты, статуса и итоговой суммы на самом чеке; не делай вывод по имени файла или окружающей обстановке. ";
       const amountFocusPrompt = focusedPrompt + "ВАЖНО: официальная надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод; для неё верни status=success. Оплата SberPay со статусом «Исполнено» также является успешной операцией. Не путай их с отдельным промежуточным статусом «Отправлен». ";
       let response;
       try {
-        response = await http.post("https://api.openai.com/v1/responses", {
-          headers: {
-            Authorization: "Bearer " + config.openaiApiKey,
-            "Content-Type": "application/json"
-          },
+        response = await http.post(provider.url, {
+          headers: provider.headers,
           data: {
             model,
+            store: false,
             input: [{
               role: "user",
               content: [
@@ -4922,7 +4963,7 @@ var require_upload_duplicate_guard = __commonJS({
                   type: "input_text",
                   text: amountFocusPrompt + RECEIPT_VISUAL_CRITERIA + WORK_PHOTO_VISUAL_CRITERIA + "Ты проверяешь фото банковского чека салона. Верни только JSON без Markdown: {\"is_receipt\":boolean,\"has_readable_text\":boolean,\"visual_type\":\"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown\",\"is_mailing_proof\":boolean,\"service_type\":\"haircut|coloring|manicure|pedicure|brows|lashes|unknown\",\"is_screenshot_of_chat\":boolean,\"date\":\"YYYY-MM-DD|null\",\"amount\":number|null,\"amount_text\":\"точно переписанная строка суммы с чека|null\",\"amount_label\":\"подпись рядом с суммой|null\",\"status\":\"success|failed|pending|unknown\",\"bank\":\"string|null\"}." + primaryVisionContract + " Визуальный тип mailing_proof_screenshot: скрин Instagram/Direct/личных сообщений со списком получателей и статусами Отправлено, Просмотрено, Sent, Seen, Delivered, либо текстом что аккаунт не может получать сообщения. Такой скрин всегда is_receipt=false и is_mailing_proof=true. Для фото работы выбери hair_work_photo, nails_work_photo, pedicure_work_photo или brows_lashes_work_photo строго по критериям выше. is_receipt=true только для банковского чека, квитанции, справки по операции, перевода или платежа. Не выдумывай дату или сумму. Если видишь 17.08.2026, это 2026-08-17, не 2016. Сумма — итог операции в рублях рядом с ИТОГО, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания или Сумма в валюте операции. Дословно перепиши видимую строку суммы в amount_text, включая разделители тысяч и валюту, а её подпись — в amount_label. Не бери комиссию, баланс, время, номер карты, документа, телефона или код подтверждения как сумму. status=success только для Успешно, Исполнен, Исполнено, Выполнен, Оплачен, Completed, Success. status=pending для Ожидает подтверждения, В обработке, На подпись, К отправке, Черновик, Отправлен, request_sent, processing или pending."
                 },
-                { type: "input_image", image_url: imageUrl, detail: "high" }
+                visionImageInput(provider, imageUrl)
               ]
             }],
             max_output_tokens: 500
@@ -5508,7 +5549,7 @@ var require_upload_duplicate_guard = __commonJS({
       }
       const requiredDate = expectedReceiptDate(config);
       const hasYandex = Boolean(config.apiKey && config.folderId);
-      const hasOpenAi = Boolean(config.openaiApiKey);
+      const hasOpenAi = visionProviderConfigured(config);
       let openAiUnavailable = false;
       const stageContext = validationContext || receiptStageContext(file, content, config);
       if (!hasYandex && !hasOpenAi) {
@@ -5762,7 +5803,7 @@ var require_upload_duplicate_guard = __commonJS({
         logReceiptStage(logger, stageContext, "strict_validation_done", strictStartedAt, result && result.ok ? "accepted" : "rejected");
         return result;
       }
-      const key = `${expectedReceiptDate(config)}:${exactHash(content)}`;
+      const key = `${expectedReceiptDate(config)}:${visionProviderCacheKey(config)}:${exactHash(content)}`;
       const cached = strictReceiptValidationCache.get(key);
       const cacheHit = Boolean(cached && Date.now() - cached.createdAt < 10 * 60 * 1e3);
       capturePersonalImageCacheTelemetry(diagnostic, "strict_cache", cacheHit);
@@ -7959,6 +8000,13 @@ var require_upload_duplicate_guard = __commonJS({
       IMAGE_CLASSIFICATION_MODEL,
       PRIMARY_IMAGE_VISION_MODEL,
       PRIMARY_IMAGE_VISION_SCHEMA,
+      YANDEX_AI_STUDIO_RESPONSES_URL,
+      YANDEX_AI_STUDIO_DEFAULT_MODEL,
+      normalizedYandexAiStudioModel,
+      visionProviderForConfig,
+      visionProviderConfigured,
+      visionProviderCacheKey,
+      visionImageInput,
       parseImageClassification,
       invalidImageClassification,
       requestOpenAiImageClassificationUncached,
@@ -7975,6 +8023,7 @@ var require_upload_duplicate_guard = __commonJS({
       primaryVisionDecisionForImage,
       primaryVisionDecisionForPersonalMessage,
       requestOpenAiWorkPhotoCheck,
+      requestOpenAiReceiptCheck,
       manualPhotoYandexSafetyCheck,
       shouldForwardConfirmedWorkPhoto,
       createPersonalImageClassificationDiagnostic,
@@ -8136,6 +8185,31 @@ var C = class extends j.App {
       public: false,
       i18nLabel: "yandex_ocr_folder_id_label",
       i18nDescription: "yandex_ocr_folder_id_description"
+    });
+    await e.settings.provideSetting({
+      id: "yandex_ai_studio_api_key",
+      type: z.SettingType.PASSWORD,
+      required: false,
+      public: false,
+      i18nLabel: "yandex_ai_studio_api_key_label",
+      i18nDescription: "yandex_ai_studio_api_key_description"
+    });
+    await e.settings.provideSetting({
+      id: "yandex_ai_studio_folder_id",
+      type: z.SettingType.STRING,
+      required: false,
+      public: false,
+      i18nLabel: "yandex_ai_studio_folder_id_label",
+      i18nDescription: "yandex_ai_studio_folder_id_description"
+    });
+    await e.settings.provideSetting({
+      id: "yandex_ai_studio_model",
+      type: z.SettingType.STRING,
+      packageValue: "qwen3.6-35b-a3b",
+      required: false,
+      public: false,
+      i18nLabel: "yandex_ai_studio_model_label",
+      i18nDescription: "yandex_ai_studio_model_description"
     });
     await e.settings.provideSetting({
       id: "openai_receipt_api_key",
@@ -8717,6 +8791,9 @@ var C = class extends j.App {
     return {
       apiKey: String(await n.getValueById("yandex_ocr_api_key") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       folderId: String(await n.getValueById("yandex_ocr_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
+      yandexAiStudioApiKey: String(await n.getValueById("yandex_ai_studio_api_key") || "").trim(),
+      yandexAiStudioFolderId: String(await n.getValueById("yandex_ai_studio_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
+      yandexAiStudioModel: G.normalizedYandexAiStudioModel(await n.getValueById("yandex_ai_studio_model")),
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
       openaiReceiptModel: String(await n.getValueById("openai_receipt_model") || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
       imageClassificationV1ShadowEnabled: imageClassificationV1ShadowEnabledSetting === true || String(imageClassificationV1ShadowEnabledSetting || "").toLowerCase() === "true",
