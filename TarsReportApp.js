@@ -1972,6 +1972,150 @@ var require_upload_duplicate_guard = __commonJS({
       if (removed && logger) logger.info(`Removed ${removed} mailing proof forward(s) from Otchet`);
       return removed;
     }
+    const IMAGE_CLASSIFICATION_SCHEMA_VERSION = "personal-image-classification-v1";
+    const IMAGE_CLASSIFICATION_MODEL = "gpt-5.4-nano-2026-03-17";
+    const IMAGE_CLASSIFICATION_KINDS = ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other"];
+    const IMAGE_CLASSIFICATION_REASON_CODES = ["RECEIPT_OR_PAYMENT", "WORK_PHOTO_HAIR", "WORK_PHOTO_NAILS", "WORK_PHOTO_BROWS", "WORK_PHOTO_OTHER", "MAILING_PROOF", "REPORT_OR_SCREENSHOT", "OTHER_IMAGE", "AMBIGUOUS"];
+    const IMAGE_CLASSIFICATION_V1_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: ["schema_version", "kind", "confidence", "work_photo", "safety", "reason_code"],
+      properties: {
+        schema_version: { type: "string", const: IMAGE_CLASSIFICATION_SCHEMA_VERSION },
+        kind: { type: "string", enum: IMAGE_CLASSIFICATION_KINDS },
+        confidence: { type: "number", minimum: 0, maximum: 1 },
+        work_photo: {
+          anyOf: [
+            { type: "null" },
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["category", "client_type", "service"],
+              properties: {
+                category: { type: "string", enum: ["hair", "nails", "brows", "other"] },
+                client_type: { type: "string", enum: ["male", "female", "unknown"] },
+                service: { type: "string", enum: ["haircut", "coloring", "styling", "nails", "brows", "other"] }
+              }
+            }
+          ]
+        },
+        safety: {
+          type: "object",
+          additionalProperties: false,
+          required: ["is_banking", "is_document", "has_payment_ui", "has_receipt_text"],
+          properties: {
+            is_banking: { type: "boolean" },
+            is_document: { type: "boolean" },
+            has_payment_ui: { type: "boolean" },
+            has_receipt_text: { type: "boolean" }
+          }
+        },
+        reason_code: { type: "string", enum: IMAGE_CLASSIFICATION_REASON_CODES }
+      },
+      allOf: [{
+        if: { properties: { kind: { const: "work_photo" } }, required: ["kind"] },
+        then: { properties: { work_photo: { type: "object" } } },
+        else: { properties: { work_photo: { type: "null" } } }
+      }]
+    };
+    function invalidImageClassification(errorCode) {
+      return { valid: false, errorCode: String(errorCode || "INVALID_CLASSIFICATION") };
+    }
+    function imageClassificationHasExactKeys(value, expectedKeys) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+      const actual = Object.keys(value).sort();
+      const expected = expectedKeys.slice().sort();
+      return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+    }
+    function parseImageClassification(input) {
+      let value = input;
+      if (typeof input === "string") {
+        try {
+          value = JSON.parse(input);
+        } catch (_2) {
+          return invalidImageClassification("INVALID_JSON");
+        }
+      }
+      if (!imageClassificationHasExactKeys(value, ["schema_version", "kind", "confidence", "work_photo", "safety", "reason_code"])) return invalidImageClassification("INVALID_ROOT_PROPERTIES");
+      if (value.schema_version !== IMAGE_CLASSIFICATION_SCHEMA_VERSION) return invalidImageClassification("INVALID_SCHEMA_VERSION");
+      if (IMAGE_CLASSIFICATION_KINDS.indexOf(value.kind) === -1) return invalidImageClassification("INVALID_KIND");
+      if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) return invalidImageClassification("INVALID_CONFIDENCE");
+      if (IMAGE_CLASSIFICATION_REASON_CODES.indexOf(value.reason_code) === -1) return invalidImageClassification("INVALID_REASON_CODE");
+      if (!imageClassificationHasExactKeys(value.safety, ["is_banking", "is_document", "has_payment_ui", "has_receipt_text"])) return invalidImageClassification("INVALID_SAFETY_PROPERTIES");
+      for (const key of ["is_banking", "is_document", "has_payment_ui", "has_receipt_text"]) {
+        if (typeof value.safety[key] !== "boolean") return invalidImageClassification("INVALID_SAFETY_VALUE");
+      }
+      if (value.kind === "work_photo") {
+        if (!imageClassificationHasExactKeys(value.work_photo, ["category", "client_type", "service"])) return invalidImageClassification("INVALID_WORK_PHOTO_PROPERTIES");
+        if (["hair", "nails", "brows", "other"].indexOf(value.work_photo.category) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_CATEGORY");
+        if (["male", "female", "unknown"].indexOf(value.work_photo.client_type) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_CLIENT_TYPE");
+        if (["haircut", "coloring", "styling", "nails", "brows", "other"].indexOf(value.work_photo.service) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_SERVICE");
+      } else if (value.work_photo !== null) {
+        return invalidImageClassification("UNEXPECTED_WORK_PHOTO");
+      }
+      return { valid: true, value };
+    }
+    function imageClassificationRetryableStatus(statusCode) {
+      return statusCode === 429 || statusCode >= 500 && statusCode <= 599;
+    }
+    function imageClassificationTimeout(error) {
+      return /(?:timeout|timed\s*out|etimedout)/i.test(String(error && (error.code || error.message) || error || ""));
+    }
+    async function requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt = 0) {
+      if (!config || !config.openaiApiKey || !content || !content.length || !http) return invalidImageClassification("NOT_CONFIGURED");
+      const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
+      let response;
+      try {
+        response = await http.post("https://api.openai.com/v1/responses", {
+          headers: { Authorization: "Bearer " + config.openaiApiKey, "Content-Type": "application/json" },
+          data: {
+            model: IMAGE_CLASSIFICATION_MODEL,
+            store: false,
+            reasoning: { effort: "none" },
+            input: [{
+              role: "user",
+              content: [
+                { type: "input_text", text: "Classify the actual image into exactly one allowed kind. Use work_photo only for a visible salon service result. For coloring, return service=coloring only; never infer a named technique such as Airtouch, balayage or shatush. Set confidence conservatively. Do not describe the image." },
+                { type: "input_image", image_url: imageUrl, detail: "high" }
+              ]
+            }],
+            text: { format: { type: "json_schema", name: "personal_image_classification_v1", strict: true, schema: IMAGE_CLASSIFICATION_V1_SCHEMA } },
+            max_output_tokens: 220
+          },
+          timeout: 14e3
+        });
+      } catch (error) {
+        if (attempt < 1 && imageClassificationTimeout(error)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1);
+        if (logger) logger.warn(`Image classification request failed attempt=${attempt + 1} kind=${imageClassificationTimeout(error) ? "timeout" : "other"}`);
+        return invalidImageClassification(imageClassificationTimeout(error) ? "PROVIDER_TIMEOUT" : "PROVIDER_ERROR");
+      }
+      const statusCode = Number(response && response.statusCode || 0);
+      if (statusCode < 200 || statusCode >= 300) {
+        if (attempt < 1 && imageClassificationRetryableStatus(statusCode)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1);
+        if (logger) logger.warn(`Image classification HTTP failed attempt=${attempt + 1} status=${statusCode || "unknown"}`);
+        return invalidImageClassification(imageClassificationRetryableStatus(statusCode) ? "PROVIDER_RETRY_EXHAUSTED" : "PROVIDER_HTTP_ERROR");
+      }
+      let payload = response.data || response.content || response;
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch (_2) {
+          return invalidImageClassification("INVALID_PROVIDER_RESPONSE");
+        }
+      }
+      return parseImageClassification(openAiReceiptOutputText(payload));
+    }
+    const imageClassificationCache = /* @__PURE__ */ new Map();
+    async function requestOpenAiImageClassification(file, content, http, config, logger) {
+      if (!content || !content.length) return invalidImageClassification("EMPTY_IMAGE");
+      const key = `${IMAGE_CLASSIFICATION_SCHEMA_VERSION}:${IMAGE_CLASSIFICATION_MODEL}:${exactHash(content)}`;
+      const cached = imageClassificationCache.get(key);
+      if (cached) return cached;
+      const promise = requestOpenAiImageClassificationUncached(file, content, http, config, logger);
+      imageClassificationCache.set(key, promise);
+      if (imageClassificationCache.size > 200) imageClassificationCache.delete(imageClassificationCache.keys().next().value);
+      return promise;
+    }
     const RECEIPT_VISUAL_CRITERIA = "КРИТЕРИИ БАНКОВСКОГО ЧЕКА. Считай изображение чеком, банковской квитанцией или справкой по операции, если главным объектом является официальный банковский документ, банковский экран либо чек, открытый на экране другого телефона. Ищи совокупность признаков: название или логотип банка/платёжного сервиса; слова Чек, Квитанция, Справка по операции, Перевод, Платёж, Оплата, СБП или SberPay; дата и время операции; итоговая сумма рядом с ₽, руб, Р, RUB или RUR; статус Успешно, Исполнено, Выполнено, Оплачено, Completed или иной статус; отправитель, получатель, счёт/карта, номер операции, QR или СБП. Чек может быть повёрнут, снят под углом, с бликами, на белом PDF-листе или на экране телефона. Для классификации достаточно ясно видимого банковского интерфейса/документа и нескольких согласованных признаков; для зачёта суммы обязательно отдельно прочитай именно итог операции. Не считай чеком: одиночное число без банковского контекста, баланс, время, номер телефона/карты, обычную переписку, рассылку, интерфейс Rocket.Chat, фото человека или салонной работы. ";
     const WORK_PHOTO_VISUAL_CRITERIA = "СТРОГИЕ КРИТЕРИИ ФОТО РАБОТЫ САЛОНА. Считай изображение фото работы только когда одновременно выполнены все условия: 1) главным объектом является реальный человек целиком, клиент либо крупно показанная часть его тела; 2) ясно видна конкретная зона салонной услуги; 3) зона относится ровно к одному виду: HAIR — волосы, стрижка, окрашивание, укладка, причёска, затылок, виски или борода; NAILS — руки, пальцы или ногти; PEDICURE — стопы, пальцы ног или ногти на ногах; BROWS_LASHES — лицо крупно, глаза, брови или ресницы; 4) изображение не является документом, экраном телефона, скриншотом, перепиской или рекламным материалом. Не требуй коллаж до/после и не требуй идеального крупного плана, но человек и релевантная зона услуги должны быть реально видимы, а не предполагаться по обстановке. Обычный портрет без различимой зоны услуги, человек только на заднем плане, пустой интерьер, рабочее место, инструменты, товар или случайная фотография — не фото работы. Никогда не считай работой банковский чек, квитанцию, справку по операции, банковский экран, экран телефона, QR/СБП, документ, чек на экране другого телефона, переписку/рассылку или интерфейс Rocket.Chat. Если виден читаемый документ или экран с банковскими реквизитами, суммой, датой, статусом, отправителем или получателем, всегда классифицируй изображение как документ/чек, даже когда в кадре также видны руки или человек. При сомнении не подтверждай фото работы. ";
     async function requestOpenAiWorkPhotoCheckUncached(file, content, http, config, logger, diagnostic) {
@@ -7515,6 +7659,12 @@ var require_upload_duplicate_guard = __commonJS({
       writeManualImageSelection,
       cleanupDuplicateReportForwardsInOtchet,
       cleanupMailingProofForwardsInOtchet,
+      IMAGE_CLASSIFICATION_V1_SCHEMA,
+      IMAGE_CLASSIFICATION_MODEL,
+      parseImageClassification,
+      invalidImageClassification,
+      requestOpenAiImageClassificationUncached,
+      requestOpenAiImageClassification,
       detectPersonalMailingProof,
       personalImageKindForPreUpload,
       primaryVisionDecisionFromCandidate,
