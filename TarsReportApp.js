@@ -3224,10 +3224,12 @@ var require_upload_duplicate_guard = __commonJS({
       const confidence = personalImageDiagnosticEnum(parsed.confidence, ["high", "medium", "low"], "low");
       const isBanking = parsed.is_banking === true || requestedClass === "bank_transfer" || /^(?:bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt)$/.test(visualType);
       const hasPaymentUi = parsed.has_payment_ui === true || /^(?:bank_app_screen|receipt_on_phone|qr_payment_receipt)$/.test(visualType);
-      const hasReceiptLayout = parsed.has_receipt_layout === true || parsed.has_receipt_text === true || parsed.is_receipt === true || visualType === "bank_receipt";
-      const hasFinancialText = parsed.has_financial_text === true || hasReceiptLayout;
+      const hasReceiptLayout = parsed.has_receipt_layout === true || visualType === "bank_receipt";
+      const hasReceiptText = parsed.has_receipt_text === true || parsed.has_financial_text === true;
+      const hasFinancialText = parsed.has_financial_text === true || hasReceiptText || hasReceiptLayout;
+      const hasFinancialDocument = parsed.has_financial_document === true || parsed.has_qr_payment_document === true || /^(?:bank_receipt|qr_payment_receipt)$/.test(visualType);
       const hasDocumentLayout = parsed.has_document_layout === true || parsed.is_document === true || parsed.is_document_or_screen === true || requestedClass === "document";
-      const isDocument = hasDocumentLayout || isBanking || hasPaymentUi || hasReceiptLayout;
+      const isDocument = hasDocumentLayout || isBanking || hasPaymentUi || hasReceiptLayout || hasFinancialDocument;
       const hasVisibleClient = parsed.has_visible_client === true;
       const hasVisibleHairResult = parsed.has_visible_hair_result === true || parsed.has_visible_service_result === true && /^(?:haircut|coloring)$/.test(String(parsed.service_type || ""));
       const hasVisibleNailResult = parsed.has_visible_nail_result === true || parsed.has_visible_service_result === true && /^(?:manicure|pedicure)$/.test(String(parsed.service_type || ""));
@@ -3237,7 +3239,13 @@ var require_upload_duplicate_guard = __commonJS({
       const hasSalonContext = parsed.has_salon_context === true;
       const hasMessagingUi = parsed.has_messaging_ui === true || parsed.is_screenshot_of_chat === true;
       const mailingProof = aiCandidateMarksMailing(candidate);
-      const financialBlock = Boolean(isBanking || isDocument || hasPaymentUi || hasReceiptLayout || hasFinancialText || !mailingProof && aiCandidateMarksReceipt(candidate));
+      // A HIGH WORK_PHOTO decision may only be overridden by concrete visual
+      // evidence of a financial/document surface. Incidental text, a logo, or
+      // date/amount-like text extracted from the scene is not enough to turn a
+      // visibly completed salon service into a receipt. The financial pipeline
+      // remains authoritative whenever Vision itself selects a receipt,
+      // transfer or document class.
+      const financialBlock = Boolean(isBanking || hasPaymentUi || hasReceiptLayout || hasFinancialDocument || hasDocumentLayout);
       let kind = state === "parsed" ? requestedClass : "unknown";
       if (financialBlock && kind === "work_photo") kind = isBanking ? "bank_transfer" : hasReceiptLayout ? "receipt" : "document";
       else if (kind === "work_photo" && (!hasVisibleServiceResult || serviceKind === "hair" && !hasVisibleClient)) kind = "unknown";
@@ -3260,9 +3268,10 @@ var require_upload_duplicate_guard = __commonJS({
         has_messaging_ui: hasMessagingUi,
         has_payment_ui: hasPaymentUi,
         has_receipt_layout: hasReceiptLayout,
+        has_financial_document: hasFinancialDocument,
         has_financial_text: hasFinancialText,
         has_document_layout: hasDocumentLayout,
-        has_receipt_text: hasReceiptLayout,
+        has_receipt_text: hasReceiptText,
         financial_block: financialBlock,
         safety_override: financialBlock && requestedClass === "work_photo",
         parser_state: state
@@ -4393,7 +4402,7 @@ var require_upload_duplicate_guard = __commonJS({
       const primaryModel = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
       const model = focusAmount || focusDate ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
-      const primaryVisionContract = diagnosticRole === "primary" && !focusAmount && !focusDate ? ' ОСНОВНАЯ КЛАССИФИКАЦИЯ ТИПА: дополнительно обязательно верни class:"receipt|bank_transfer|work_photo|mailing|document|unknown", service_kind:"hair|nails|pedicure|brows_lashes|other|none", confidence:"high|medium|low", has_payment_ui:boolean, has_receipt_layout:boolean, has_financial_text:boolean, has_document_layout:boolean, has_visible_client:boolean, has_visible_hair_result:boolean, has_visible_nail_result:boolean, has_visible_brow_lash_result:boolean, has_salon_context:boolean, has_messaging_ui:boolean. confidence=high разрешено только когда тип непосредственно и однозначно виден. Для work_photo high требуется ясно видимый результат услуги; кресло, инструменты, зеркало и интерьер не обязательны. Крупный план готовых ногтей/педикюра достаточен без полного человека. Для hair должны быть видны клиент и результат на волосах. Любой банковский интерфейс, payment UI, receipt/document layout или сильный financial text блокирует work_photo. Обычный портрет без различимого результата услуги и пустой интерьер означают class=unknown. ' : "";
+      const primaryVisionContract = diagnosticRole === "primary" && !focusAmount && !focusDate ? ' ОСНОВНАЯ КЛАССИФИКАЦИЯ ТИПА: дополнительно обязательно верни class:"receipt|bank_transfer|work_photo|mailing|document|unknown", service_kind:"hair|nails|pedicure|brows_lashes|other|none", confidence:"high|medium|low", has_payment_ui:boolean, has_receipt_layout:boolean, has_financial_document:boolean, has_qr_payment_document:boolean, has_financial_text:boolean, has_document_layout:boolean, has_visible_client:boolean, has_visible_hair_result:boolean, has_visible_nail_result:boolean, has_visible_brow_lash_result:boolean, has_salon_context:boolean, has_messaging_ui:boolean. confidence=high разрешено только когда тип непосредственно и однозначно виден. Для work_photo high требуется ясно видимый результат услуги; кресло, инструменты, зеркало, рабочая зона и интерьер не обязательны. Крупный план готовых ногтей, педикюра, бровей или ресниц достаточен без полного человека. Для hair должны быть видны клиент и выраженная форма стрижки, укладки или окрашивания. Work_photo блокируют только конкретные видимые признаки: банковский/payment UI, receipt layout, financial/document layout, QR/payment document или явный экран банковского приложения. Просто текст, логотип, телефон в кадре, человек или фон не блокируют work_photo без таких конкретных признаков. Обычный портрет без различимого результата услуги и пустой интерьер означают class=unknown. ' : "";
       const focusedPrompt = focusDate ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ: не копируй предыдущий ответ и не подставляй дату загрузки. Документ может занимать небольшую часть фотографии и быть открыт на экране другого телефона. Сначала найди границы экрана телефона и область банковского документа внутри него, мысленно приблизь её и проверь верхнюю часть чека и строки Дата, Дата операции, Операция совершена, Чек по операции или Сформировано. Перепиши только реально видимую календарную дату операции в формате YYYY-MM-DD. Не принимай время в строке состояния телефона, дату сообщения или номер документа за дату чека. Остальные поля прочитай как обычно. " : focusAmount ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА: не копируй предыдущий ответ. Изображение может быть повёрнуто на 90, 180 или 270 градусов — мысленно разверни его и проверь все ориентации. Сначала найди на самом чеке подписи даты, статуса и итоговой суммы, затем верни JSON. Внимательно увеличь область с итогом и обязательно перечитай сумму операции. Ищи подписи ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания. Верни amount числом без пробелов и знака валюты. Не используй комиссию, баланс, время, номер карты, документа или квитанции. " : "Изображение чека может быть снято боком или вверх ногами. Перед чтением определи ориентацию и мысленно поверни его на 90, 180 или 270 градусов. Сначала прочитай видимые подписи даты, статуса и итоговой суммы на самом чеке; не делай вывод по имени файла или окружающей обстановке. ";
       const amountFocusPrompt = focusedPrompt + "ВАЖНО: официальная надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод; для неё верни status=success. Оплата SberPay со статусом «Исполнено» также является успешной операцией. Не путай их с отдельным промежуточным статусом «Отправлен». ";
       let response;
