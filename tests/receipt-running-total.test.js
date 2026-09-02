@@ -46,4 +46,28 @@ const processingEnd = source.indexOf('function isTodayTransferSumRequest', proce
 const processing = source.slice(processingStart, processingEnd);
 assert.match(processing, /await publishMasterTransferSummary\(entry, message, read, persistence, modify, ocrConfig, logger, true, receiptEntries\)/);
 
-console.log('PASS: accepted receipts replace the daily running total with recalculated count and amount');
+const reportEndpointStart = source.indexOf('var S = class extends A.ApiEndpoint');
+const reportEndpointGetEnd = source.indexOf('  async post(e, n, t, s, r, a)', reportEndpointStart);
+const reportEndpointGet = source.slice(reportEndpointStart, reportEndpointGetEnd);
+assert.match(reportEndpointGet, /confirmedTransferSummaryForUser\(t, receiptConfig, m\.userId, I,[\s\S]*tokenRoom\.id\)/,
+  'report form must read the confirmed receipt total for the room owner and workday');
+assert.match(reportEndpointGet, /const transfersLocked = confirmedTransfers !== null/,
+  'receipt field may be locked only after the authoritative total was read successfully');
+assert.match(reportEndpointGet, /const resolvedFormData = P \? \{ \.\.\.P, transfers: resolvedTransfers \} : null/,
+  'a saved report must not restore a stale manually-entered receipt total');
+assert.match(reportEndpointGet, /confirmedReceiptCount:/);
+assert.match(reportEndpointGet, /pendingReceiptCount:/);
+assert.match(reportEndpointGet, /catch \(receiptSummaryError\)/,
+  'receipt-total lookup failure must preserve the previous editable report form behavior');
+
+const formScriptStart = source.indexOf('var REPORT_FORM_SCRIPT =');
+const formScriptEnd = source.indexOf('var ReportFormEndpoint =', formScriptStart);
+const formScript = source.slice(formScriptStart, formScriptEnd);
+assert.match(formScript, /autoTransfers=data\.transfersLocked===true&&Number\.isFinite\(Number\(data\.confirmedTransfers\)\)/);
+assert.match(formScript, /transfersEl\.value=autoTransfers\?Number\(data\.confirmedTransfers\)/,
+  'report table must display the authoritative confirmed receipt total');
+assert.match(formScript, /transfersEl\.readOnly=autoTransfers/,
+  'master must not accidentally overwrite the confirmed receipt total');
+assert.match(formScript, /Сумма чеков заполнена автоматически/);
+
+console.log('PASS: accepted receipts drive both the daily running total and the automatic report-table receipt field');
