@@ -8111,6 +8111,8 @@ var MAILING_UPLOAD_ACTION = "start-mailing-upload";
 var MANUAL_IMAGE_RECEIPT_ACTION = "manual-image-type-receipt-v1";
 var MANUAL_IMAGE_PHOTO_ACTION = "manual-image-type-photo-v1";
 var MANUAL_IMAGE_MAILING_ACTION = "manual-image-type-mailing-v1";
+var RECEIPT_APPROVAL_AMOUNT_VIEW_PREFIX = "receipt-approval-amount:";
+var RECEIPT_APPROVAL_AMOUNT_BLOCK = "receipt-approval-amount";
 var manualImageSelectionPromptQueue = Promise.resolve();
 var REPORT_MEDIA_RETENTION_MS = 60 * 24 * 60 * 60 * 1e3;
 var personalReportButtonRefreshQueue = Promise.resolve();
@@ -8971,23 +8973,85 @@ var C = class extends j.App {
       await notify("ℹ️ Этот чек уже зачтён или больше не ожидает проверки.");
       return;
     }
-    const amount = Number(entry.receiptAmount);
     const targetDate = String(entry.receiptDate || "");
-    if (!Number.isFinite(amount) || amount <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
-      await notify("⚠️ Чек нельзя зачесть одной кнопкой: сумма или дата не распознана. Используйте /prinyat @логин сумма ДД.ММ.ГГГГ.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+      await notify("⚠️ Дата чека не распознана. Используйте /prinyat @логин сумма ДД.ММ.ГГГГ.");
       return;
     }
+    if (!a.triggerId) {
+      await notify("⚠️ Не удалось открыть ввод суммы. Повторите нажатие кнопки.");
+      return;
+    }
+    const blocks = n.getCreator().getBlockBuilder();
+    const currentAmount = Number(entry.receiptAmount);
+    blocks.addInputBlock({
+      blockId: RECEIPT_APPROVAL_AMOUNT_BLOCK,
+      label: blocks.newPlainTextObject("Подтверждённая сумма чека, ₽"),
+      optional: false,
+      element: blocks.newPlainTextInputElement({
+        actionId: b,
+        placeholder: blocks.newPlainTextObject("Например: 1300"),
+        ...Number.isFinite(currentAmount) && currentAmount > 0 ? { initialValue: String(currentAmount) } : {}
+      })
+    });
+    await n.getUiController().openSurfaceView({
+      id: `${RECEIPT_APPROVAL_AMOUNT_VIEW_PREFIX}${exact}`,
+      type: $.UIKitSurfaceType.MODAL,
+      title: blocks.newPlainTextObject("Зачесть чек"),
+      blocks: blocks.getBlocks(),
+      submit: blocks.newButtonElement({
+        actionId: "submit-receipt-approval-amount",
+        text: blocks.newPlainTextObject("Зачесть")
+      }),
+      close: blocks.newButtonElement({
+        actionId: "close-receipt-approval-amount",
+        text: blocks.newPlainTextObject("Отмена")
+      })
+    }, { triggerId: a.triggerId }, a.user);
+  }
+  async handleApproveReceiptAmountSubmit(e, n, t, s, r, exact) {
+    const data = e.getInteractionData();
+    const config = await this.receiptOcrConfig(n);
+    const currentUsername = String(data && data.user && data.user.username || "").toLowerCase();
+    const allowed = ["teimur", "shura", config.ownerUsername, config.adminUsername].map((value) => String(value || "").replace(/^@/, "").toLowerCase()).filter(Boolean);
+    if (!data || !data.user || allowed.indexOf(currentUsername) === -1) {
+      return e.getInteractionResponder().viewErrorResponse({
+        viewId: data && data.view && data.view.id || `${RECEIPT_APPROVAL_AMOUNT_VIEW_PREFIX}${exact}`,
+        errors: { [RECEIPT_APPROVAL_AMOUNT_BLOCK]: "Зачесть чек могут только Теймур и Шура" }
+      });
+    }
+    const state = data.view && data.view.state || {};
+    const amount = this.parsePositiveNumber(this.getValue(state, RECEIPT_APPROVAL_AMOUNT_BLOCK));
+    if (amount === void 0 || amount <= 0) {
+      return e.getInteractionResponder().viewErrorResponse({
+        viewId: data.view.id,
+        errors: { [RECEIPT_APPROVAL_AMOUNT_BLOCK]: "Введите сумму больше нуля" }
+      });
+    }
+    const index = await G.readIndex(n, G.PROTECTED_ROOMS.kassa.index);
+    const entry = (index.photos || []).find((candidate) => candidate && candidate.source === "rejected" && String(candidate.exact || "") === exact);
+    if (!entry) return e.getInteractionResponder().successResponse();
+    const targetDate = String(entry.receiptDate || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
+      return e.getInteractionResponder().viewErrorResponse({
+        viewId: data.view.id,
+        errors: { [RECEIPT_APPROVAL_AMOUNT_BLOCK]: "Дата чека не распознана; используйте /prinyat" }
+      });
+    }
     const originalReason = entry.invalidReason || "";
+    const previousAmount = Number(entry.receiptAmount);
+    entry.receiptAmount = amount;
     entry.source = "confirmed";
     entry.invalidReason = "";
     entry.manualApprovalNote = originalReason;
-    entry.approvedBy = a.user.username || a.user.name || a.user.id || "";
+    if (Number.isFinite(previousAmount) && previousAmount > 0 && Math.abs(previousAmount - amount) >= 0.01) entry.manualApprovalPreviousAmount = previousAmount;
+    entry.approvedBy = data.user.username || data.user.name || data.user.id || "";
     entry.approvedAt = Date.now();
     entry.validationVersion = 11;
-    await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+    await G.writeIndex(s, G.PROTECTED_ROOMS.kassa.index, index);
     if (entry.roomId) {
       try {
-        const masterRoom = await e.getRoomReader().getById(entry.roomId);
+        const masterRoom = await n.getRoomReader().getById(entry.roomId);
         if (masterRoom) {
           await G.publishMasterTransferSummary({
             userId: entry.userId || "",
@@ -8995,15 +9059,20 @@ var C = class extends j.App {
             username: entry.username || "",
             userName: entry.userName || "",
             nameCandidates: [entry.username || ""]
-          }, { room: masterRoom }, e, t, n, config, this.getLogger(), true, [entry]);
+          }, { room: masterRoom }, n, s, r, config, this.getLogger(), true, [entry]);
         }
       } catch (error) {
         this.getLogger().warn(`Could not refresh master transfer summary after receipt button approval: ${error && error.message || error}`);
       }
     }
     const displayDateText = targetDate.split("-").reverse().join(".");
-    const builder = n.getCreator().startMessage().setSender(appUser).setRoom(a.room).setText(`✅ ЧЕК ЗАЧТЁН\nМастер: @${entry.username || "мастер"}\nСумма: ${this.formatRubles(amount)}\nДата: ${displayDateText}\nПринял: @${currentUsername}`);
-    await n.getCreator().finish(builder);
+    const controlRoom = await n.getRoomReader().getByName("cheki-kontrol");
+    const appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();
+    if (controlRoom && appUser) {
+      const builder = r.getCreator().startMessage().setSender(appUser).setRoom(controlRoom).setText(`✅ ЧЕК ЗАЧТЁН\nМастер: @${entry.username || "мастер"}\nСумма: ${this.formatRubles(amount)}\nДата: ${displayDateText}\nПринял: @${currentUsername}`);
+      await r.getCreator().finish(builder);
+    }
+    return e.getInteractionResponder().successResponse();
   }
   photoReportIntentAssociation(roomId) {
     return new y.RocketChatAssociationRecord(y.RocketChatAssociationModel.MISC, `photo-report-intent:${roomId}`);
@@ -9546,6 +9615,9 @@ var C = class extends j.App {
   }
   async executeViewSubmitHandler(e, n, t, s, r) {
     let a = e.getInteractionData(), o = a.view.id || "";
+    if (o.startsWith(RECEIPT_APPROVAL_AMOUNT_VIEW_PREFIX)) {
+      return await this.handleApproveReceiptAmountSubmit(e, n, t, s, r, o.slice(RECEIPT_APPROVAL_AMOUNT_VIEW_PREFIX.length));
+    }
     if (!o.startsWith(P))
       return e.getInteractionResponder().successResponse();
     let viewPayload = o.slice(P.length), reportType = "male", separator = viewPayload.lastIndexOf(":");

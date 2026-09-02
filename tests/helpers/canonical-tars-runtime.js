@@ -34,6 +34,7 @@ function rocketChatStub(request) {
     return { SettingType: { PASSWORD: "PASSWORD", STRING: "STRING", NUMBER: "NUMBER", BOOLEAN: "BOOLEAN" } };
   }
   if (request.endsWith("/scheduler")) return { StartupType: { RECURRING: "RECURRING" } };
+  if (request.endsWith("/uikit")) return { UIKitSurfaceType: { MODAL: "modal" } };
   return {};
 }
 
