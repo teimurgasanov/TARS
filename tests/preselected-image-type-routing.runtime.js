@@ -50,7 +50,7 @@ function financialPayload() {
   };
 }
 
-function runtime(primaryPayload = workPhotoPayload()) {
+function runtime(primaryPayload = workPhotoPayload(), options = {}) {
   const loaded = loadTrackedAppWithGuard();
   const app = Object.create(loaded.TarsReportApp.prototype);
   const file = { _id: "preselected-photo", id: "preselected-photo", name: "result.jpg", type: "image/jpeg", url: "/file-upload/preselected-photo/result.jpg" };
@@ -68,7 +68,7 @@ function runtime(primaryPayload = workPhotoPayload()) {
     getRoomReader() {
       return {
         async getById(id) { return String(id) === room.id ? room : undefined; },
-        async getByName(name) { return /^(?:otchet|отч[её]?ты?)$/i.test(String(name)) ? reportRoom : undefined; },
+        async getByName(name) { return options.reportRoomUnavailable ? undefined : /^(?:otchet|отч[её]?ты?)$/i.test(String(name)) ? reportRoom : undefined; },
         async getMessages() { return []; }
       };
     },
@@ -153,10 +153,18 @@ async function execute(state) {
   assert.ok(!state.sent.some((message) => message.text === "Что вы отправили?"), "post-upload manual selection must stay disabled");
 
   const safeUnknown = runtime(safeUnknownPhotoPayload());
+  safeUnknown.message.text = "чек по операции";
+  safeUnknown.message.file.name = "receipt-bank-transfer.jpg";
+  safeUnknown.message.files[0].name = "receipt-bank-transfer.jpg";
   await execute(safeUnknown);
-  assert.deepStrictEqual(safeUnknown.providerCalls, ["image_type_v3"], "safe parsed UNKNOWN must not trigger a second classifier, receipt OCR, or Yandex");
-  assert.ok(safeUnknown.sent.some((message) => message.room === safeUnknown.reportRoom), "explicit PHOTO must continue to the photo route when Vision finds no financial/document evidence");
+  assert.deepStrictEqual(safeUnknown.providerCalls, ["image_type_v3"], "safe parsed UNKNOWN must not trigger a second classifier, receipt OCR, or Yandex even when old filename/text heuristics look financial");
+  assert.ok(safeUnknown.sent.some((message) => message.room === safeUnknown.reportRoom), "explicit PHOTO plus clean Vision safety evidence must override old filename/text heuristics");
   assert.ok(safeUnknown.sent.some((message) => message.text === "✅ ФОТО РАБОТЫ ПРИНЯТО"), "safe parsed UNKNOWN must produce the existing photo success result");
+
+  const unavailableReport = runtime(safeUnknownPhotoPayload(), { reportRoomUnavailable: true });
+  await execute(unavailableReport);
+  assert.deepStrictEqual(unavailableReport.providerCalls, ["image_type_v3"], "a selected PHOTO publisher failure must stop safely without falling through to receipt OCR/Yandex");
+  assert.ok(!unavailableReport.sent.some((message) => message.room === unavailableReport.reportRoom), "publisher failure must not fabricate a report photo");
 
   const financial = runtime(financialPayload());
   await execute(financial);

@@ -2149,9 +2149,14 @@ var require_upload_duplicate_guard = __commonJS({
     }
     async function fastForwardPersonalReportPhotos(message, read, persistence, modify, logger, http, config, explicitPhotoIntent = false, diagnostic, options = {}) {
       if (!message || !isPersonalTarsRoom(message.room)) return false;
+      const visionSafetyOnly = explicitPhotoIntent && options.manualPhotoSafetyOnly === true;
       const intent = directFileIntent(message);
-      if (intent === "mailing" || intent === "receipt") return false;
-      if (blocksPersonalPhotoForwardingText(normalizedMessageDescriptor(message))) return false;
+      // After an explicit PHOTO button choice, filename/message heuristics are
+      // not classifiers and must not veto the upload. Primary Vision below is
+      // the sole type-safety authority: only positive financial/document
+      // evidence can block the work-photo route.
+      if (!visionSafetyOnly && (intent === "mailing" || intent === "receipt")) return false;
+      if (!visionSafetyOnly && blocksPersonalPhotoForwardingText(normalizedMessageDescriptor(message))) return false;
       const imageFiles = messageImageFiles(message);
       if (!imageFiles.length) return false;
       const room = await findOtchetRoom(read);
@@ -6867,6 +6872,13 @@ var require_upload_duplicate_guard = __commonJS({
           }
           if (logger) logger.info(`MEDIA_V2_WORK_PHOTO_RESULT message=${String(message.id || "none")} result=${String(photoResult)}`);
           return { handled: true, status: photoResult === true ? "work-photo-forwarded" : String(photoResult), result: photoResult };
+        }
+        // A user-selected PHOTO must never fall through into receipt OCR just
+        // because the report publisher or upload forwarder could not finish.
+        // Vision has already performed the only permitted type-safety check.
+        if (forcedIntent === "photo") {
+          if (logger) logger.warn(`MEDIA_V2_WORK_PHOTO_STOP message=${String(message.id || "none")} result=not-forwarded`);
+          return { handled: true, status: "work-photo-not-forwarded", result: false };
         }
       }
       const processingStatusManager = createReceiptProcessingStatusManager(message, read, persistence, modify, logger, allowProcessingStatus);

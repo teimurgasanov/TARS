@@ -23,6 +23,7 @@ on:
       - feature/personal-image-router-v3
       - fix/personal-image-selector-visible
       - fix/preselected-photo-financial-veto-only
+      - fix/photo-button-vision-safety-only
   pull_request:
   workflow_dispatch:
 
@@ -78,6 +79,8 @@ jobs:
       || github.base_ref == 'fix/personal-image-selector-visible'
       || github.head_ref == 'fix/preselected-photo-financial-veto-only'
       || github.base_ref == 'fix/preselected-photo-financial-veto-only'
+      || github.head_ref == 'fix/photo-button-vision-safety-only'
+      || github.base_ref == 'fix/photo-button-vision-safety-only'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
