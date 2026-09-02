@@ -16,6 +16,7 @@ on:
       - integration/manual-selection-current-develop
       - feature/vision-dominant-image-routing
       - integration/vision-dominant-current-develop
+      - fix/vision-high-confidence-authority
   pull_request:
   workflow_dispatch:
 
@@ -57,6 +58,8 @@ jobs:
       || github.base_ref == 'feature/vision-dominant-image-routing'
       || github.head_ref == 'integration/vision-dominant-current-develop'
       || github.base_ref == 'integration/vision-dominant-current-develop'
+      || github.head_ref == 'fix/vision-high-confidence-authority'
+      || github.base_ref == 'fix/vision-high-confidence-authority'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
