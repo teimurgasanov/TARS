@@ -1,0 +1,210 @@
+"use strict";
+
+const assert = require("assert");
+const fs = require("fs");
+const {
+  loadTrackedAppWithGuard,
+  readReceiptOcrConfigFromCanonicalBundle
+} = require("./helpers/canonical-tars-runtime");
+
+const loaded = loadTrackedAppWithGuard();
+const api = loaded.__testGuard;
+assert(api, "TARS test guard is unavailable");
+
+const YANDEX_URL = "https://ai.api.cloud.yandex.net/v1/responses";
+const folderId = "b1gvbvcq3d88ftip6rfq";
+const yandexConfig = {
+  yandexAiStudioApiKey: "yandex-test-secret",
+  yandexAiStudioFolderId: folderId,
+  yandexAiStudioModel: "qwen3.6-35b-a3b",
+  openaiApiKey: "openai-test-secret",
+  openaiReceiptModel: "gpt-4.1-mini",
+  timeZone: "Europe/Samara",
+  cutoffHour: 0
+};
+
+function responseFor(value, statusCode = 200) {
+  return {
+    statusCode,
+    data: { output: [{ content: [{ type: "output_text", text: JSON.stringify(value) }] }] }
+  };
+}
+
+const imageClassification = {
+  schema_version: "personal-image-classification-v1",
+  kind: "work_photo",
+  confidence: 0.96,
+  work_photo: { category: "hair", client_type: "female", service: "styling" },
+  safety: { is_banking: false, is_document: false, has_payment_ui: false, has_receipt_text: false },
+  reason_code: "WORK_PHOTO_HAIR"
+};
+
+const primaryWorkPhoto = {
+  kind: "work_photo",
+  confidence: "high",
+  service_kind: "hair",
+  has_payment_ui: false,
+  has_receipt_layout: false,
+  has_financial_document: false,
+  has_document_layout: false,
+  has_visible_client: true,
+  has_visible_service_result: true,
+  has_visible_hair_result: true,
+  has_visible_nail_result: false,
+  has_visible_brow_lash_result: false,
+  has_salon_context: true,
+  has_messaging_ui: false,
+  is_receipt: false,
+  is_banking: false,
+  is_document: false,
+  has_receipt_text: false,
+  is_mailing_proof: false,
+  is_screenshot_of_chat: false,
+  visual_type: "hair_work_photo",
+  service_type: "haircut",
+  date: null,
+  amount: null,
+  amount_text: null,
+  amount_label: null,
+  status: "unknown",
+  bank: null
+};
+
+const dedicatedWorkPhoto = {
+  is_work_photo: true,
+  is_document_or_screen: false,
+  is_receipt_or_banking: false,
+  has_visible_client: true,
+  has_visible_service_area: true,
+  kind: "hair",
+  confidence: 0.97,
+  evidence: ["visible hair result"]
+};
+
+const receipt = {
+  is_receipt: true,
+  has_readable_text: true,
+  visual_type: "bank_receipt",
+  is_mailing_proof: false,
+  service_type: "unknown",
+  is_screenshot_of_chat: false,
+  date: "2026-09-03",
+  amount: 1300,
+  amount_text: "1 300 RUB",
+  amount_label: "Amount",
+  status: "success",
+  bank: "TEST BANK"
+};
+
+async function run() {
+  const yandex = api.visionProviderForConfig(yandexConfig, "gpt-5.6-sol");
+  assert.strictEqual(yandex.id, "yandex_ai_studio");
+  assert.strictEqual(yandex.url, YANDEX_URL);
+  assert.strictEqual(yandex.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
+  assert.strictEqual(yandex.headers.Authorization, "Api-Key yandex-test-secret");
+  assert.strictEqual(yandex.includeImageDetail, false);
+
+  const openai = api.visionProviderForConfig({ openaiApiKey: "openai-test-secret" }, "gpt-5.6-sol");
+  assert.strictEqual(openai.id, "openai");
+  assert.strictEqual(openai.url, "https://api.openai.com/v1/responses");
+  assert.strictEqual(openai.model, "gpt-5.6-sol");
+  assert.strictEqual(openai.headers.Authorization, "Bearer openai-test-secret");
+  assert.strictEqual(openai.includeImageDetail, true);
+
+  const incompleteYandex = api.visionProviderForConfig({
+    yandexAiStudioApiKey: "yandex-test-secret",
+    openaiApiKey: "openai-test-secret"
+  }, "gpt-4.1-mini");
+  assert.strictEqual(incompleteYandex.id, "openai", "incomplete Yandex settings must preserve the OpenAI fallback");
+  assert.strictEqual(api.normalizedYandexAiStudioModel("bad/model"), "qwen3.6-35b-a3b");
+
+  const calls = [];
+  const http = {
+    post: async (url, request) => {
+      calls.push({ url, request });
+      if (request.data.text && request.data.text.format && request.data.text.format.name === "personal_image_classification_v1") {
+        return responseFor(imageClassification);
+      }
+      if (request.data.text && request.data.text.format && request.data.text.format.name === "tars_primary_image_vision_v1") {
+        return responseFor(primaryWorkPhoto);
+      }
+      const prompt = request.data.input[0].content.find((part) => part.type === "input_text").text;
+      return responseFor(prompt.includes("is_work_photo") ? dedicatedWorkPhoto : receipt);
+    }
+  };
+
+  const classification = await api.requestOpenAiImageClassification(
+    { name: "classification.png", type: "image/png" },
+    Buffer.from([21, 22, 23]),
+    http,
+    yandexConfig
+  );
+  assert.strictEqual(classification.valid, true);
+  assert.strictEqual(classification.value.kind, "work_photo");
+
+  const primary = await api.primaryVisionDecisionForImage(
+    { id: "primary-upload", name: "primary.png", type: "image/png" },
+    Buffer.from([31, 32, 33]),
+    http,
+    yandexConfig
+  );
+  assert.strictEqual(primary.kind, "work_photo");
+  assert.strictEqual(primary.confidence, "high");
+
+  const dedicated = await api.requestOpenAiWorkPhotoCheck(
+    { name: "dedicated.png", type: "image/png" },
+    Buffer.from([41, 42, 43]),
+    http,
+    yandexConfig
+  );
+  assert.strictEqual(dedicated, "work");
+
+  const receiptCandidate = await api.requestOpenAiReceiptCheck(
+    { name: "receipt.png", type: "image/png" },
+    Buffer.from([51, 52, 53]),
+    http,
+    yandexConfig,
+    "2026-09-03"
+  );
+  assert.strictEqual(receiptCandidate.receiptDate, "2026-09-03");
+  assert.strictEqual(receiptCandidate.receiptAmount, 1300);
+
+  assert.strictEqual(calls.length, 4, "each isolated Vision path must make one provider call");
+  for (const call of calls) {
+    assert.strictEqual(call.url, YANDEX_URL);
+    assert.strictEqual(call.request.headers.Authorization, "Api-Key yandex-test-secret");
+    assert.strictEqual(call.request.data.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
+    assert.strictEqual(call.request.data.store, false);
+    const image = call.request.data.input[0].content.find((part) => part.type === "input_image");
+    assert(image && image.image_url.startsWith("data:image/png;base64,"));
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(image, "detail"), false, "Yandex image input must use its compatible shape");
+  }
+
+  const config = await readReceiptOcrConfigFromCanonicalBundle({
+    yandex_ai_studio_api_key: "runtime-yandex-key",
+    yandex_ai_studio_folder_id: folderId,
+    yandex_ai_studio_model: "qwen3.6-35b-a3b",
+    openai_receipt_api_key: "runtime-openai-key"
+  });
+  assert.strictEqual(config.yandexAiStudioApiKey, "runtime-yandex-key");
+  assert.strictEqual(config.yandexAiStudioFolderId, folderId);
+  assert.strictEqual(config.yandexAiStudioModel, "qwen3.6-35b-a3b");
+  assert.strictEqual(config.openaiApiKey, "runtime-openai-key");
+
+  const source = fs.readFileSync("TarsReportApp.js", "utf8");
+  for (const id of ["yandex_ai_studio_api_key", "yandex_ai_studio_folder_id", "yandex_ai_studio_model"]) {
+    const start = source.indexOf(`id: "${id}"`);
+    const end = source.indexOf("});", start);
+    assert(start >= 0 && end > start, `setting not found: ${id}`);
+    const setting = source.slice(start, end);
+    assert.match(setting, /public:\s*false/, `${id} must remain private`);
+  }
+  assert(!source.includes("yandex-test-secret"), "test secret must not enter production source");
+
+  console.log("PASS: Yandex AI Studio is an isolated private Vision provider with unchanged OpenAI fallback");
+}
+
+run().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
