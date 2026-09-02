@@ -29,6 +29,35 @@
     }
   },
   {
+    "id": "dasha-womens-hair-closeup",
+    "expectedRoute": "photo",
+    "payload": {
+      "class": "work_photo",
+      "kind": "work_photo",
+      "visual_type": "hair_work_photo",
+      "service_kind": "hair",
+      "service_type": "haircut",
+      "confidence": "high",
+      "is_receipt": false,
+      "is_banking": false,
+      "is_document": false,
+      "has_payment_ui": false,
+      "has_receipt_layout": false,
+      "has_financial_document": false,
+      "has_qr_payment_document": false,
+      "has_document_layout": false,
+      "has_financial_text": false,
+      "has_receipt_text": false,
+      "has_visible_client": true,
+      "has_visible_service_result": false,
+      "has_visible_hair_result": false,
+      "has_visible_nail_result": false,
+      "has_visible_brow_lash_result": false,
+      "has_salon_context": true,
+      "has_messaging_ui": false
+    }
+  },
+  {
     "id": "female-hair-finished-style",
     "expectedRoute": "photo",
     "payload": {

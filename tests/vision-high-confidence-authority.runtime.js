@@ -38,9 +38,10 @@ function source(id) {
   return { file, content: Buffer.from(`vision-authority-${id}`) };
 }
 
-function runtimeEnvironment(sourceImage, http) {
+function runtimeEnvironment(sourceImage, http, caseId) {
+  const safeCaseId = String(caseId || "work-photo").replace(/[^a-z0-9-]/gi, "-");
   const appUser = { id: "app-user", username: "tars" };
-  const personalRoom = { id: "personal-room", slugifiedName: "tars-aleksei", type: "p" };
+  const personalRoom = { id: `personal-room-${safeCaseId}`, slugifiedName: `tars-${safeCaseId}`, type: "p" };
   const reportRoom = { id: "report-room", slugifiedName: "otchet", type: "c" };
   const sent = [];
   let sequence = 0;
@@ -102,9 +103,9 @@ function runtimeEnvironment(sourceImage, http) {
     getDeleter() { return { async deleteMessage() {} }; }
   };
   const message = {
-    id: "aleksei-message",
+    id: `${safeCaseId}-message`,
     room: personalRoom,
-    sender: { id: "aleksei-user", username: "aleksei" },
+    sender: { id: `${safeCaseId}-user`, username: safeCaseId },
     file: sourceImage.file,
     files: [sourceImage.file],
     text: ""
@@ -125,11 +126,13 @@ const logger = { info() {}, warn() {}, error() {} };
 (async () => {
   const guard = loadTrackedAppWithGuard().__testGuard;
   const byId = Object.fromEntries(fixtures.map((fixture) => [fixture.id, fixture]));
+  const primaryDecisions = {};
 
   for (const fixture of fixtures) {
     const image = source(fixture.id);
     const http = provider(fixture.payload);
     const decision = await guard.primaryVisionDecisionForImage(image.file, image.content, http, config, logger);
+    primaryDecisions[fixture.id] = decision;
     assert.strictEqual(guard.primaryVisionDominantKind(decision), fixture.expectedRoute, `${fixture.id}: unexpected dominant route`);
     if (fixture.expectedRoute === "photo") {
       assert.strictEqual(decision.financial_block, false, `${fixture.id}: indirect text must not become a financial veto`);
@@ -142,34 +145,47 @@ const logger = { info() {}, warn() {}, error() {} };
     }
   }
 
-  const aleksei = byId["aleksei-mens-fade-closeup"];
-  const alekseiImage = source(`${aleksei.id}-runtime`);
-  const alekseiHttp = provider(aleksei.payload);
-  const runtime = runtimeEnvironment(alekseiImage, alekseiHttp);
-  const result = await guard.processPersonalMediaV2(
-    runtime.message,
-    runtime.read,
-    runtime.persistence,
-    runtime.modify,
-    logger,
-    alekseiHttp,
-    config,
-    "photo",
-    false
-  );
-  assert.strictEqual(result.handled, true, "Aleksei fixture must be terminally handled");
-  assert.strictEqual(result.status, "work-photo-forwarded", "Aleksei fixture must use the report-photo route");
-  assert.ok(runtime.sent.some((message) => message.room === runtime.reportRoom && /^\[ \]\(https:\/\/gsnvlabchat\.ru\//.test(String(message.text))), "work photo must be forwarded to Otchet");
-  assert.ok(runtime.sent.some((message) => message.room === runtime.message.room && message.text === "✅ ФОТО РАБОТЫ ПРИНЯТО"), "master must receive the existing Photo accepted result");
-  assert.strictEqual(alekseiHttp.calls.filter((call) => call === "primary").length, 1, "one canonical image must have one primary Vision call");
-  assert.strictEqual(alekseiHttp.calls.filter((call) => call === "dedicated").length, 0, "HIGH WORK_PHOTO must not require dedicated confirmation");
-  assert.strictEqual(alekseiHttp.calls.filter((call) => call === "yandex").length, 0, "HIGH WORK_PHOTO must make zero receipt OCR calls");
+  for (const caseId of ["aleksei-mens-fade-closeup", "dasha-womens-hair-closeup"]) {
+    const fixture = byId[caseId];
+    const primaryDecision = primaryDecisions[caseId];
+    assert.strictEqual(primaryDecision.kind, "work_photo", `${caseId}: primary Vision class must remain WORK_PHOTO`);
+    assert.strictEqual(primaryDecision.service_kind, "hair", `${caseId}: service kind must be HAIR`);
+    assert.strictEqual(primaryDecision.confidence, "high", `${caseId}: primary Vision confidence must remain HIGH`);
+    assert.strictEqual(primaryDecision.financial_block, false, `${caseId}: no concrete financial evidence may veto the result`);
+    assert.strictEqual(guard.primaryVisionDominantKind(primaryDecision), "photo", `${caseId}: HIGH WORK_PHOTO must be final`);
+
+    const image = source(`${caseId}-runtime`);
+    const http = provider(fixture.payload);
+    const runtime = runtimeEnvironment(image, http, caseId);
+    const result = await guard.processPersonalMediaV2(
+      runtime.message,
+      runtime.read,
+      runtime.persistence,
+      runtime.modify,
+      logger,
+      http,
+      config,
+      "photo",
+      false
+    );
+    assert.strictEqual(result.handled, true, `${caseId}: fixture must be terminally handled`);
+    assert.strictEqual(result.status, "work-photo-forwarded", `${caseId}: fixture must use the report-photo route`);
+    assert.ok(runtime.sent.some((message) => message.room === runtime.reportRoom && /^\[ \]\(https:\/\/gsnvlabchat\.ru\//.test(String(message.text))), `${caseId}: work photo must be forwarded to Otchet`);
+    assert.ok(runtime.sent.some((message) => message.room === runtime.message.room && message.text === "✅ ФОТО РАБОТЫ ПРИНЯТО"), `${caseId}: master must receive the existing Photo accepted result`);
+    assert.strictEqual(http.calls.filter((call) => call === "primary").length, 1, `${caseId}: one canonical image must have one primary Vision call`);
+    assert.strictEqual(http.calls.filter((call) => call === "dedicated").length, 0, `${caseId}: HIGH WORK_PHOTO must not require dedicated confirmation`);
+    assert.strictEqual(http.calls.filter((call) => call === "yandex").length, 0, `${caseId}: HIGH WORK_PHOTO must make zero receipt OCR calls`);
+  }
 
   const sourceText = fs.readFileSync(path.join(__dirname, "..", "TarsReportApp.js"), "utf8");
   assert.match(sourceText, /const financialBlock = Boolean\(isBanking \|\| hasPaymentUi \|\| hasReceiptLayout \|\| hasFinancialDocument \|\| hasDocumentLayout\)/,
     "only concrete visual financial/document evidence may veto HIGH WORK_PHOTO");
   assert.doesNotMatch(sourceText, /financialBlock = Boolean\([^\n]*hasFinancialText/,
     "incidental financial text must not be a work-photo veto");
+  assert.match(sourceText, /const authoritativeWorkPhoto = state === "parsed" && requestedClass === "work_photo" && confidence === "high" && !financialBlock/,
+    "HIGH WORK_PHOTO must become authoritative before secondary semantic checks");
+  assert.match(sourceText, /if \(decision\.kind === "work_photo"\) return "photo"/,
+    "dominant HIGH WORK_PHOTO must not require a second service-area confirmation");
   assert.match(sourceText, /primary-vision-high-work-photo/,
     "HIGH WORK_PHOTO must remain terminal before the dedicated fallback");
 

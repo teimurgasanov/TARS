@@ -3246,9 +3246,10 @@ var require_upload_duplicate_guard = __commonJS({
       // remains authoritative whenever Vision itself selects a receipt,
       // transfer or document class.
       const financialBlock = Boolean(isBanking || hasPaymentUi || hasReceiptLayout || hasFinancialDocument || hasDocumentLayout);
+      const authoritativeWorkPhoto = state === "parsed" && requestedClass === "work_photo" && confidence === "high" && !financialBlock;
       let kind = state === "parsed" ? requestedClass : "unknown";
       if (financialBlock && kind === "work_photo") kind = isBanking ? "bank_transfer" : hasReceiptLayout ? "receipt" : "document";
-      else if (kind === "work_photo" && (!hasVisibleServiceResult || serviceKind === "hair" && !hasVisibleClient)) kind = "unknown";
+      else if (kind === "work_photo" && !authoritativeWorkPhoto && (!hasVisibleServiceResult || serviceKind === "hair" && !hasVisibleClient)) kind = "unknown";
       else if (kind === "mailing" && !mailingProof && !hasMessagingUi) kind = "unknown";
       return {
         kind,
@@ -3280,7 +3281,7 @@ var require_upload_duplicate_guard = __commonJS({
     function primaryVisionDominantKind(decision) {
       if (!decision || decision.confidence !== "high") return "";
       if (decision.financial_block || decision.kind === "receipt" || decision.kind === "bank_transfer" || decision.kind === "document") return "receipt";
-      if (decision.kind === "work_photo" && decision.has_visible_service_result && (decision.service_kind !== "hair" || decision.has_visible_client)) return "photo";
+      if (decision.kind === "work_photo") return "photo";
       if (decision.kind === "mailing") return "mailing";
       return "";
     }
