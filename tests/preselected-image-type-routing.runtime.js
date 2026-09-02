@@ -134,10 +134,13 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
     timeZone: "Europe/Samara",
     cutoffHour: 0
   });
-  app.activePhotoReportIntent = async () => true;
-  app.activeTransferReportIntent = async () => false;
-  app.activeMailingReportIntent = async () => false;
+  const selectedIntent = String(runtimeOptions.intent || "photo");
+  app.activePhotoReportIntent = async () => selectedIntent === "photo";
+  app.activeTransferReportIntent = async () => selectedIntent === "receipt";
+  app.activeMailingReportIntent = async () => selectedIntent === "mailing";
   app.clearPhotoReportIntent = async () => {};
+  app.clearTransferReportIntent = async () => {};
+  app.clearMailingReportIntent = async () => {};
   app.handleMonthlyScheduleMessage = async () => false;
   app.handleMasterChatTextMessage = async () => false;
   app.handleLatenessTextMessage = async () => false;
@@ -208,7 +211,24 @@ async function execute(state) {
   assert.strictEqual(allProvidersUnavailable.providerCalls.filter((call) => call === "image_type_v3").length, 1, "a failed primary Vision request must not be repeated");
   assert.ok(!allProvidersUnavailable.sent.some((message) => message.room === allProvidersUnavailable.reportRoom), "the fallback must fail closed when Yandex is unavailable");
 
-  console.log("PASS: selected PHOTO uses one Vision attempt and a fail-closed Yandex safety fallback when OpenAI is unavailable");
+  const receiptWithVisionUnavailable = runtime(financialPayload(), {
+    intent: "receipt",
+    openaiStatus: 403,
+    yandexText: "Сбербанк. Чек по операции. Перевод выполнен. Сумма 1200 ₽. 02.09.2026"
+  });
+  receiptWithVisionUnavailable.message.file.name = "receipt.jpg";
+  receiptWithVisionUnavailable.message.files[0].name = "receipt.jpg";
+  await execute(receiptWithVisionUnavailable);
+  assert.strictEqual(receiptWithVisionUnavailable.providerCalls.filter((call) => call === "image_type_v3").length, 1, "selected RECEIPT must make only one failed primary Vision attempt before strict validation");
+  assert.ok(receiptWithVisionUnavailable.providerCalls.includes("yandex"), "selected RECEIPT must continue into the existing strict Yandex/OCR validation when primary Vision is unavailable");
+  assert.ok(!receiptWithVisionUnavailable.sent.some((message) => /Vision не подтвердил финансовый документ/.test(String(message.text || ""))), "provider unavailability must not be reported as a negative Vision classification");
+
+  const nonReceiptSelectedAsReceipt = runtime(workPhotoPayload(), { intent: "receipt" });
+  await execute(nonReceiptSelectedAsReceipt);
+  assert.deepStrictEqual(nonReceiptSelectedAsReceipt.providerCalls, ["image_type_v3"], "a positive non-receipt Vision decision must still block before OCR");
+  assert.ok(nonReceiptSelectedAsReceipt.sent.some((message) => /Vision не подтвердил финансовый документ/.test(String(message.text || ""))), "a positive non-receipt Vision decision must retain the existing rejection UX");
+
+  console.log("PASS: selected PHOTO keeps its fail-closed safety fallback and selected RECEIPT reaches strict validation when OpenAI Vision is unavailable");
 })().catch((error) => {
   console.error(error && error.stack || error);
   process.exitCode = 1;

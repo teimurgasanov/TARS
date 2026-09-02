@@ -8457,6 +8457,7 @@ var C = class extends j.App {
         let explicitTransferIntent = false;
         let explicitMailingIntent = false;
         let selectedPrimaryDecision;
+        let selectedPrimaryVisionUnavailable = false;
         if (hasPersonalImageUpload) {
           [explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent] = await Promise.all([
             this.activePhotoReportIntent(n, e.room),
@@ -8476,6 +8477,7 @@ var C = class extends j.App {
             selectedPrimaryDecision = await G.primaryVisionDecisionForPersonalMessage(e, n, t, i, this.getLogger(), primaryRoutingDiagnostic);
             visionRoute = G.primaryVisionDominantKind(selectedPrimaryDecision);
           } catch (visionError) {
+            selectedPrimaryVisionUnavailable = true;
             this.getLogger().warn(`Primary Vision intent verification failed: ${visionError && visionError.message || visionError}`);
           }
           G.scheduleImageClassificationV1Shadow({
@@ -8502,7 +8504,13 @@ var C = class extends j.App {
           ));
           const selectionConfirmed = selectedRoute === "photo"
             ? !photoVisionBlocked
-            : Boolean(visionRoute && visionRoute === selectedRoute);
+            // A transport/provider failure is not evidence that the selected
+            // image is non-financial. Let the existing strict receipt path
+            // decide using its unchanged OCR/date/amount/status safeguards.
+            // Parsed UNKNOWN or a positive non-receipt class still blocks.
+            : selectedRoute === "receipt" && selectedPrimaryVisionUnavailable
+              ? true
+              : Boolean(visionRoute && visionRoute === selectedRoute);
           if (!selectionConfirmed) {
             if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
             if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);
