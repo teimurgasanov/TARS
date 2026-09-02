@@ -14,6 +14,7 @@ on:
       - diagnostic/personal-image-source-mime-v2
       - feature/manual-image-type-selection
       - integration/manual-selection-current-develop
+      - feature/vision-dominant-image-routing
   pull_request:
   workflow_dispatch:
 
@@ -51,6 +52,8 @@ jobs:
       || github.base_ref == 'feature/manual-image-type-selection'
       || github.head_ref == 'integration/manual-selection-current-develop'
       || github.base_ref == 'integration/manual-selection-current-develop'
+      || github.head_ref == 'feature/vision-dominant-image-routing'
+      || github.base_ref == 'feature/vision-dominant-image-routing'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
