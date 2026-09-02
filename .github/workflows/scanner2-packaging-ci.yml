@@ -18,6 +18,7 @@ on:
       - integration/vision-dominant-current-develop
       - fix/vision-high-confidence-authority
       - integration/vision-high-authority-current-develop
+      - fix/vision-maximum-authority
   pull_request:
   workflow_dispatch:
 
@@ -63,6 +64,8 @@ jobs:
       || github.base_ref == 'fix/vision-high-confidence-authority'
       || github.head_ref == 'integration/vision-high-authority-current-develop'
       || github.base_ref == 'integration/vision-high-authority-current-develop'
+      || github.head_ref == 'fix/vision-maximum-authority'
+      || github.base_ref == 'fix/vision-maximum-authority'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
