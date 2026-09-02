@@ -27,6 +27,7 @@ on:
       - feature/image-classification-v1-shadow
       - fix/receipt-openai-unavailable-fallback
       - fix/receipt-openai-runtime-fallback
+      - feature/tars-maximum-vision
   pull_request:
   workflow_dispatch:
 
@@ -90,6 +91,8 @@ jobs:
       || github.base_ref == 'fix/receipt-openai-unavailable-fallback'
       || github.head_ref == 'fix/receipt-openai-runtime-fallback'
       || github.base_ref == 'fix/receipt-openai-runtime-fallback'
+      || github.head_ref == 'feature/tars-maximum-vision'
+      || github.base_ref == 'feature/tars-maximum-vision'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
