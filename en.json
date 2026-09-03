@@ -61,5 +61,7 @@
     "lateness_command_params": "@username minutes [DD.MM.YYYY]",
     "lateness_command_description": "Record a master's lateness and payroll penalty",
     "approve_receipt_command_params": "@username amount [DD.MM.YYYY]",
-    "approve_receipt_command_description": "Manually approve a rejected receipt (e.g. one stuck in \"processing\" status); owner and Shura only"
+    "approve_receipt_command_description": "Manually approve a rejected receipt (e.g. one stuck in \"processing\" status); owner and Shura only",
+    "receipt_replay_command_params": "<uploadId>",
+    "receipt_replay_command_description": "Read-only receipt extraction replay for an existing canonical upload; owner/admin only"
 }
