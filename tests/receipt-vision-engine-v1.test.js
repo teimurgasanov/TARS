@@ -82,7 +82,11 @@ function provider(scenario, calls, engineRequests) {
         if (scenario.visionFailure === "schema-mismatch") return { statusCode: 200, data: { output_text: JSON.stringify({ amount: scenario.ocrAmount }) } };
         return { statusCode: 200, data: { output_text: JSON.stringify(scenario.vision) } };
       }
-      return { statusCode: 200, data: { output_text: JSON.stringify(legacyReceipt(scenario.ocrAmount)) } };
+      const visionAvailable = !scenario.visionFailure && scenario.vision && typeof scenario.vision === "object";
+      const defaultAmount = visionAvailable ? scenario.vision.amount : scenario.ocrAmount;
+      const amount = kind === "amount-focus" && Object.prototype.hasOwnProperty.call(scenario, "focusAmount") ? scenario.focusAmount : kind === "legacy-primary" && Object.prototype.hasOwnProperty.call(scenario, "legacyAmount") ? scenario.legacyAmount : defaultAmount;
+      const date = kind === "date-focus" && scenario.focusDate ? scenario.focusDate : visionAvailable ? scenario.vision.operation_date : requiredDate;
+      return { statusCode: 200, data: { output_text: JSON.stringify(legacyReceipt(amount, { date })) } };
     }
   };
 }
@@ -124,15 +128,25 @@ async function run(label, scenario) {
   }
 }
 
-function assertVisionAuthority(runResult, expectedAmount, label) {
+function sameAmount(left, right) {
+  return Number.isFinite(Number(left)) && Number.isFinite(Number(right)) && Math.abs(Number(left) - Number(right)) < 0.01;
+}
+
+function assertVisionAuthority(runResult, expectedAmount, label, expectedFocusedPass) {
   assert.strictEqual(runResult.result.ok, true, `${label}: receipt must be accepted`);
   assert.strictEqual(runResult.result.receiptDate, requiredDate, `${label}: Vision date must be authoritative`);
   assert.match(runResult.result.receiptTime, /^\d{2}:\d{2}(?::\d{2})?$/, `${label}: Vision time must be authoritative`);
   assert.strictEqual(runResult.result.receiptAmount, expectedAmount, `${label}: Vision total must be authoritative`);
   assert.strictEqual(runResult.calls[0], "vision-engine", `${label}: semantic Vision must run first`);
   assert.strictEqual(runResult.calls.filter((call) => call === "vision-engine").length, 1, `${label}: the image must receive one semantic Vision request`);
-  assert(runResult.calls.slice(1).every((call) => call.startsWith("yandex:")), `${label}: only passive Yandex verification may follow authoritative Vision`);
-  assert(!runResult.calls.includes("legacy-primary") && !runResult.calls.includes("amount-focus") && !runResult.calls.includes("date-focus"), `${label}: legacy OpenAI must not overwrite authoritative Vision`);
+  assert(!runResult.calls.includes("legacy-primary"), `${label}: a full legacy primary pass must not overwrite authoritative Vision`);
+  if (expectedFocusedPass === null) {
+    assert(runResult.calls.filter((call) => call === "amount-focus" || call === "date-focus").length <= 1, `${label}: disagreement resolution must stay bounded to one field pass`);
+  } else if (expectedFocusedPass) {
+    assert.strictEqual(runResult.calls.filter((call) => call === expectedFocusedPass).length, 1, `${label}: exactly one targeted ${expectedFocusedPass} pass must resolve the field dispute`);
+  } else {
+    assert(!runResult.calls.includes("amount-focus") && !runResult.calls.includes("date-focus"), `${label}: focused checks must not run without an independent disagreement`);
+  }
 }
 
 (async () => {
@@ -191,7 +205,7 @@ function assertVisionAuthority(runResult, expectedAmount, label) {
     ocrAmount: 1,
     yandexStudio: true
   });
-  assertVisionAuthority(yandexStudio, 1300, "Yandex AI Studio");
+  assertVisionAuthority(yandexStudio, 1300, "Yandex AI Studio", "amount-focus");
   assert.match(yandexStudio.engineRequests[0].model, /^gpt:\/\/testfolder\/qwen3\.6-35b-a3b\/latest$/);
   assert.strictEqual(yandexStudio.engineRequests[0].max_output_tokens, 4096, "Yandex reasoning output must have enough room for strict JSON");
   assert.strictEqual(yandexStudio.engineRequests[0].input[0].content[1].detail, undefined, "Yandex input_image must not receive OpenAI-only detail");
@@ -210,11 +224,11 @@ function assertVisionAuthority(runResult, expectedAmount, label) {
   assert.strictEqual(yandexStudioFallback.engineRequests[2].model, "gpt-4.1-mini");
 
   const d = await run("ocr-7", { vision: engineResult(1000, { amount_label: "Сумма платежа" }), ocrAmount: 7 });
-  assertVisionAuthority(d, 1000, "D");
-  assert(d.logs.some((line) => /RECEIPT_VISION_ENGINE_V1 authority=high .*amount_disagreement=true/.test(line)), "D: conflict must be telemetry-only");
+  assertVisionAuthority(d, 1000, "D", "amount-focus");
+  assert(d.logs.some((line) => /RECEIPT_VISION_ENGINE_V1 authority=high .*amount_disagreement=true/.test(line)), "D: conflict must be recorded before targeted resolution");
 
   const e = await run("ocr-1", { vision: engineResult(1300, { amount_label: "Сумма списания" }), ocrAmount: 1 });
-  assertVisionAuthority(e, 1300, "E");
+  assertVisionAuthority(e, 1300, "E", "amount-focus");
 
   const f = await run("ocr-0", { vision: engineResult(900), ocrAmount: 0 });
   assert.strictEqual(f.result.ok, true, "F: Vision must supply a valid amount when OCR returns zero");
@@ -263,7 +277,7 @@ function assertVisionAuthority(runResult, expectedAmount, label) {
       ocrAmount,
       ocrText: yandexText(ocrAmount, extraText)
     });
-    assertVisionAuthority(outcome, expectedAmount, `adversarial:${label}`);
+    assertVisionAuthority(outcome, expectedAmount, `adversarial:${label}`, null);
   }
 
   for (const unsafe of [

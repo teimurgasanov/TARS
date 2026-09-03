@@ -5086,7 +5086,7 @@ var require_upload_duplicate_guard = __commonJS({
       }
       const parsed = parseReceiptVisionEngineV1(openAiReceiptOutputText(payload));
       if (!parsed && fallbackProvider) return useFallbackProvider("invalid_response");
-      return parsed;
+      return parsed ? { ...parsed, providerId: provider.id } : void 0;
     }
     function normalizeOpenAiStatus(value) {
       return String(value || "").trim().toLowerCase().replace(/ё/g, "е");
@@ -5098,7 +5098,62 @@ var require_upload_duplicate_guard = __commonJS({
       if (typeof value === "number") return Number.isFinite(value) && value > 0 ? Math.round(value * 100) / 100 : void 0;
       return normalizeReceiptAmount(value);
     }
-    function openAiReceiptCandidateFromJson(json, requiredDate) {
+    function receiptFieldTelemetryPayload(input) {
+      const source = input && typeof input === "object" ? input : {};
+      const allowed = (value, values, fallback) => values.indexOf(String(value || "")) !== -1 ? String(value) : fallback;
+      const date = /^20\d{2}-\d{2}-\d{2}$/.test(String(source.date || "")) ? String(source.date) : null;
+      const amount = isValidReceiptAmount(source.amount) ? Math.round(Number(source.amount) * 100) / 100 : null;
+      const confidence = typeof source.confidence === "number" && Number.isFinite(source.confidence) && source.confidence >= 0 && source.confidence <= 1 ? Math.round(source.confidence * 1e3) / 1e3 : null;
+      return {
+        provider: allowed(source.provider, ["yandex_ai_studio", "openai", "yandex_ocr", "decision"], "unknown"),
+        pass: allowed(source.pass, ["receipt_vision_engine", "ocr", "date_focus", "amount_focus", "decision"], "decision"),
+        amount,
+        date,
+        confidence,
+        source: allowed(source.source, ["vision", "ocr", "focused", "decision"], "decision"),
+        layout: allowed(source.layout, ["page", "page-column-sort", "table", "markdown", "none"], "none"),
+        selected_authority: allowed(source.selectedAuthority, ["yandex_qwen", "openai_vision", "ocr_confirmed", "control", "none"], "none"),
+        disagreement: source.disagreement === true,
+        reason_code: allowed(source.reasonCode, [
+          "observed", "no_disagreement", "date_disagreement", "amount_disagreement", "date_and_amount_disagreement",
+          "focused_confirms_qwen", "focused_confirms_ocr", "focused_unresolved", "amount_conflict"
+        ], "observed")
+      };
+    }
+    function emitReceiptFieldTelemetry(logger, input) {
+      if (!logger || typeof logger.info !== "function") return;
+      logger.info(`RECEIPT_FIELD_TRACE_V1 ${JSON.stringify(receiptFieldTelemetryPayload(input))}`);
+    }
+    function receiptVisionAuthorityDisagreement(authority, candidates) {
+      const ocrCandidates = (Array.isArray(candidates) ? candidates : []).filter((candidate) => {
+        return candidate && !candidate.combinedReceipt && /^yandex:/.test(String(candidate.receiptAmountSource || ""));
+      });
+      const ocrDates = Array.from(new Set(ocrCandidates.map((candidate) => String(candidate.receiptDate || "")).filter((value) => /^20\d{2}-\d{2}-\d{2}$/.test(value))));
+      const ocrAmounts = [];
+      for (const candidate of ocrCandidates) {
+        if (!isValidReceiptAmount(candidate.receiptAmount)) continue;
+        const amount = Number(candidate.receiptAmount);
+        if (!ocrAmounts.some((value) => sameReceiptAmount(value, amount))) ocrAmounts.push(amount);
+      }
+      return {
+        dateDisagreement: Boolean(authority && ocrDates.some((value) => value !== authority.receiptDate)),
+        amountDisagreement: Boolean(authority && ocrAmounts.some((value) => !sameReceiptAmount(value, authority.receiptAmount))),
+        ocrDates,
+        ocrAmounts
+      };
+    }
+    function resolveReceiptVisionField(authorityValue, ocrValues, focusedValue, equal) {
+      const same = typeof equal === "function" ? equal : (left, right) => left === right;
+      if (focusedValue !== void 0 && focusedValue !== null && same(focusedValue, authorityValue)) {
+        return { resolved: true, value: authorityValue, selectedAuthority: "primary_vision", reasonCode: "focused_confirms_qwen" };
+      }
+      const confirmedOcr = (Array.isArray(ocrValues) ? ocrValues : []).find((value) => focusedValue !== void 0 && focusedValue !== null && same(focusedValue, value));
+      if (confirmedOcr !== void 0) {
+        return { resolved: true, value: confirmedOcr, selectedAuthority: "ocr_confirmed", reasonCode: "focused_confirms_ocr" };
+      }
+      return { resolved: false, value: void 0, selectedAuthority: "control", reasonCode: "focused_unresolved" };
+    }
+    function openAiReceiptCandidateFromJson(json, requiredDate, preserveDateYear = false) {
       if (!json || typeof json !== "object") return void 0;
       const text = JSON.stringify(json);
       const visualType = String(json.visual_type || "").trim().toLowerCase();
@@ -5118,7 +5173,7 @@ var require_upload_duplicate_guard = __commonJS({
       else if (/pending|processing|ожидан|обработ/.test(status) && !isGazpromReceiptText(json.bank || text)) statusRejection = "🚫 СТАТУС ЧЕКА НЕ ПОДТВЕРЖДЁН";
       return {
         text,
-        receiptDate: normalizeOpenAiDate(json.date, requiredDate),
+        receiptDate: normalizeOpenAiDate(json.date, preserveDateYear ? void 0 : requiredDate),
         receiptAmount: receiptAmountFromAiValue(json.amount),
         statusRejection,
         containerRejection,
@@ -5287,12 +5342,14 @@ var require_upload_duplicate_guard = __commonJS({
       }
       const outputText = openAiReceiptOutputText(payload);
       const parsed = parseReceiptJson(outputText);
-      const candidate = openAiReceiptCandidateFromJson(parsed, requiredDate);
+      const candidate = openAiReceiptCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute");
       const parserState = diagnosticRole === "primary" ? openAiPrimaryVisionParserState(outputText, parsed) : openAiReceiptParserState(outputText, parsed);
       if (candidate) {
         const transcribedAmount = normalizeReceiptAmount(parsed && parsed.amount_text);
         if (isValidReceiptAmount(transcribedAmount)) candidate.receiptAmount = transcribedAmount;
         candidate.receiptAmountSource = `openai:${model}`;
+        candidate.receiptProvider = provider.id;
+        candidate.receiptPass = focusDate ? "date_focus" : focusAmount ? "amount_focus" : "primary";
         if (diagnosticRole === "primary") candidate.primaryVisionDecision = primaryVisionDecisionFromCandidate(candidate, parserState);
       }
       captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, "2xx", parserState, parsed, candidate);
@@ -5499,18 +5556,24 @@ var require_upload_duplicate_guard = __commonJS({
       return void 0;
     }
     function normalizeReceiptAmount(raw) {
-      if (!/\d/.test(String(raw || ""))) return void 0;
-      const compact = String(raw || "").replace(/[ОоO]/g, "0").replace(/[Бб]/g, "6").replace(/[Зз]/g, "3").replace(/[ІI|l]/g, "1").replace(/[\s\u00a0']/g, "");
+      const source = String(raw === null || raw === void 0 ? "" : raw).trim();
+      if (!/\d/.test(source)) return void 0;
+      const numericPart = source.replace(/\s*(?:₽|руб(?:\.|лей|ля)?|RUB|RUR)\s*$/i, "").trim();
+      if (!numericPart || !/\d/.test(numericPart)) return void 0;
+      // Confusable replacement is intentionally limited to the numeric token.
+      // Applying it to a currency suffix turns `1 900 руб.` into `19006` because
+      // the Cyrillic `б` was previously normalized as a digit.
+      if (!/^\+?[0-9ОоOБбЗзІI|l\s\u00a0'’.,]+$/.test(numericPart)) return void 0;
+      const compact = numericPart.replace(/[ОоO]/g, "0").replace(/[Бб]/g, "6").replace(/[Зз]/g, "3").replace(/[ІI|l]/g, "1").replace(/[\s\u00a0'’]/g, "").replace(/^\+/, "");
       if (!compact || !/\d/.test(compact)) return void 0;
-      const comma = compact.lastIndexOf(",");
-      const dot = compact.lastIndexOf(".");
-      const separator = Math.max(comma, dot);
       let normalized;
-      if (separator !== -1 && compact.length - separator - 1 <= 2) {
-        normalized = compact.slice(0, separator).replace(/[^0-9]/g, "") + "." + compact.slice(separator + 1).replace(/[^0-9]/g, "");
-      } else {
-        normalized = compact.replace(/[^0-9]/g, "");
-      }
+      if (/^\d+$/.test(compact)) normalized = compact;
+      else if (/^\d{1,3}(?:[.,]\d{3})+$/.test(compact)) normalized = compact.replace(/[.,]/g, "");
+      else if (/^\d+[.,]\d{1,2}$/.test(compact)) normalized = compact.replace(",", ".");
+      else if (/^\d{1,3}(?:[.,]\d{3})+[.,]\d{1,2}$/.test(compact)) {
+        const separator = Math.max(compact.lastIndexOf(","), compact.lastIndexOf("."));
+        normalized = compact.slice(0, separator).replace(/[.,]/g, "") + "." + compact.slice(separator + 1);
+      } else return void 0;
       const value = Number(normalized);
       return Number.isFinite(value) && value > 0 && value < 1e8 ? Math.round(value * 100) / 100 : void 0;
     }
@@ -5972,14 +6035,28 @@ var require_upload_duplicate_guard = __commonJS({
         });
       };
       const receiptVisionIdentityText = () => candidates.filter((candidate) => candidate && !candidate.combinedReceipt && !candidate.receiptVisionAuthority).map((candidate) => String(candidate.text || "")).filter(Boolean).concat(receiptVisionAuthority ? [String(receiptVisionAuthority.text || "")] : []).join("\n");
+      const receiptVisionSelectedAuthority = () => receiptVisionAuthority && receiptVisionAuthority.receiptProvider === "yandex_ai_studio" ? "yandex_qwen" : "openai_vision";
       const logReceiptVisionEngineDisagreement = () => {
-        if (!receiptVisionAuthority || !logger) return;
+        if (!receiptVisionAuthority) return receiptVisionAuthorityDisagreement(receiptVisionAuthority, candidates);
         const comparable = candidates.filter((candidate) => candidate && !candidate.combinedReceipt && !candidate.receiptVisionAuthority);
-        const dateDisagreement = comparable.some((candidate) => /^\d{4}-\d{2}-\d{2}$/.test(String(candidate.receiptDate || "")) && candidate.receiptDate !== receiptVisionAuthority.receiptDate);
-        const amountDisagreement = comparable.some((candidate) => isValidReceiptAmount(candidate.receiptAmount) && !sameReceiptAmount(candidate.receiptAmount, receiptVisionAuthority.receiptAmount));
+        const fieldDisagreement = receiptVisionAuthorityDisagreement(receiptVisionAuthority, candidates);
+        const dateDisagreement = fieldDisagreement.dateDisagreement;
+        const amountDisagreement = fieldDisagreement.amountDisagreement;
         const statusDisagreement = comparable.some((candidate) => receiptStatusBlocks(candidate.statusRejection) !== receiptStatusBlocks(receiptVisionAuthority.statusRejection));
         const containerDisagreement = comparable.some((candidate) => Boolean(candidate.containerRejection));
-        logger.info(`RECEIPT_VISION_ENGINE_V1 authority=high date_disagreement=${dateDisagreement} amount_disagreement=${amountDisagreement} status_disagreement=${statusDisagreement} container_disagreement=${containerDisagreement}`);
+        if (logger) logger.info(`RECEIPT_VISION_ENGINE_V1 authority=high date_disagreement=${dateDisagreement} amount_disagreement=${amountDisagreement} status_disagreement=${statusDisagreement} container_disagreement=${containerDisagreement}`);
+        emitReceiptFieldTelemetry(logger, {
+          provider: receiptVisionAuthority.receiptProvider,
+          pass: "decision",
+          amount: receiptVisionAuthority.receiptAmount,
+          date: receiptVisionAuthority.receiptDate,
+          confidence: receiptVisionAuthority.receiptConfidence,
+          source: "decision",
+          selectedAuthority: dateDisagreement || amountDisagreement ? "none" : receiptVisionSelectedAuthority(),
+          disagreement: dateDisagreement || amountDisagreement,
+          reasonCode: dateDisagreement && amountDisagreement ? "date_and_amount_disagreement" : dateDisagreement ? "date_disagreement" : amountDisagreement ? "amount_disagreement" : "no_disagreement"
+        });
+        return fieldDisagreement;
       };
       const returnReceiptVisionAuthority = () => {
         if (!receiptVisionAuthority) return void 0;
@@ -6008,12 +6085,128 @@ var require_upload_duplicate_guard = __commonJS({
           receiptWarning: ""
         });
       };
+      const returnReceiptVisionDisagreementControl = (dateDisagreement, amountDisagreement) => {
+        const identityText = receiptVisionIdentityText();
+        const reason = dateDisagreement && amountDisagreement ? "🚫 ДАТА И СУММА ЧЕКА НЕ ПОДТВЕРЖДЕНЫ — НУЖНА ПРОВЕРКА" : dateDisagreement ? "🚫 ДАТЫ ЧЕКА НЕ СОВПАЛИ — НУЖНА ПРОВЕРКА" : "🚫 СУММЫ ЧЕКА НЕ СОВПАЛИ — НУЖНА ПРОВЕРКА";
+        emitReceiptFieldTelemetry(logger, {
+          provider: "decision",
+          pass: "decision",
+          amount: amountDisagreement ? null : receiptVisionAuthority && receiptVisionAuthority.receiptAmount,
+          date: dateDisagreement ? null : receiptVisionAuthority && receiptVisionAuthority.receiptDate,
+          source: "decision",
+          selectedAuthority: "control",
+          disagreement: true,
+          reasonCode: "focused_unresolved"
+        });
+        return withShadowEvidence({
+          ok: false,
+          reason,
+          receiptDate: dateDisagreement ? void 0 : receiptVisionAuthority && receiptVisionAuthority.receiptDate,
+          receiptAmount: amountDisagreement ? void 0 : receiptVisionAuthority && receiptVisionAuthority.receiptAmount,
+          receiptIdentity: extractReceiptIdentity(identityText, dateDisagreement ? void 0 : receiptVisionAuthority && receiptVisionAuthority.receiptDate, amountDisagreement ? void 0 : receiptVisionAuthority && receiptVisionAuthority.receiptAmount)
+        });
+      };
+      const replaceReceiptVisionAuthorityField = (field, value) => {
+        if (!receiptVisionAuthority) return;
+        const structured = parseReceiptJson(receiptVisionAuthority.text) || {};
+        if (field === "date") {
+          receiptVisionAuthority = { ...receiptVisionAuthority, receiptDate: value, text: JSON.stringify({ ...structured, operation_date: value }) };
+        } else if (field === "amount") {
+          receiptVisionAuthority = { ...receiptVisionAuthority, receiptAmount: value, text: JSON.stringify({ ...structured, amount: value }) };
+        }
+      };
+      const resolveReceiptVisionAuthorityDisagreement = async (fieldDisagreement) => {
+        if (!receiptVisionAuthority) return void 0;
+        const disagreement = fieldDisagreement || receiptVisionAuthorityDisagreement(receiptVisionAuthority, candidates);
+        let unresolvedDate = false;
+        let unresolvedAmount = false;
+        let selectedAuthority = receiptVisionSelectedAuthority();
+        let selectedReasonCode = "focused_confirms_qwen";
+        if (disagreement.dateDisagreement) {
+          let focusedCandidate;
+          const focusedAt = Date.now();
+          logReceiptStage(logger, stageContext, "receipt_dispute_date_focus_start");
+          try {
+            focusedCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, false, true, diagnostic, "receipt_dispute");
+          } catch (_2) {}
+          logReceiptStage(logger, stageContext, "receipt_dispute_date_focus_end", focusedAt, focusedCandidate ? "ok" : "empty");
+          const resolution = resolveReceiptVisionField(receiptVisionAuthority.receiptDate, disagreement.ocrDates, focusedCandidate && focusedCandidate.receiptDate);
+          emitReceiptFieldTelemetry(logger, {
+            provider: focusedCandidate && focusedCandidate.receiptProvider,
+            pass: "date_focus",
+            amount: null,
+            date: focusedCandidate && focusedCandidate.receiptDate,
+            source: "focused",
+            selectedAuthority: resolution.selectedAuthority === "primary_vision" ? receiptVisionSelectedAuthority() : resolution.selectedAuthority,
+            disagreement: true,
+            reasonCode: resolution.reasonCode
+          });
+          if (focusedCandidate) legacyVisionResults.push(shadowObservation(focusedCandidate, "date_focus"));
+          if (resolution.resolved) {
+            replaceReceiptVisionAuthorityField("date", resolution.value);
+            if (resolution.selectedAuthority === "ocr_confirmed") selectedAuthority = "ocr_confirmed";
+            selectedReasonCode = resolution.reasonCode;
+          }
+          else unresolvedDate = true;
+        }
+        if (disagreement.amountDisagreement) {
+          let focusedCandidate;
+          const focusedAt = Date.now();
+          logReceiptStage(logger, stageContext, "receipt_dispute_amount_focus_start");
+          try {
+            focusedCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, true, false, diagnostic, "receipt_dispute");
+          } catch (_2) {}
+          logReceiptStage(logger, stageContext, "receipt_dispute_amount_focus_end", focusedAt, focusedCandidate ? "ok" : "empty");
+          const resolution = resolveReceiptVisionField(receiptVisionAuthority.receiptAmount, disagreement.ocrAmounts, focusedCandidate && focusedCandidate.receiptAmount, sameReceiptAmount);
+          emitReceiptFieldTelemetry(logger, {
+            provider: focusedCandidate && focusedCandidate.receiptProvider,
+            pass: "amount_focus",
+            amount: focusedCandidate && focusedCandidate.receiptAmount,
+            date: null,
+            source: "focused",
+            selectedAuthority: resolution.selectedAuthority === "primary_vision" ? receiptVisionSelectedAuthority() : resolution.selectedAuthority,
+            disagreement: true,
+            reasonCode: resolution.reasonCode
+          });
+          if (focusedCandidate) legacyVisionResults.push(shadowObservation(focusedCandidate, "amount_focus"));
+          if (resolution.resolved) {
+            replaceReceiptVisionAuthorityField("amount", resolution.value);
+            if (resolution.selectedAuthority === "ocr_confirmed") selectedAuthority = "ocr_confirmed";
+            selectedReasonCode = resolution.reasonCode;
+          }
+          else unresolvedAmount = true;
+        }
+        if (unresolvedDate || unresolvedAmount) return returnReceiptVisionDisagreementControl(unresolvedDate, unresolvedAmount);
+        emitReceiptFieldTelemetry(logger, {
+          provider: receiptVisionAuthority.receiptProvider,
+          pass: "decision",
+          amount: receiptVisionAuthority.receiptAmount,
+          date: receiptVisionAuthority.receiptDate,
+          confidence: receiptVisionAuthority.receiptConfidence,
+          source: "decision",
+          selectedAuthority,
+          disagreement: true,
+          reasonCode: selectedReasonCode
+        });
+        return returnReceiptVisionAuthority();
+      };
       try {
         if (hasOpenAi) {
           const visionStartedAt = Date.now();
           logReceiptStage(logger, stageContext, "receipt_vision_engine_start");
           const visionResult = await requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger);
           logReceiptStage(logger, stageContext, "receipt_vision_engine_end", visionStartedAt, visionResult ? "ok" : "fallback");
+          if (visionResult) emitReceiptFieldTelemetry(logger, {
+            provider: visionResult.providerId,
+            pass: "receipt_vision_engine",
+            amount: visionResult.amount,
+            date: visionResult.operationDate,
+            confidence: visionResult.confidence,
+            source: "vision",
+            selectedAuthority: "none",
+            disagreement: false,
+            reasonCode: "observed"
+          });
           if (receiptVisionEngineIsAuthoritative(visionResult)) {
             receiptVisionAuthority = {
               text: JSON.stringify({
@@ -6032,6 +6225,8 @@ var require_upload_duplicate_guard = __commonJS({
               receiptTime: visionResult.operationTime,
               receiptAmount: visionResult.amount,
               receiptAmountSource: `${visionProviderCacheKey(config, config.openaiReceiptModel)}:receipt_vision_engine_v1`,
+              receiptProvider: visionResult.providerId || "unknown",
+              receiptConfidence: visionResult.confidence,
               statusRejection: visionResult.status === "failed" ? "🚫 ЧЕК НЕ ПРОШЁЛ ПРОВЕРКУ" : "",
               containerRejection: "",
               aiReceipt: true,
@@ -6066,6 +6261,17 @@ var require_upload_duplicate_guard = __commonJS({
                 };
                 candidates.push(candidate);
                 legacyOcrResults.push(shadowObservation(candidate, model));
+                emitReceiptFieldTelemetry(logger, {
+                  provider: "yandex_ocr",
+                  pass: "ocr",
+                  amount: candidate.receiptAmount,
+                  date: candidate.receiptDate,
+                  source: "ocr",
+                  layout: model,
+                  selectedAuthority: "none",
+                  disagreement: false,
+                  reasonCode: "observed"
+                });
               } else if (yandexLayoutResult !== "success") {
                 yandexLayoutResult = "empty";
               }
@@ -6080,7 +6286,10 @@ var require_upload_duplicate_guard = __commonJS({
           logReceiptStage(logger, stageContext, "yandex_validation_end", yandexStartedAt, failures.length ? "partial" : "ok");
         }
         if (receiptVisionAuthority) {
-          logReceiptVisionEngineDisagreement();
+          const fieldDisagreement = logReceiptVisionEngineDisagreement();
+          if (fieldDisagreement.dateDisagreement || fieldDisagreement.amountDisagreement) {
+            return await resolveReceiptVisionAuthorityDisagreement(fieldDisagreement);
+          }
           return returnReceiptVisionAuthority();
         }
         if (hasOpenAi) {
@@ -6136,13 +6345,22 @@ var require_upload_duplicate_guard = __commonJS({
         const accepted = returnAccepted();
         if (accepted) return accepted;
         if (receiptAmountsDisagree(candidates, requiredDate, !hasYandex)) {
-          const conflicting = candidates.find((candidate) => candidate && !candidate.combinedReceipt && candidate.receiptDate === requiredDate && isValidReceiptAmount(candidate.receiptAmount));
+          emitReceiptFieldTelemetry(logger, {
+            provider: "decision",
+            pass: "decision",
+            amount: null,
+            date: requiredDate,
+            source: "decision",
+            selectedAuthority: "control",
+            disagreement: true,
+            reasonCode: "amount_conflict"
+          });
           return withShadowEvidence({
             ok: false,
             reason: "🚫 СУММЫ ЧЕКА НЕ СОВПАЛИ — НУЖНА ПРОВЕРКА",
             receiptDate: requiredDate,
-            receiptAmount: conflicting && conflicting.receiptAmount,
-            receiptIdentity: conflicting ? extractReceiptIdentity(conflicting.text, conflicting.receiptDate, conflicting.receiptAmount) : void 0
+            receiptAmount: void 0,
+            receiptIdentity: extractReceiptIdentity(candidates.map((candidate) => String(candidate && candidate.text || "")).filter(Boolean).join("\n"), requiredDate, void 0)
           });
         }
         const correctDate = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate));
@@ -8394,6 +8612,10 @@ var require_upload_duplicate_guard = __commonJS({
       receiptVisionEngineIsAuthoritative,
       receiptVisionEngineIsAuthoritativeNonReceipt,
       requestOpenAiReceiptVisionEngineV1,
+      normalizeReceiptAmount,
+      receiptFieldTelemetryPayload,
+      receiptVisionAuthorityDisagreement,
+      resolveReceiptVisionField,
       parseImageClassification,
       invalidImageClassification,
       requestOpenAiImageClassificationUncached,
