@@ -49,25 +49,21 @@ assert.match(processing, /await publishMasterTransferSummary\(entry, message, re
 const reportEndpointStart = source.indexOf('var S = class extends A.ApiEndpoint');
 const reportEndpointGetEnd = source.indexOf('  async post(e, n, t, s, r, a)', reportEndpointStart);
 const reportEndpointGet = source.slice(reportEndpointStart, reportEndpointGetEnd);
-assert.match(reportEndpointGet, /confirmedTransferSummaryForUser\(t, receiptConfig, m\.userId, I,[\s\S]*tokenRoom\.id\)/,
-  'report form must read the confirmed receipt total for the room owner and workday');
-assert.match(reportEndpointGet, /const transfersLocked = confirmedTransfers !== null/,
-  'receipt field may be locked only after the authoritative total was read successfully');
-assert.match(reportEndpointGet, /const resolvedFormData = P \? \{ \.\.\.P, transfers: resolvedTransfers \} : null/,
-  'a saved report must not restore a stale manually-entered receipt total');
-assert.match(reportEndpointGet, /confirmedReceiptCount:/);
-assert.match(reportEndpointGet, /pendingReceiptCount:/);
-assert.match(reportEndpointGet, /catch \(receiptSummaryError\)/,
-  'receipt-total lookup failure must preserve the previous editable report form behavior');
+assert.doesNotMatch(reportEndpointGet, /confirmedTransferSummaryForUser/,
+  'opening the report table must not calculate or prefill confirmed receipt totals');
+assert.match(reportEndpointGet, /formData: P/);
+assert.match(reportEndpointGet, /report: P/);
+assert.match(reportEndpointGet, /transfers: P \? P\.transfers : ""/,
+  'the report table must restore only the value entered and saved by the master');
+assert.doesNotMatch(reportEndpointGet, /transfersLocked|confirmedTransfers|pendingReceiptCount/,
+  'the report endpoint must not lock or annotate the manually entered transfer field');
 
 const formScriptStart = source.indexOf('var REPORT_FORM_SCRIPT =');
 const formScriptEnd = source.indexOf('var ReportFormEndpoint =', formScriptStart);
 const formScript = source.slice(formScriptStart, formScriptEnd);
-assert.match(formScript, /autoTransfers=data\.transfersLocked===true&&Number\.isFinite\(Number\(data\.confirmedTransfers\)\)/);
-assert.match(formScript, /transfersEl\.value=autoTransfers\?Number\(data\.confirmedTransfers\)/,
-  'report table must display the authoritative confirmed receipt total');
-assert.match(formScript, /transfersEl\.readOnly=autoTransfers/,
-  'master must not accidentally overwrite the confirmed receipt total');
-assert.match(formScript, /Сумма чеков заполнена автоматически/);
+assert.match(formScript, /\$\('transfers'\)\.value=data\.formData\?\.transfers\?\?data\.transfers\?\?'';/,
+  'the report table must display the saved manual transfer value');
+assert.match(formScript, /"if\(data\.existing\)"/,
+  'the loaded report keeps the existing saved-report status without automatic receipt messaging');
 
-console.log('PASS: accepted receipts drive both the daily running total and the automatic report-table receipt field');
+console.log('PASS: accepted receipts keep the chat running total while the report-table transfer field stays manual');
