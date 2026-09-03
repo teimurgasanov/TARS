@@ -2,6 +2,10 @@ const fs = require("fs");
 const assert = require("assert");
 
 const source = fs.readFileSync("TarsReportApp.js", "utf8");
+assert.match(source, /PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_PROCESSOR = "personal-image-media-settle-retry-v1"/);
+assert.match(source, /id: PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_PROCESSOR,[\s\S]*personalImageMediaSettleRetryJob/);
+assert.match(source, /__mediaV2NotSettled[\s\S]*scheduleOnce\(\{[\s\S]*PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_PROCESSOR/);
+assert.match(source, /async personalImageMediaSettleRetryJob[\s\S]*resolvePersonalImageMessageV2[\s\S]*executePostMessageSent/);
 const start = source.indexOf("async function resolvePersonalImageMessageV2");
 const end = source.indexOf("function messageDescriptorText", start);
 assert(start >= 0 && end > start, "media-v2 resolver missing");

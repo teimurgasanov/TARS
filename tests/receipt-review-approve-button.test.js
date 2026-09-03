@@ -92,7 +92,8 @@ function associationKey(association) {
     getRoomReader() {
       return {
         async getByName(name) { return name === 'cheki-kontrol' ? controlRoom : undefined; },
-        async getById(id) { return id === entry.roomId ? { id, type: 'd' } : undefined; }
+        async getById(id) { return id === entry.roomId ? { id, type: 'd' } : undefined; },
+        async getMembers(id) { return id === entry.roomId ? [appUser, owner, shura] : []; }
       };
     }
   };

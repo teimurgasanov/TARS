@@ -207,10 +207,10 @@ async function run() {
     { warn: () => {} }
   );
   assert.strictEqual(fallbackCandidate.receiptAmount, 1300);
-  assert.deepStrictEqual(fallbackCalls.map((call) => call.url), [YANDEX_URL, "https://api.openai.com/v1/responses"], "malformed Yandex output must fall back once to OpenAI");
-  assert.strictEqual(fallbackCalls[1].request.headers.Authorization, "Bearer openai-test-secret");
-  assert.strictEqual(fallbackCalls[1].request.data.text.format.name, "tars_receipt_fields_v1");
-  assert.strictEqual(fallbackCalls[1].request.data.max_output_tokens, 800, "OpenAI fallback keeps the existing bounded output budget");
+  assert.deepStrictEqual(fallbackCalls.map((call) => call.url), [YANDEX_URL, YANDEX_URL, "https://api.openai.com/v1/responses"], "malformed Yandex output must retry Yandex once before OpenAI fallback");
+  assert.strictEqual(fallbackCalls[2].request.headers.Authorization, "Bearer openai-test-secret");
+  assert.strictEqual(fallbackCalls[2].request.data.text.format.name, "tars_receipt_fields_v1");
+  assert.strictEqual(fallbackCalls[2].request.data.max_output_tokens, 800, "OpenAI fallback keeps the existing bounded output budget");
 
   const schemaFallbackCalls = [];
   const schemaFallbackCandidate = await api.requestOpenAiReceiptCheck(
@@ -227,7 +227,7 @@ async function run() {
     { warn: () => {} }
   );
   assert.strictEqual(schemaFallbackCandidate.receiptAmount, 1300);
-  assert.deepStrictEqual(schemaFallbackCalls.map((call) => call.url), [YANDEX_URL, "https://api.openai.com/v1/responses"], "schema-mismatched Yandex output must fall back once to OpenAI");
+  assert.deepStrictEqual(schemaFallbackCalls.map((call) => call.url), [YANDEX_URL, YANDEX_URL, "https://api.openai.com/v1/responses"], "schema-mismatched Yandex output must retry Yandex once before OpenAI fallback");
 
   const transportFallbackCalls = [];
   const transportFallbackCandidate = await api.requestOpenAiReceiptCheck(
@@ -260,7 +260,24 @@ async function run() {
     { warn: () => {} }
   );
   assert.strictEqual(noOpenAiCandidate, void 0, "without an OpenAI key malformed Yandex output must preserve the previous inconclusive result");
-  assert.deepStrictEqual(noOpenAiCalls, [YANDEX_URL]);
+  assert.deepStrictEqual(noOpenAiCalls, [YANDEX_URL, YANDEX_URL]);
+
+  const deniedFallbackCalls = [];
+  const deniedFallbackCandidate = await api.requestOpenAiReceiptCheck(
+    { name: "denied-fallback.png", type: "image/png" },
+    Buffer.from([91, 92, 93]),
+    { post: async (url) => {
+      deniedFallbackCalls.push(url);
+      return url === YANDEX_URL
+        ? { statusCode: 200, data: { output: [{ content: [{ type: "output_text", text: "not-json" }] }] } }
+        : { statusCode: 403, data: {} };
+    } },
+    yandexConfig,
+    "2026-09-03",
+    { warn: () => {} }
+  );
+  assert.strictEqual(deniedFallbackCandidate, void 0, "an unavailable OpenAI fallback must fail open to the unchanged OCR path");
+  assert.deepStrictEqual(deniedFallbackCalls, [YANDEX_URL, YANDEX_URL, "https://api.openai.com/v1/responses"]);
 
   const config = await readReceiptOcrConfigFromCanonicalBundle({
     yandex_ai_studio_api_key: "runtime-yandex-key",

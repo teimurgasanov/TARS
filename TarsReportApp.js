@@ -3134,7 +3134,8 @@ var require_upload_duplicate_guard = __commonJS({
       if (!file || !content || !content.length || !config || !config.reviewRejectedReceipts) return "";
       try {
         let user = details && details.user;
-        if (!user && file && file.userId) {
+        const explicitUser = Boolean(details && Object.prototype.hasOwnProperty.call(details, "user"));
+        if (!explicitUser && !user && file && file.userId) {
           try {
             user = await read.getUserReader().getById(file.userId);
         } catch (_6) {
@@ -5005,7 +5006,14 @@ var require_upload_duplicate_guard = __commonJS({
     function openAiReceiptCandidateFromJson(json, requiredDate) {
       if (!json || typeof json !== "object") return void 0;
       const text = JSON.stringify(json);
-      const containerRejection = json.is_screenshot_of_chat === true || json.is_container_screenshot === true ? "🚫 ЧЕК НЕ ПРИНЯТ: СКРИНШОТ ЧАТА ИЛИ СТРАНИЦЫ" : "";
+      const visualType = String(json.visual_type || "").trim().toLowerCase();
+      const positiveReceiptVisual = /^(?:bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt)$/.test(visualType);
+      const containerFlag = json.is_screenshot_of_chat === true || json.is_container_screenshot === true;
+      // A photographed receipt displayed on a phone is still a receipt. Some
+      // providers describe any visible screen as a "screenshot" even when the
+      // same structured result explicitly confirms a bank receipt. Preserve
+      // the hard container veto unless both positive signals agree.
+      const containerRejection = containerFlag && !(json.is_receipt === true && positiveReceiptVisual) ? "🚫 ЧЕК НЕ ПРИНЯТ: СКРИНШОТ ЧАТА ИЛИ СТРАНИЦЫ" : "";
       if (json.is_receipt === false && !containerRejection) {
         return { text, receiptDate: void 0, receiptAmount: void 0, statusRejection: "", containerRejection: "", aiReceipt: true };
       }
@@ -5106,7 +5114,15 @@ var require_upload_duplicate_guard = __commonJS({
       const useFallbackProvider = async (reason) => {
         if (!fallbackProvider) return void 0;
         if (logger) logger.warn(`RECEIPT_PROVIDER_FALLBACK from=yandex_ai_studio to=openai reason=${reason}`);
-        return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, focusAmount, focusDate, diagnostic, diagnosticRole, fallbackProvider, true);
+        try {
+          return await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, focusAmount, focusDate, diagnostic, diagnosticRole, fallbackProvider, true);
+        } catch (fallbackError) {
+          if (/OpenAI receipt HTTP 40[13]/i.test(String(fallbackError && fallbackError.message || fallbackError))) {
+            if (logger) logger.warn("RECEIPT_PROVIDER_FALLBACK_UNAVAILABLE provider=openai class=authorization");
+            return void 0;
+          }
+          throw fallbackError;
+        }
       };
       const model = provider.model;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
@@ -5185,6 +5201,14 @@ var require_upload_duplicate_guard = __commonJS({
         if (diagnosticRole === "primary") candidate.primaryVisionDecision = primaryVisionDecisionFromCandidate(candidate, parserState);
       }
       captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, "2xx", parserState, parsed, candidate);
+      // Yandex occasionally returns HTTP 2xx with only reasoning or a partial
+      // object. Retry that same request once before falling back to another
+      // provider. This changes availability only; the existing strict parser
+      // and receipt validation still decide whether the result is usable.
+      if (provider.id === "yandex_ai_studio" && parserState !== "parsed" && retryAttempt < 1) {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole, provider, providerFallbackAttempted);
+      }
       if (fallbackProvider && parserState !== "parsed") return useFallbackProvider(parserState);
       if (!candidate && fallbackProvider) return useFallbackProvider("schema_mismatch");
       if (!candidate && logger) logger.warn(`${provider.id === "yandex_ai_studio" ? "Yandex AI Studio" : "OpenAI"} receipt check returned no parseable JSON`);
@@ -6603,7 +6627,7 @@ var require_upload_duplicate_guard = __commonJS({
       const match = /^tars-([a-z0-9._-]+)$/.exec(slug);
       return match ? match[1] : "";
     }
-    async function receiptOwnerForMessage(message, read) {
+    async function receiptOwnerForMessage(message, read, fallbackToSender = true) {
       const username = receiptOwnerUsernameForRoom(message && message.room);
       if (username) {
         try {
@@ -6623,7 +6647,29 @@ var require_upload_duplicate_guard = __commonJS({
         } catch (_7) {
         }
       }
-      return message && message.sender;
+      return fallbackToSender ? message && message.sender : void 0;
+    }
+    function applyReceiptOwner(entry, owner) {
+      if (!entry) return entry;
+      entry.userId = owner && owner.id || "";
+      entry.username = owner && owner.username || "";
+      entry.userName = owner && owner.name || "";
+      return entry;
+    }
+    async function normalizeIndexedReceiptOwner(entry, read) {
+      if (!entry || !entry.roomId) return { personal: false, resolved: false, room: void 0, owner: void 0 };
+      let room;
+      try {
+        room = await read.getRoomReader().getById(entry.roomId);
+      } catch (_7) {
+        room = void 0;
+      }
+      if (!room) return { personal: false, resolved: false, room: void 0, owner: void 0 };
+      if (!isPersonalTarsRoom(room)) return { personal: false, resolved: true, room, owner: void 0 };
+      const owner = await receiptOwnerForMessage({ room }, read, false);
+      if (!owner) return { personal: true, resolved: false, room, owner: void 0 };
+      applyReceiptOwner(entry, owner);
+      return { personal: true, resolved: true, room, owner };
     }
     async function publishAcceptedReceipt(entry, message, read, modify, config, logger) {
       if (!entry || entry.resultMessageId || !message || !message.sender) return false;
@@ -6901,6 +6947,16 @@ var require_upload_duplicate_guard = __commonJS({
       const seenFileIds = {};
       const imageFiles = messageImageFiles(message);
       const personalRoom = isPersonalTarsRoom(message && message.room);
+      let personalReceiptOwnerResolved = false;
+      let personalReceiptOwner;
+      const receiptOwnerForRejectedRoute = async () => {
+        if (!personalRoom) return message && message.sender;
+        if (!personalReceiptOwnerResolved) {
+          personalReceiptOwner = await receiptOwnerForMessage(message, read, false);
+          personalReceiptOwnerResolved = true;
+        }
+        return personalReceiptOwner;
+      };
       // Run the workday cleanup for ANY message in a personal master room,
       // not only ones carrying a photo/receipt, so a text-only message (or
       // a "quiet" room with no photo activity that day) still triggers it.
@@ -7013,11 +7069,14 @@ var require_upload_duplicate_guard = __commonJS({
           if (protectedRoom.kind === "receipt" && exactMatch && exactMatch.source !== "pre") {
             if (exactMatch.source === "rejected") {
               const reason = receiptRejectionMessage(exactMatch.invalidReason || "receipt validation failed");
+              const receiptOwner = await receiptOwnerForRejectedRoute();
+              applyReceiptOwner(exactMatch, receiptOwner);
+              await writeIndex(persistence, protectedRoom.index, index);
               if (message.id && message.sender) {
                 await publishRejectedReceiptReview(messageFile, content, {
                   reason,
                   sourceRoom: message.room,
-                  user: message.sender,
+                  user: receiptOwner || null,
                   exact,
                   receiptDate: exactMatch.receiptDate,
                   receiptAmount: exactMatch.receiptAmount
@@ -7096,9 +7155,7 @@ var require_upload_duplicate_guard = __commonJS({
                 exactMatch.invalidReason = receiptRejectionMessage(receiptCheck.reason || "receipt validation failed");
                 exactMatch.validationVersion = 11;
                 exactMatch.roomId = message.room && message.room.id || exactMatch.roomId;
-                exactMatch.userId = message.sender && message.sender.id || exactMatch.userId || "";
-                exactMatch.username = message.sender && message.sender.username || exactMatch.username || "";
-                exactMatch.userName = message.sender && message.sender.name || exactMatch.userName || "";
+                applyReceiptOwner(exactMatch, await receiptOwnerForRejectedRoute());
                 exactMatch.messageId = message.id || exactMatch.messageId || "";
                 exactMatch.uploadId = messageFileId;
                 exactMatch.postProcessedAt = Date.now();
@@ -7139,6 +7196,8 @@ var require_upload_duplicate_guard = __commonJS({
                 exactMatch.source = "duplicate";
                 exactMatch.invalidReason = "🚫 ПОВТОР ЧЕКА";
                 exactMatch.validationVersion = 10;
+                const receiptOwner = await receiptOwnerForRejectedRoute();
+                applyReceiptOwner(exactMatch, receiptOwner);
                 exactMatch.messageId = message.id || exactMatch.messageId || "";
                 exactMatch.uploadId = messageFileId;
                 exactMatch.postProcessedAt = Date.now();
@@ -7146,7 +7205,7 @@ var require_upload_duplicate_guard = __commonJS({
                 await publishRejectedReceiptReview(messageFile, content, {
                   reason: exactMatch.invalidReason,
                   sourceRoom: message.room,
-                  user: message.sender,
+                  user: receiptOwner || null,
                   exact,
                   receiptDate: receiptCheck.receiptDate,
                   receiptAmount: receiptCheck.receiptAmount
@@ -7209,10 +7268,11 @@ var require_upload_duplicate_guard = __commonJS({
             exactMatch.source = "confirmed";
             exactMatch.postProcessedAt = Date.now();
             if (protectedRoom.kind === "receipt" && exactMatch.receiptWarning && !exactMatch.receiptWarningPublishedAt) {
+              const receiptOwner = await receiptOwnerForRejectedRoute();
               await publishRejectedReceiptReview(messageFile, content, {
                 reason: exactMatch.receiptWarning,
                 sourceRoom: message.room,
-                user: message.sender,
+                user: receiptOwner || null,
                 exact,
                 receiptDate: exactMatch.receiptDate,
                 receiptAmount: exactMatch.receiptAmount
@@ -7236,6 +7296,7 @@ var require_upload_duplicate_guard = __commonJS({
           if (protectedRoom.kind === "receipt") {
             const receiptCheck = prevalidatedReceiptCheck || await validateReceiptStrict(messageFile, content, http, ocrConfig, logger, receiptValidationContext, personalImageDiagnostic);
             if (!receiptCheck.ok) {
+              const receiptOwner = await receiptOwnerForRejectedRoute();
               const rejectedEntry = {
                 exact,
                 visual,
@@ -7246,9 +7307,9 @@ var require_upload_duplicate_guard = __commonJS({
                 invalidReason: receiptRejectionMessage(receiptCheck.reason || "receipt validation failed"),
                 validationVersion: 11,
                 uploadedAt: Date.now(),
-                userId: message.sender && message.sender.id || "",
-                username: message.sender && message.sender.username || "",
-                userName: message.sender && message.sender.name || "",
+                userId: receiptOwner && receiptOwner.id || "",
+                username: receiptOwner && receiptOwner.username || "",
+                userName: receiptOwner && receiptOwner.name || "",
                 roomId: message.room && message.room.id || "",
                 messageId: message.id || "",
                 uploadId: messageFileId,
@@ -7259,7 +7320,7 @@ var require_upload_duplicate_guard = __commonJS({
               await publishRejectedReceiptReview(messageFile, content, {
                 reason: rejectedEntry.invalidReason,
                 sourceRoom: message.room,
-                user: message.sender,
+                user: receiptOwner || null,
                 exact,
                 receiptDate: receiptCheck.receiptDate,
                 receiptAmount: receiptCheck.receiptAmount
@@ -7392,10 +7453,11 @@ var require_upload_duplicate_guard = __commonJS({
             postProcessedAt: Date.now()
           };
           if (protectedRoom.kind === "receipt" && receiptWarning) {
+            const receiptOwner = await receiptOwnerForRejectedRoute();
             await publishRejectedReceiptReview(messageFile, content, {
               reason: receiptWarning,
               sourceRoom: message.room,
-              user: message.sender,
+              user: receiptOwner || null,
               exact,
               receiptDate,
               receiptAmount
@@ -8241,6 +8303,7 @@ var require_upload_duplicate_guard = __commonJS({
       sendTodayTransferSummary,
       confirmedTransferSummaryForUser,
       publishMasterTransferSummary,
+      normalizeIndexedReceiptOwner,
       readIndex,
       writeIndex,
       PROTECTED_ROOMS,
@@ -8299,6 +8362,8 @@ var MANUAL_IMAGE_PHOTO_ACTION = "manual-image-type-photo-v1";
 var MANUAL_IMAGE_MAILING_ACTION = "manual-image-type-mailing-v1";
 var PERSONAL_IMAGE_AUTO_FALLBACK_PROCESSOR = "personal-image-auto-fallback-v1";
 var PERSONAL_IMAGE_AUTO_FALLBACK_GRACE_MS = 45 * 1e3;
+var PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_PROCESSOR = "personal-image-media-settle-retry-v1";
+var PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_MS = 15 * 1e3;
 var RECEIPT_APPROVAL_AMOUNT_VIEW_PREFIX = "receipt-approval-amount:";
 var RECEIPT_APPROVAL_AMOUNT_BLOCK = "receipt-approval-amount";
 var manualImageSelectionPromptQueue = Promise.resolve();
@@ -8625,6 +8690,9 @@ var C = class extends j.App {
     }, {
       id: PERSONAL_IMAGE_AUTO_FALLBACK_PROCESSOR,
       processor: async (jobContext, read, modify, http, persistence) => this.automaticPersonalImageClassificationJob(jobContext, read, modify, http, persistence)
+    }, {
+      id: PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_PROCESSOR,
+      processor: async (jobContext, read, modify, http, persistence) => this.personalImageMediaSettleRetryJob(jobContext, read, modify, http, persistence)
     }]);
     e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.api.provideApi({
       visibility: A.ApiVisibility.PUBLIC,
@@ -8818,7 +8886,21 @@ var C = class extends j.App {
           this.getLogger().warn(`POST_PROBE_PREVIEW_FALLBACK invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
         }
         if (e && e.__mediaV2NotSettled && !hasPersonalImageUpload) {
-          if (appUser && e.room) {
+          let retryScheduled = false;
+          if (messageId && r && r.getScheduler) {
+            try {
+              await r.getScheduler().scheduleOnce({
+                id: PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_PROCESSOR,
+                when: new Date(Date.now() + PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_MS),
+                data: { messageId }
+              });
+              retryScheduled = true;
+              this.getLogger().info("PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_V1 stage=scheduled");
+            } catch (scheduleError) {
+              this.getLogger().warn(`PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_V1 stage=schedule_error class=${scheduleError && scheduleError.name || "other"}`);
+            }
+          }
+          if (!retryScheduled && appUser && e.room) {
             await r.getCreator().finish(r.getCreator().startMessage().setSender(appUser).setRoom(e.room).setText("⚠️ ФАЙЛ НЕ ОБРАБОТАН\nRocket.Chat не завершил загрузку изображения. Отправьте файл ещё раз."));
           }
           return;
@@ -9139,6 +9221,11 @@ var C = class extends j.App {
       await notify(`Не найден отклонённый чек @${targetUsername} на сумму ${this.formatRubles(targetAmount)} за ${displayDateText}.\nПроверьте логин, сумму и дату.`);
       return;
     }
+    const attribution = await G.normalizeIndexedReceiptOwner(entry, e);
+    if (!attribution.resolved) {
+      await notify("⚠️ Не удалось определить владельца исходного личного чата. Чек оставлен на контроле и не принят.");
+      return;
+    }
     const originalReason = entry.invalidReason || "";
     entry.source = "confirmed";
     entry.invalidReason = "";
@@ -9149,7 +9236,7 @@ var C = class extends j.App {
     await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
     if (entry.roomId) {
       try {
-        const masterRoom = await e.getRoomReader().getById(entry.roomId);
+        const masterRoom = attribution.room || await e.getRoomReader().getById(entry.roomId);
         if (masterRoom) {
           await G.publishMasterTransferSummary({
             userId: entry.userId || "",
@@ -9163,7 +9250,7 @@ var C = class extends j.App {
         this.getLogger().warn(`Could not refresh master transfer summary after manual approval: ${error && error.message || error}`);
       }
     }
-    await notify(`✅ ЧЕК ПРИНЯТ ВРУЧНУЮ\nМастер: @${targetUsername}\nСумма: ${this.formatRubles(targetAmount)}\nДата: ${displayDateText}\nБыла причина отказа: ${originalReason || "—"}\nПринял: @${currentUsername}`);
+    await notify(`✅ ЧЕК ПРИНЯТ ВРУЧНУЮ\nМастер: @${entry.username || targetUsername}\nСумма: ${this.formatRubles(targetAmount)}\nДата: ${displayDateText}\nБыла причина отказа: ${originalReason || "—"}\nПринял: @${currentUsername}`);
   }
   async handleApproveReceiptButton(e, n, t, a) {
     if (!e || !n || !t || !a || !a.user || !a.room) return;
@@ -9191,6 +9278,11 @@ var C = class extends j.App {
     const targetDate = String(entry.receiptDate || "");
     if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
       await notify("⚠️ Дата чека не распознана. Используйте /prinyat @логин сумма ДД.ММ.ГГГГ.");
+      return;
+    }
+    const attribution = await G.normalizeIndexedReceiptOwner(entry, e);
+    if (!attribution.resolved) {
+      await notify("⚠️ Не удалось определить владельца исходного личного чата. Чек оставлен на контроле и не принят.");
       return;
     }
     if (!a.triggerId) {
@@ -9253,6 +9345,13 @@ var C = class extends j.App {
         errors: { [RECEIPT_APPROVAL_AMOUNT_BLOCK]: "Дата чека не распознана; используйте /prinyat" }
       });
     }
+    const attribution = await G.normalizeIndexedReceiptOwner(entry, n);
+    if (!attribution.resolved) {
+      return e.getInteractionResponder().viewErrorResponse({
+        viewId: data.view.id,
+        errors: { [RECEIPT_APPROVAL_AMOUNT_BLOCK]: "Не удалось определить владельца исходного личного чата" }
+      });
+    }
     const originalReason = entry.invalidReason || "";
     const previousAmount = Number(entry.receiptAmount);
     entry.receiptAmount = amount;
@@ -9266,7 +9365,7 @@ var C = class extends j.App {
     await G.writeIndex(s, G.PROTECTED_ROOMS.kassa.index, index);
     if (entry.roomId) {
       try {
-        const masterRoom = await n.getRoomReader().getById(entry.roomId);
+        const masterRoom = attribution.room || await n.getRoomReader().getById(entry.roomId);
         if (masterRoom) {
           await G.publishMasterTransferSummary({
             userId: entry.userId || "",
@@ -9421,6 +9520,49 @@ var C = class extends j.App {
       primaryVisionDecision: primaryDecision,
       primaryVisionAttempted: true
     });
+  }
+  async personalImageMediaSettleRetryJob(jobContext, read, modify, http, persistence) {
+    const candidates = [jobContext, jobContext && jobContext.data, jobContext && jobContext.jobData, jobContext && jobContext.payload];
+    let messageId = "";
+    for (let value of candidates) {
+      if (typeof value === "string") {
+        try {
+          value = JSON.parse(value);
+        } catch (_2) {
+          value = void 0;
+        }
+      }
+      const candidate = String(value && value.messageId || "");
+      if (candidate && candidate.length <= 512 && !/[\u0000-\u001f\u007f]/.test(candidate)) {
+        messageId = candidate;
+        break;
+      }
+    }
+    if (!messageId || !read || !modify || !persistence) {
+      this.getLogger().warn("PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_V1 stage=context_invalid");
+      return;
+    }
+    let sourceMessage;
+    try {
+      sourceMessage = await read.getMessageReader().getById(messageId);
+    } catch (_3) {
+      sourceMessage = void 0;
+    }
+    if (!sourceMessage || !sourceMessage.room || !G.isPersonalTarsRoom(sourceMessage.room)) {
+      this.getLogger().warn("PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_V1 stage=source_unavailable");
+      return;
+    }
+    const settledMessage = await G.resolvePersonalImageMessageV2(sourceMessage, read, this.getLogger(), 16, 750, true);
+    if (G.messageImageFiles(settledMessage).length) {
+      this.getLogger().info("PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_V1 stage=media_resolved");
+      await this.executePostMessageSent(settledMessage, read, http, persistence, modify);
+      return;
+    }
+    this.getLogger().warn("PERSONAL_IMAGE_MEDIA_SETTLE_RETRY_V1 stage=media_not_resolved");
+    const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
+    if (appUser) {
+      await modify.getCreator().finish(modify.getCreator().startMessage().setSender(appUser).setRoom(sourceMessage.room).setText("⚠️ ФАЙЛ НЕ ОБРАБОТАН\nRocket.Chat не завершил загрузку изображения. Отправьте файл ещё раз."));
+    }
   }
   async ensureManualImageSelection(read, persistence, modify, message, telemetryContext = {}) {
     const run = async () => {
