@@ -30,6 +30,7 @@ on:
       - feature/tars-maximum-vision
       - feature/yandex-ai-studio-vision-provider
       - feature/personal-image-auto-fallback
+      - fix/yandex-receipt-structured-fallback
   pull_request:
   workflow_dispatch:
 
@@ -99,6 +100,8 @@ jobs:
       || github.base_ref == 'feature/yandex-ai-studio-vision-provider'
       || github.head_ref == 'feature/personal-image-auto-fallback'
       || github.base_ref == 'feature/personal-image-auto-fallback'
+      || github.head_ref == 'fix/yandex-receipt-structured-fallback'
+      || github.base_ref == 'fix/yandex-receipt-structured-fallback'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
