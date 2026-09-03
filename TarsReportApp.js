@@ -2005,6 +2005,18 @@ var require_upload_duplicate_guard = __commonJS({
         includeImageDetail: true
       };
     }
+    function openAiVisionProviderForConfig(config, openAiModel) {
+      if (!config) return void 0;
+      const openAiKey = String(config.openaiApiKey || "").trim();
+      if (!openAiKey) return void 0;
+      return {
+        id: "openai",
+        url: "https://api.openai.com/v1/responses",
+        model: String(openAiModel || config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
+        headers: { Authorization: "Bearer " + openAiKey, "Content-Type": "application/json" },
+        includeImageDetail: true
+      };
+    }
     function visionProviderConfigured(config) {
       return Boolean(visionProviderForConfig(config));
     }
@@ -2065,6 +2077,66 @@ var require_upload_duplicate_guard = __commonJS({
         amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
         status: { type: "string", enum: ["success", "failed", "pending", "unknown"] },
         bank: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
+    const RECEIPT_VISION_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "is_receipt", "has_readable_text", "visual_type", "is_mailing_proof",
+        "service_type", "is_screenshot_of_chat", "date", "amount", "amount_text",
+        "amount_label", "status", "bank"
+      ],
+      properties: {
+        is_receipt: { type: "boolean" },
+        has_readable_text: { type: "boolean" },
+        visual_type: {
+          type: "string",
+          enum: [
+            "bank_receipt", "bank_app_screen", "receipt_on_phone", "qr_payment_receipt",
+            "mailing_proof_screenshot", "hair_work_photo", "nails_work_photo",
+            "brows_lashes_work_photo", "pedicure_work_photo", "work_photo", "salon_photo",
+            "chat_screenshot", "unknown"
+          ]
+        },
+        is_mailing_proof: { type: "boolean" },
+        service_type: { type: "string", enum: ["haircut", "coloring", "manicure", "pedicure", "brows", "lashes", "unknown"] },
+        is_screenshot_of_chat: { type: "boolean" },
+        date: { anyOf: [{ type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }, { type: "null" }] },
+        amount: { anyOf: [{ type: "number" }, { type: "null" }] },
+        amount_text: { anyOf: [{ type: "string" }, { type: "null" }] },
+        amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
+        status: { type: "string", enum: ["success", "failed", "pending", "unknown"] },
+        bank: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
+    const RECEIPT_PRIMARY_VISION_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: RECEIPT_VISION_SCHEMA.required.concat([
+        "class", "service_kind", "confidence", "has_payment_ui", "has_receipt_layout",
+        "has_financial_document", "has_qr_payment_document", "has_financial_text",
+        "has_document_layout", "has_visible_client", "has_visible_hair_result",
+        "has_visible_nail_result", "has_visible_brow_lash_result", "has_salon_context",
+        "has_messaging_ui"
+      ]),
+      properties: {
+        ...RECEIPT_VISION_SCHEMA.properties,
+        class: { type: "string", enum: ["receipt", "bank_transfer", "work_photo", "mailing", "document", "unknown"] },
+        service_kind: { type: "string", enum: ["hair", "nails", "pedicure", "brows_lashes", "other", "none"] },
+        confidence: { type: "string", enum: ["high", "medium", "low"] },
+        has_payment_ui: { type: "boolean" },
+        has_receipt_layout: { type: "boolean" },
+        has_financial_document: { type: "boolean" },
+        has_qr_payment_document: { type: "boolean" },
+        has_financial_text: { type: "boolean" },
+        has_document_layout: { type: "boolean" },
+        has_visible_client: { type: "boolean" },
+        has_visible_hair_result: { type: "boolean" },
+        has_visible_nail_result: { type: "boolean" },
+        has_visible_brow_lash_result: { type: "boolean" },
+        has_salon_context: { type: "boolean" },
+        has_messaging_ui: { type: "boolean" }
       }
     };
     const IMAGE_CLASSIFICATION_KINDS = ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other"];
@@ -4938,12 +5010,18 @@ var require_upload_duplicate_guard = __commonJS({
       // layouts alone are still one provider and cannot form a consensus.
       return hasConflict && confirmedReceiptAmount(candidates, requiredDate, allowOpenAiPair) === void 0;
     }
-    async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false, focusDate = false, diagnostic, diagnosticRole = "") {
+    async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false, focusDate = false, diagnostic, diagnosticRole = "", providerOverride, providerFallbackAttempted = false) {
       if (!config || !content || !content.length) return void 0;
       const primaryModel = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
       const openAiModel = focusAmount || focusDate ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
-      const provider = visionProviderForConfig(config, openAiModel);
+      const provider = providerOverride || visionProviderForConfig(config, openAiModel);
       if (!provider) return void 0;
+      const fallbackProvider = provider.id === "yandex_ai_studio" && !providerFallbackAttempted ? openAiVisionProviderForConfig(config, openAiModel) : void 0;
+      const useFallbackProvider = async (reason) => {
+        if (!fallbackProvider) return void 0;
+        if (logger) logger.warn(`RECEIPT_PROVIDER_FALLBACK from=yandex_ai_studio to=openai reason=${reason}`);
+        return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, focusAmount, focusDate, diagnostic, diagnosticRole, fallbackProvider, true);
+      };
       const model = provider.model;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       const primaryVisionContract = diagnosticRole === "primary" && !focusAmount && !focusDate ? ' ОСНОВНАЯ КЛАССИФИКАЦИЯ ТИПА: дополнительно обязательно верни class:"receipt|bank_transfer|work_photo|mailing|document|unknown", service_kind:"hair|nails|pedicure|brows_lashes|other|none", confidence:"high|medium|low", has_payment_ui:boolean, has_receipt_layout:boolean, has_financial_document:boolean, has_qr_payment_document:boolean, has_financial_text:boolean, has_document_layout:boolean, has_visible_client:boolean, has_visible_hair_result:boolean, has_visible_nail_result:boolean, has_visible_brow_lash_result:boolean, has_salon_context:boolean, has_messaging_ui:boolean. confidence=high разрешено только когда тип непосредственно и однозначно виден. Для work_photo high требуется ясно видимый результат услуги; кресло, инструменты, зеркало, рабочая зона и интерьер не обязательны. Крупный план готовых ногтей, педикюра, бровей или ресниц достаточен без полного человека. Для hair должны быть видны клиент и выраженная форма стрижки, укладки или окрашивания. Work_photo блокируют только конкретные видимые признаки: банковский/payment UI, receipt layout, financial/document layout, QR/payment document или явный экран банковского приложения. Просто текст, логотип, телефон в кадре, человек или фон не блокируют work_photo без таких конкретных признаков. Обычный портрет без различимого результата услуги и пустой интерьер означают class=unknown. ' : "";
@@ -4966,31 +5044,42 @@ var require_upload_duplicate_guard = __commonJS({
                 visionImageInput(provider, imageUrl)
               ]
             }],
-            max_output_tokens: 500
+            text: {
+              format: {
+                type: "json_schema",
+                name: diagnosticRole === "primary" && !focusAmount && !focusDate ? "tars_receipt_primary_vision_v1" : "tars_receipt_fields_v1",
+                strict: true,
+                schema: diagnosticRole === "primary" && !focusAmount && !focusDate ? RECEIPT_PRIMARY_VISION_SCHEMA : RECEIPT_VISION_SCHEMA
+              }
+            },
+            max_output_tokens: 800
           },
           timeout: 14e3
         });
       } catch (networkError) {
         if (retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole);
+          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole, provider, providerFallbackAttempted);
         }
         captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, /timeout|timed\s*out|etimedout/i.test(String(networkError && networkError.message || networkError)) ? "timeout" : "other_error", "no_json", void 0, void 0);
+        if (fallbackProvider) return useFallbackProvider(/timeout|timed\s*out|etimedout/i.test(String(networkError && networkError.message || networkError)) ? "timeout" : "transport");
         throw networkError;
       }
       if (!response || response.statusCode < 2e2 || response.statusCode >= 3e2) {
         if (response && (response.statusCode >= 500 || response.statusCode === 429) && retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole);
+          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole, provider, providerFallbackAttempted);
         }
         captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, response && response.statusCode === 429 ? "429" : response && response.statusCode >= 500 ? "5xx" : "other_error", "no_json", void 0, void 0);
+        if (fallbackProvider) return useFallbackProvider(response && response.statusCode === 429 ? "429" : response && response.statusCode >= 500 ? "5xx" : "http_error");
         throw new Error(`OpenAI receipt HTTP ${response && response.statusCode || "unknown"}`);
       }
       let payload;
       try {
-        payload = response.data || (response.content ? JSON.parse(response.content) : {});
+        payload = typeof response.data === "string" ? JSON.parse(response.data) : response.data || (response.content ? JSON.parse(response.content) : {});
       } catch (payloadParseError) {
         captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, "2xx", "parse_error", void 0, void 0);
+        if (fallbackProvider) return useFallbackProvider("invalid_response");
         throw payloadParseError;
       }
       const outputText = openAiReceiptOutputText(payload);
@@ -5004,7 +5093,9 @@ var require_upload_duplicate_guard = __commonJS({
         if (diagnosticRole === "primary") candidate.primaryVisionDecision = primaryVisionDecisionFromCandidate(candidate, parserState);
       }
       captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, "2xx", parserState, parsed, candidate);
-      if (!candidate && logger) logger.warn("OpenAI receipt check returned no parseable JSON");
+      if (fallbackProvider && parserState !== "parsed") return useFallbackProvider(parserState);
+      if (!candidate && fallbackProvider) return useFallbackProvider("schema_mismatch");
+      if (!candidate && logger) logger.warn(`${provider.id === "yandex_ai_studio" ? "Yandex AI Studio" : "OpenAI"} receipt check returned no parseable JSON`);
       return candidate;
     }
     function normalizedDate(year, month, day) {
