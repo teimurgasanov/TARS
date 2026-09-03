@@ -12,6 +12,10 @@ const loadImplementation = new Function(
   "receiptImageMimeType",
   "bytesToBase64",
   "openAiReceiptOutputText",
+  "visionProviderForConfig",
+  "openAiVisionProviderForConfig",
+  "normalizedYandexAiStudioModel",
+  "visionImageInput",
   `${implementation}
   return {
     IMAGE_CLASSIFICATION_SCHEMA_VERSION,
@@ -35,7 +39,11 @@ const api = loadImplementation(
       }
     }
     return values.join("\n");
-  }
+  },
+  (config, model) => config && config.openaiApiKey ? { id: "openai", url: "https://api.openai.com/v1/responses", model, headers: { Authorization: `Bearer ${config.openaiApiKey}` }, includeImageDetail: true } : null,
+  (config, model) => config && config.openaiApiKey ? { id: "openai", url: "https://api.openai.com/v1/responses", model, headers: { Authorization: `Bearer ${config.openaiApiKey}` }, includeImageDetail: true } : null,
+  (model) => model,
+  (provider, imageUrl) => provider.includeImageDetail ? { type: "input_image", image_url: imageUrl, detail: "high" } : { type: "input_image", image_url: imageUrl }
 );
 
 const safety = (overrides = {}) => ({
@@ -46,22 +54,34 @@ const safety = (overrides = {}) => ({
   ...overrides
 });
 
+const evidence = (overrides = {}) => ({
+  has_visible_client: false,
+  has_visible_service_result: false,
+  has_salon_context: false,
+  has_messaging_ui: false,
+  has_receipt_layout: false,
+  has_document_layout: false,
+  ...overrides
+});
+
 const classification = (overrides = {}) => ({
   schema_version: "personal-image-classification-v1",
   kind: "other",
   confidence: 0.5,
   work_photo: null,
   safety: safety(),
+  evidence: evidence(),
   reason_code: "OTHER_IMAGE",
   ...overrides
 });
 
 const validCases = [
-  classification({ kind: "receipt", confidence: 0.98, safety: safety({ is_banking: true, has_payment_ui: true, has_receipt_text: true }), reason_code: "RECEIPT_OR_PAYMENT" }),
-  classification({ kind: "work_photo", confidence: 0.94, work_photo: { category: "hair", client_type: "female", service: "coloring" }, reason_code: "WORK_PHOTO_HAIR" }),
+  classification({ kind: "receipt", confidence: 0.98, safety: safety({ is_banking: true, has_payment_ui: true, has_receipt_text: true }), evidence: evidence({ has_receipt_layout: true, has_document_layout: true }), reason_code: "RECEIPT_OR_PAYMENT" }),
+  classification({ kind: "work_photo", confidence: 0.94, work_photo: { category: "hair", client_type: "female", service: "coloring" }, evidence: evidence({ has_visible_client: true, has_visible_service_result: true, has_salon_context: true }), reason_code: "WORK_PHOTO_HAIR" }),
   classification({ kind: "work_photo", confidence: 0.91, work_photo: { category: "hair", client_type: "male", service: "haircut" }, reason_code: "WORK_PHOTO_HAIR" }),
   classification({ kind: "work_photo", confidence: 0.9, work_photo: { category: "nails", client_type: "unknown", service: "nails" }, reason_code: "WORK_PHOTO_NAILS" }),
   classification({ kind: "work_photo", confidence: 0.89, work_photo: { category: "brows", client_type: "female", service: "brows" }, reason_code: "WORK_PHOTO_BROWS" }),
+  classification({ kind: "work_photo", confidence: 0.72, work_photo: { category: "other", client_type: "unknown", service: null }, reason_code: "WORK_PHOTO_OTHER" }),
   classification({ kind: "mailing_proof", confidence: 0.93, reason_code: "MAILING_PROOF" }),
   classification({ kind: "report_or_screenshot", confidence: 0.88, reason_code: "REPORT_OR_SCREENSHOT" }),
   classification({ kind: "other", confidence: 0.8, reason_code: "OTHER_IMAGE" }),
@@ -95,6 +115,7 @@ assert.strictEqual(api.IMAGE_CLASSIFICATION_MODEL, "gpt-5.4-nano-2026-03-17");
 assert.strictEqual(api.IMAGE_CLASSIFICATION_V1_SCHEMA.additionalProperties, false);
 assert.strictEqual(api.IMAGE_CLASSIFICATION_V1_SCHEMA.properties.work_photo.anyOf[1].additionalProperties, false);
 assert.strictEqual(api.IMAGE_CLASSIFICATION_V1_SCHEMA.properties.safety.additionalProperties, false);
+assert.strictEqual(api.IMAGE_CLASSIFICATION_V1_SCHEMA.properties.evidence.additionalProperties, false);
 
 function responseFor(value, statusCode = 200) {
   return {
@@ -148,6 +169,15 @@ async function run() {
   assert.strictEqual(timeoutResult.errorCode, "PROVIDER_TIMEOUT");
   assert.strictEqual(timeoutCalls, 2, "timeout must be retried exactly once");
   assert(timeoutLogs.every((line) => !line.includes("test-key") && !line.includes("base64")), "logs must not expose credentials or image data");
+  let timeoutRecoveryCalls = 0;
+  const timeoutRecovery = await api.requestOpenAiImageClassification(file, Buffer.from([5]), {
+    post: async () => {
+      timeoutRecoveryCalls += 1;
+      return responseFor(validCases[0]);
+    }
+  }, config);
+  assert.strictEqual(timeoutRecovery.valid, true);
+  assert.strictEqual(timeoutRecoveryCalls, 1, "a transient failure must not remain as a long-lived cache entry");
 
   for (const statusCode of [429, 500]) {
     let calls = 0;

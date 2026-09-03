@@ -53,6 +53,16 @@ const safety = (overrides = {}) => ({
   ...overrides
 });
 
+const evidence = (overrides = {}) => ({
+  has_visible_client: false,
+  has_visible_service_result: false,
+  has_salon_context: false,
+  has_messaging_ui: false,
+  has_receipt_layout: false,
+  has_document_layout: false,
+  ...overrides
+});
+
 const classification = (overrides = {}) => ({
   valid: true,
   value: {
@@ -61,6 +71,7 @@ const classification = (overrides = {}) => ({
     confidence: 0.8,
     work_photo: null,
     safety: safety(),
+    evidence: evidence(),
     reason_code: "OTHER_IMAGE",
     ...overrides
   }
@@ -301,11 +312,39 @@ async function run() {
   assert(!store.values.has(`image-classification-v1-shadow:v1:img-${"1".repeat(48)}`), "expired record was retained");
   assert(!store.values.has(`image-classification-v1-shadow:v1:img-${"2".repeat(48)}`), "overflow record was retained");
 
-  // I. The runtime hook is a standalone observation statement. Its return
+  // I. A Yandex failure and an OpenAI benchmark result remain independent.
+  // OpenAI must not replace or hide the primary provider error.
+  const separated = api.sanitizeImageClassificationV1ShadowObservation({
+    case_id: `img-${"b".repeat(48)}`,
+    current_kind: "work_photo",
+    final_production_kind: "work_photo",
+    final_production_status: "accepted",
+    classification: {
+      valid: false,
+      errorCode: "PROVIDER_TIMEOUT",
+      providerUsed: "yandex_ai_studio",
+      providerModel: "qwen3.6-35b-a3b",
+      providerErrorCode: "PROVIDER_TIMEOUT",
+      yandexResult: { attempted: true, provider: "yandex_ai_studio", model: "qwen3.6-35b-a3b", valid: false, errorCode: "PROVIDER_TIMEOUT" },
+      openAiResult: { attempted: true, provider: "openai", model: "gpt-5.4-nano-2026-03-17", valid: true, value: classification({ kind: "work_photo", confidence: 0.95, work_photo: { category: "hair", client_type: "female", service: null }, evidence: evidence({ has_visible_client: true, has_visible_service_result: true }), reason_code: "WORK_PHOTO_HAIR" }).value, errorCode: "NONE" }
+    }
+  });
+  assert.strictEqual(separated.provider_used, "yandex_ai_studio");
+  assert.strictEqual(separated.provider_error_code, "PROVIDER_TIMEOUT");
+  assert.strictEqual(separated.yandex_result.valid, false);
+  assert.strictEqual(separated.yandex_result.error_code, "PROVIDER_TIMEOUT");
+  assert.strictEqual(separated.openai_result.valid, true);
+  assert.strictEqual(separated.openai_result.work_photo.service, null);
+  assert.strictEqual(separated.new_kind, null, "secondary OpenAI result must not overwrite the Yandex verdict");
+  assert.strictEqual(separated.final_production_kind, "work_photo");
+  assert.strictEqual(separated.final_production_status, "accepted");
+
+  // J. Runtime hooks are standalone observation statements. Their return
   // value is neither assigned nor used by any production decision function.
   assert(source.includes('id: "image_classification_v1_shadow_enabled"'));
   assert(source.includes('packageValue: false'));
-  assert.match(source, /\n\s+G\.scheduleImageClassificationV1Shadow\(\{[\s\S]*?currentPrimaryDecision: selectedPrimaryDecision,[\s\S]*?\n\s+\}\);/);
+  assert.match(source, /scheduleShadowOutcome\s*=\s*\(finalProductionKind, finalProductionStatus\)\s*=>\s*G\.scheduleImageClassificationV1Shadow\(\{/);
+  assert.match(source, /G\.scheduleImageClassificationV1Shadow\(\{[\s\S]*?finalProductionKind,[\s\S]*?finalProductionStatus,[\s\S]*?\n\s+\}\);/);
   assert(!source.includes("selectedPrimaryDecision = G.scheduleImageClassificationV1Shadow"));
   for (const functionName of [
     "personalImageKindForPreUpload",

@@ -2252,7 +2252,7 @@ var require_upload_duplicate_guard = __commonJS({
     const IMAGE_CLASSIFICATION_V1_SCHEMA = {
       type: "object",
       additionalProperties: false,
-      required: ["schema_version", "kind", "confidence", "work_photo", "safety", "reason_code"],
+      required: ["schema_version", "kind", "confidence", "work_photo", "safety", "evidence", "reason_code"],
       properties: {
         schema_version: { type: "string", const: IMAGE_CLASSIFICATION_SCHEMA_VERSION },
         kind: { type: "string", enum: IMAGE_CLASSIFICATION_KINDS },
@@ -2267,7 +2267,7 @@ var require_upload_duplicate_guard = __commonJS({
               properties: {
                 category: { type: "string", enum: ["hair", "nails", "brows", "other"] },
                 client_type: { type: "string", enum: ["male", "female", "unknown"] },
-                service: { type: "string", enum: ["haircut", "coloring", "styling", "nails", "brows", "other"] }
+                service: { anyOf: [{ type: "string", enum: ["haircut", "coloring", "styling", "nails", "brows", "other"] }, { type: "null" }] }
               }
             }
           ]
@@ -2281,6 +2281,19 @@ var require_upload_duplicate_guard = __commonJS({
             is_document: { type: "boolean" },
             has_payment_ui: { type: "boolean" },
             has_receipt_text: { type: "boolean" }
+          }
+        },
+        evidence: {
+          type: "object",
+          additionalProperties: false,
+          required: ["has_visible_client", "has_visible_service_result", "has_salon_context", "has_messaging_ui", "has_receipt_layout", "has_document_layout"],
+          properties: {
+            has_visible_client: { type: "boolean" },
+            has_visible_service_result: { type: "boolean" },
+            has_salon_context: { type: "boolean" },
+            has_messaging_ui: { type: "boolean" },
+            has_receipt_layout: { type: "boolean" },
+            has_document_layout: { type: "boolean" }
           }
         },
         reason_code: { type: "string", enum: IMAGE_CLASSIFICATION_REASON_CODES }
@@ -2309,7 +2322,7 @@ var require_upload_duplicate_guard = __commonJS({
           return invalidImageClassification("INVALID_JSON");
         }
       }
-      if (!imageClassificationHasExactKeys(value, ["schema_version", "kind", "confidence", "work_photo", "safety", "reason_code"])) return invalidImageClassification("INVALID_ROOT_PROPERTIES");
+      if (!imageClassificationHasExactKeys(value, ["schema_version", "kind", "confidence", "work_photo", "safety", "evidence", "reason_code"])) return invalidImageClassification("INVALID_ROOT_PROPERTIES");
       if (value.schema_version !== IMAGE_CLASSIFICATION_SCHEMA_VERSION) return invalidImageClassification("INVALID_SCHEMA_VERSION");
       if (IMAGE_CLASSIFICATION_KINDS.indexOf(value.kind) === -1) return invalidImageClassification("INVALID_KIND");
       if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) return invalidImageClassification("INVALID_CONFIDENCE");
@@ -2318,11 +2331,15 @@ var require_upload_duplicate_guard = __commonJS({
       for (const key of ["is_banking", "is_document", "has_payment_ui", "has_receipt_text"]) {
         if (typeof value.safety[key] !== "boolean") return invalidImageClassification("INVALID_SAFETY_VALUE");
       }
+      if (!imageClassificationHasExactKeys(value.evidence, ["has_visible_client", "has_visible_service_result", "has_salon_context", "has_messaging_ui", "has_receipt_layout", "has_document_layout"])) return invalidImageClassification("INVALID_EVIDENCE_PROPERTIES");
+      for (const key of ["has_visible_client", "has_visible_service_result", "has_salon_context", "has_messaging_ui", "has_receipt_layout", "has_document_layout"]) {
+        if (typeof value.evidence[key] !== "boolean") return invalidImageClassification("INVALID_EVIDENCE_VALUE");
+      }
       if (value.kind === "work_photo") {
         if (!imageClassificationHasExactKeys(value.work_photo, ["category", "client_type", "service"])) return invalidImageClassification("INVALID_WORK_PHOTO_PROPERTIES");
         if (["hair", "nails", "brows", "other"].indexOf(value.work_photo.category) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_CATEGORY");
         if (["male", "female", "unknown"].indexOf(value.work_photo.client_type) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_CLIENT_TYPE");
-        if (["haircut", "coloring", "styling", "nails", "brows", "other"].indexOf(value.work_photo.service) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_SERVICE");
+        if (value.work_photo.service !== null && ["haircut", "coloring", "styling", "nails", "brows", "other"].indexOf(value.work_photo.service) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_SERVICE");
       } else if (value.work_photo !== null) {
         return invalidImageClassification("UNEXPECTED_WORK_PHOTO");
       }
@@ -2334,8 +2351,25 @@ var require_upload_duplicate_guard = __commonJS({
     function imageClassificationTimeout(error) {
       return /(?:timeout|timed\s*out|etimedout)/i.test(String(error && (error.code || error.message) || error || ""));
     }
-    async function requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt = 0) {
-      const provider = visionProviderForConfig(config, IMAGE_CLASSIFICATION_MODEL);
+    function imageClassificationProviderModel(provider) {
+      if (!provider) return "unknown";
+      if (provider.id === "yandex_ai_studio") return normalizedYandexAiStudioModel(provider.model);
+      const model = String(provider.model || "").trim();
+      return /^[A-Za-z0-9._:-]{1,120}$/.test(model) ? model : "unknown";
+    }
+    function imageClassificationProviderResult(provider, result, attempted = true) {
+      const normalized = result && typeof result === "object" ? result : invalidImageClassification("INVALID_CLASSIFICATION");
+      return Object.freeze({
+        attempted: attempted === true,
+        provider: provider && provider.id === "yandex_ai_studio" ? "yandex_ai_studio" : provider && provider.id === "openai" ? "openai" : "unknown",
+        model: imageClassificationProviderModel(provider),
+        valid: normalized.valid === true,
+        value: normalized.valid === true ? normalized.value : void 0,
+        errorCode: normalized.valid === true ? "NONE" : String(normalized.errorCode || "INVALID_CLASSIFICATION")
+      });
+    }
+    async function requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt = 0, providerOverride) {
+      const provider = providerOverride || visionProviderForConfig(config, IMAGE_CLASSIFICATION_MODEL);
       if (!provider || !content || !content.length || !http) return invalidImageClassification("NOT_CONFIGURED");
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
@@ -2349,24 +2383,24 @@ var require_upload_duplicate_guard = __commonJS({
             input: [{
               role: "user",
               content: [
-                { type: "input_text", text: "Classify the actual image into exactly one allowed kind. Use work_photo only for a visible salon service result. For coloring, return service=coloring only; never infer a named technique such as Airtouch, balayage or shatush. Set confidence conservatively. Do not describe the image." },
+                { type: "input_text", text: "Classify the actual image into exactly one allowed kind. Use work_photo only for a visible salon service result. For coloring, return service=coloring only; never infer a named technique such as Airtouch, balayage or shatush. If the exact service is not visually certain, set work_photo.service=null. Set every safety and evidence boolean from visible image evidence only. Set confidence conservatively. Do not describe the image." },
                 visionImageInput(provider, imageUrl)
               ]
             }],
             text: { format: { type: "json_schema", name: "personal_image_classification_v1", strict: true, schema: IMAGE_CLASSIFICATION_V1_SCHEMA } },
-            max_output_tokens: 220
+            max_output_tokens: provider.id === "yandex_ai_studio" ? 4096 : 220
           },
           timeout: 14e3
         });
       } catch (error) {
-        if (attempt < 1 && imageClassificationTimeout(error)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1);
-        if (logger) logger.warn(`Image classification request failed attempt=${attempt + 1} kind=${imageClassificationTimeout(error) ? "timeout" : "other"}`);
+        if (attempt < 1 && imageClassificationTimeout(error)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1, provider);
+        if (logger) logger.warn(`Image classification request failed provider=${provider.id} attempt=${attempt + 1} kind=${imageClassificationTimeout(error) ? "timeout" : "other"}`);
         return invalidImageClassification(imageClassificationTimeout(error) ? "PROVIDER_TIMEOUT" : "PROVIDER_ERROR");
       }
       const statusCode = Number(response && response.statusCode || 0);
       if (statusCode < 200 || statusCode >= 300) {
-        if (attempt < 1 && imageClassificationRetryableStatus(statusCode)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1);
-        if (logger) logger.warn(`Image classification HTTP failed attempt=${attempt + 1} status=${statusCode || "unknown"}`);
+        if (attempt < 1 && imageClassificationRetryableStatus(statusCode)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1, provider);
+        if (logger) logger.warn(`Image classification HTTP failed provider=${provider.id} attempt=${attempt + 1} status=${statusCode || "unknown"}`);
         return invalidImageClassification(imageClassificationRetryableStatus(statusCode) ? "PROVIDER_RETRY_EXHAUSTED" : "PROVIDER_HTTP_ERROR");
       }
       let payload = response.data || response.content || response;
@@ -2377,18 +2411,55 @@ var require_upload_duplicate_guard = __commonJS({
           return invalidImageClassification("INVALID_PROVIDER_RESPONSE");
         }
       }
-      return parseImageClassification(openAiReceiptOutputText(payload));
+      const parsed = parseImageClassification(openAiReceiptOutputText(payload));
+      if (!parsed.valid && provider.id === "yandex_ai_studio" && attempt < 1) {
+        return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1, provider);
+      }
+      return parsed;
     }
     const imageClassificationCache = /* @__PURE__ */ new Map();
+    async function requestImageClassificationProviderCached(file, content, http, config, logger, provider) {
+      if (!content || !content.length) return invalidImageClassification("EMPTY_IMAGE");
+      if (!provider) return invalidImageClassification("NOT_CONFIGURED");
+      const key = `${IMAGE_CLASSIFICATION_SCHEMA_VERSION}:${provider.id}:${provider.model}:${exactHash(content)}`;
+      const cached = imageClassificationCache.get(key);
+      if (cached && Date.now() - Number(cached.createdAt || 0) < 10 * 60 * 1e3) return cached.promise;
+      const promise = requestOpenAiImageClassificationUncached(file, content, http, config, logger, 0, provider);
+      imageClassificationCache.set(key, { createdAt: Date.now(), promise });
+      if (imageClassificationCache.size > 200) imageClassificationCache.delete(imageClassificationCache.keys().next().value);
+      try {
+        const result = await promise;
+        if (!result || result.valid !== true) imageClassificationCache.delete(key);
+        return result;
+      } catch (error) {
+        imageClassificationCache.delete(key);
+        throw error;
+      }
+    }
     async function requestOpenAiImageClassification(file, content, http, config, logger) {
       if (!content || !content.length) return invalidImageClassification("EMPTY_IMAGE");
-      const key = `${IMAGE_CLASSIFICATION_SCHEMA_VERSION}:${visionProviderCacheKey(config, IMAGE_CLASSIFICATION_MODEL)}:${exactHash(content)}`;
-      const cached = imageClassificationCache.get(key);
-      if (cached) return cached;
-      const promise = requestOpenAiImageClassificationUncached(file, content, http, config, logger);
-      imageClassificationCache.set(key, promise);
-      if (imageClassificationCache.size > 200) imageClassificationCache.delete(imageClassificationCache.keys().next().value);
-      return promise;
+      const primaryProvider = visionProviderForConfig(config, IMAGE_CLASSIFICATION_MODEL);
+      if (!primaryProvider) return invalidImageClassification("NOT_CONFIGURED");
+      const primaryRaw = await requestImageClassificationProviderCached(file, content, http, config, logger, primaryProvider);
+      const primaryResult = imageClassificationProviderResult(primaryProvider, primaryRaw);
+      let secondaryResult;
+      if (primaryProvider.id === "yandex_ai_studio" && primaryRaw.valid !== true) {
+        const openAiProvider = openAiVisionProviderForConfig(config, IMAGE_CLASSIFICATION_MODEL);
+        if (openAiProvider) {
+          const openAiRaw = await requestImageClassificationProviderCached(file, content, http, config, logger, openAiProvider);
+          secondaryResult = imageClassificationProviderResult(openAiProvider, openAiRaw);
+        }
+      }
+      return Object.freeze({
+        valid: primaryResult.valid,
+        value: primaryResult.value,
+        errorCode: primaryResult.errorCode,
+        providerUsed: primaryResult.provider,
+        providerModel: primaryResult.model,
+        providerErrorCode: primaryResult.errorCode,
+        yandexResult: primaryResult.provider === "yandex_ai_studio" ? primaryResult : void 0,
+        openAiResult: primaryResult.provider === "openai" ? primaryResult : secondaryResult
+      });
     }
     const IMAGE_CLASSIFICATION_V1_SHADOW_SCHEMA_VERSION = "personal-image-classification-v1-shadow-observation-v1";
     const IMAGE_CLASSIFICATION_V1_SHADOW_NAMESPACE = "image-classification-v1-shadow:v1";
@@ -2412,6 +2483,8 @@ var require_upload_duplicate_guard = __commonJS({
       "INVALID_REASON_CODE",
       "INVALID_SAFETY_PROPERTIES",
       "INVALID_SAFETY_VALUE",
+      "INVALID_EVIDENCE_PROPERTIES",
+      "INVALID_EVIDENCE_VALUE",
       "INVALID_WORK_PHOTO_PROPERTIES",
       "INVALID_WORK_PHOTO_CATEGORY",
       "INVALID_WORK_PHOTO_CLIENT_TYPE",
@@ -2439,37 +2512,81 @@ var require_upload_duplicate_guard = __commonJS({
     function sanitizeImageClassificationV1ShadowObservation(input) {
       const source = input && typeof input === "object" ? input : {};
       const result = source.classification && typeof source.classification === "object" ? source.classification : invalidImageClassification("INVALID_CLASSIFICATION");
-      const valid = result.valid === true && result.value && typeof result.value === "object";
-      const value = valid ? result.value : {};
+      const providerResult = (candidate, expectedProvider) => {
+        const attempted = Boolean(candidate && candidate.attempted === true);
+        const valid = Boolean(attempted && candidate.valid === true && candidate.value && typeof candidate.value === "object");
+        const value = valid ? candidate.value : {};
+        const kind = valid ? imageClassificationV1ShadowEnum(value.kind, IMAGE_CLASSIFICATION_KINDS, "other") : null;
+        const rawErrorCode = String(candidate && candidate.errorCode || (attempted ? "INVALID_CLASSIFICATION" : "NONE")).trim().toUpperCase();
+        const errorCode = valid || !attempted ? "NONE" : IMAGE_CLASSIFICATION_V1_SHADOW_ERROR_CODES.indexOf(rawErrorCode) === -1 ? "INVALID_CLASSIFICATION" : rawErrorCode;
+        return Object.freeze({
+          attempted,
+          provider: expectedProvider,
+          model: attempted && /^[A-Za-z0-9._:-]{1,120}$/.test(String(candidate.model || "")) ? String(candidate.model) : "unknown",
+          valid,
+          error_code: errorCode,
+          kind,
+          confidence: valid && typeof value.confidence === "number" && Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1 ? value.confidence : null,
+          work_photo: valid && kind === "work_photo" && value.work_photo ? {
+            category: imageClassificationV1ShadowEnum(value.work_photo.category, ["hair", "nails", "brows", "other"], "other"),
+            client_type: imageClassificationV1ShadowEnum(value.work_photo.client_type, ["male", "female", "unknown"], "unknown"),
+            service: value.work_photo.service === null ? null : imageClassificationV1ShadowEnum(value.work_photo.service, ["haircut", "coloring", "styling", "nails", "brows", "other"], "other")
+          } : null,
+          safety: {
+            is_banking: valid && value.safety && value.safety.is_banking === true,
+            is_document: valid && value.safety && value.safety.is_document === true,
+            has_payment_ui: valid && value.safety && value.safety.has_payment_ui === true,
+            has_receipt_text: valid && value.safety && value.safety.has_receipt_text === true
+          },
+          evidence: {
+            has_visible_client: valid && value.evidence && value.evidence.has_visible_client === true,
+            has_visible_service_result: valid && value.evidence && value.evidence.has_visible_service_result === true,
+            has_salon_context: valid && value.evidence && value.evidence.has_salon_context === true,
+            has_messaging_ui: valid && value.evidence && value.evidence.has_messaging_ui === true,
+            has_receipt_layout: valid && value.evidence && value.evidence.has_receipt_layout === true,
+            has_document_layout: valid && value.evidence && value.evidence.has_document_layout === true
+          },
+          reason_code: valid && IMAGE_CLASSIFICATION_REASON_CODES.indexOf(value.reason_code) !== -1 ? value.reason_code : null
+        });
+      };
+      const yandexResult = providerResult(result.yandexResult, "yandex_ai_studio");
+      const openAiResult = providerResult(result.openAiResult, "openai");
+      const selected = result.providerUsed === "yandex_ai_studio" ? yandexResult : result.providerUsed === "openai" ? openAiResult : providerResult({
+        attempted: true,
+        provider: result.providerUsed,
+        model: result.providerModel,
+        valid: result.valid,
+        value: result.value,
+        errorCode: result.errorCode
+      }, "unknown");
+      const valid = selected.valid;
       const currentKind = imageClassificationV1ShadowEnum(source.current_kind, ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other", "unknown"], "unknown");
-      const newKind = valid ? imageClassificationV1ShadowEnum(value.kind, IMAGE_CLASSIFICATION_KINDS, "other") : null;
-      const rawErrorCode = String(result.errorCode || "INVALID_CLASSIFICATION").trim().toUpperCase();
-      const errorCode = valid ? "NONE" : IMAGE_CLASSIFICATION_V1_SHADOW_ERROR_CODES.indexOf(rawErrorCode) === -1 ? "INVALID_CLASSIFICATION" : rawErrorCode;
-      const workPhoto = valid && newKind === "work_photo" && value.work_photo ? {
-        category: imageClassificationV1ShadowEnum(value.work_photo.category, ["hair", "nails", "brows", "other"], "other"),
-        client_type: imageClassificationV1ShadowEnum(value.work_photo.client_type, ["male", "female", "unknown"], "unknown"),
-        service: imageClassificationV1ShadowEnum(value.work_photo.service, ["haircut", "coloring", "styling", "nails", "brows", "other"], "other")
-      } : null;
+      const finalKind = source.final_production_kind === void 0
+        ? currentKind
+        : imageClassificationV1ShadowEnum(source.final_production_kind, ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other", "unknown"], "unknown");
+      const finalStatus = imageClassificationV1ShadowEnum(source.final_production_status, ["accepted", "rejected", "blocked", "processed", "unhandled", "error", "unknown"], "unknown");
       const safe = {
         schema_version: IMAGE_CLASSIFICATION_V1_SHADOW_SCHEMA_VERSION,
         captured_at: Number.isSafeInteger(source.captured_at) && source.captured_at >= 0 ? source.captured_at : Date.now(),
         case_id: /^img-[a-f0-9]{48}$/.test(String(source.case_id || "")) ? String(source.case_id) : "",
-        model: IMAGE_CLASSIFICATION_MODEL,
+        provider_used: selected.provider,
+        provider_model: selected.model,
+        provider_error_code: selected.error_code,
+        yandex_result: yandexResult,
+        openai_result: openAiResult,
         current_kind: currentKind,
-        new_kind: newKind,
-        confidence: valid && typeof value.confidence === "number" && Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1 ? value.confidence : null,
-        work_photo: workPhoto,
-        safety: {
-          is_banking: valid && value.safety && value.safety.is_banking === true,
-          is_document: valid && value.safety && value.safety.is_document === true,
-          has_payment_ui: valid && value.safety && value.safety.has_payment_ui === true,
-          has_receipt_text: valid && value.safety && value.safety.has_receipt_text === true
-        },
-        reason_code: valid && IMAGE_CLASSIFICATION_REASON_CODES.indexOf(value.reason_code) !== -1 ? value.reason_code : null,
+        final_production_kind: finalKind,
+        final_production_status: finalStatus,
+        new_kind: selected.kind,
+        confidence: selected.confidence,
+        work_photo: selected.work_photo,
+        safety: selected.safety,
+        evidence: selected.evidence,
+        reason_code: selected.reason_code,
         valid,
-        error_code: errorCode,
-        agreement: valid ? currentKind === newKind : false,
-        disagreement: valid ? currentKind !== newKind : false
+        error_code: selected.error_code,
+        agreement: valid ? finalKind === selected.kind : false,
+        disagreement: valid ? finalKind !== selected.kind : false
       };
       return Object.freeze(safe);
     }
@@ -2525,6 +2642,8 @@ var require_upload_duplicate_guard = __commonJS({
           case_id: imageClassificationV1ShadowCaseId(input.content),
           captured_at: Date.now(),
           current_kind: normalizeCurrentImageClassificationV1Kind(input.currentPrimaryDecision),
+          final_production_kind: input.finalProductionKind,
+          final_production_status: input.finalProductionStatus,
           classification
         });
         const recorder = typeof input.record === "function" ? input.record : recordImageClassificationV1ShadowObservation;
@@ -9180,6 +9299,7 @@ var C = class extends j.App {
         let explicitMailingIntent = false;
         let selectedPrimaryDecision;
         let selectedPrimaryVisionUnavailable = false;
+        let scheduleShadowOutcome;
         if (hasPersonalImageUpload) {
           [explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent] = await Promise.all([
             this.activePhotoReportIntent(n, e.room),
@@ -9215,11 +9335,13 @@ var C = class extends j.App {
             selectedPrimaryVisionUnavailable = true;
             this.getLogger().warn(`Primary Vision intent verification failed: ${visionError && visionError.message || visionError}`);
           }
-          G.scheduleImageClassificationV1Shadow({
+          scheduleShadowOutcome = (finalProductionKind, finalProductionStatus) => G.scheduleImageClassificationV1Shadow({
             enabled: i.imageClassificationV1ShadowEnabled,
             file: primaryRoutingDiagnostic && primaryRoutingDiagnostic._image_classification_v1_shadow_file,
             content: primaryRoutingDiagnostic && primaryRoutingDiagnostic._image_classification_v1_shadow_content,
             currentPrimaryDecision: selectedPrimaryDecision,
+            finalProductionKind,
+            finalProductionStatus,
             read: n,
             persistence: s,
             http: t,
@@ -9261,6 +9383,7 @@ var C = class extends j.App {
                 ? "⚠️ Чек не принят: Vision не подтвердил финансовый документ."
                 : "⚠️ Рассылка не принята: Vision не подтвердил скриншот рассылки.";
             if (appUser) await r.getCreator().finish(r.getCreator().startMessage().setSender(appUser).setRoom(e.room).setText(mismatchText));
+            scheduleShadowOutcome("unknown", "blocked");
             return;
           }
         }
@@ -9285,6 +9408,7 @@ var C = class extends j.App {
           const appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();
           if (appUser) await r.getCreator().finish(r.getCreator().startMessage().setSender(appUser).setRoom(e.room).setText("✅ РАССЫЛКИ ПРИНЯТЫ"));
           await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
+          if (typeof scheduleShadowOutcome === "function") scheduleShadowOutcome("mailing_proof", "accepted");
           return;
         }
       if (uploadEventKey && !postMessageClaimToken) {
@@ -9315,6 +9439,11 @@ var C = class extends j.App {
           allowYandexSafetyFallback: explicitPhotoIntent
         }
       );
+      if (typeof scheduleShadowOutcome === "function") {
+        const finalKind = mediaV2 && mediaV2.status === "work-photo-forwarded" ? "work_photo" : explicitTransferIntent ? "receipt" : "unknown";
+        const finalStatus = mediaV2 && mediaV2.handled ? mediaV2.status === "work-photo-forwarded" ? "accepted" : "processed" : "unhandled";
+        scheduleShadowOutcome(finalKind, finalStatus);
+      }
       if (mediaV2.handled) {
         if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
         if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);
@@ -9757,17 +9886,6 @@ var C = class extends j.App {
     } catch (error) {
       this.getLogger().warn(`Automatic personal image classification unavailable; keeping buttons active: ${error && error.message || error}`);
     }
-    G.scheduleImageClassificationV1Shadow({
-      enabled: config.imageClassificationV1ShadowEnabled,
-      file: diagnostic && diagnostic._image_classification_v1_shadow_file,
-      content: diagnostic && diagnostic._image_classification_v1_shadow_content,
-      currentPrimaryDecision: primaryDecision,
-      read,
-      persistence,
-      http,
-      config,
-      logger: this.getLogger()
-    });
     // A button may have won while the provider request was in flight. Re-read
     // the state before attempting the existing shared processing claim.
     record = await G.readManualImageSelection(read, selectionKey);
@@ -9778,6 +9896,19 @@ var C = class extends j.App {
       record.updatedAt = Date.now();
       await G.writeManualImageSelection(persistence, record);
       this.getLogger().info(`PERSONAL_IMAGE_AUTO_FALLBACK_V1 stage=manual_fallback route=unknown`);
+      G.scheduleImageClassificationV1Shadow({
+        enabled: config.imageClassificationV1ShadowEnabled,
+        file: diagnostic && diagnostic._image_classification_v1_shadow_file,
+        content: diagnostic && diagnostic._image_classification_v1_shadow_content,
+        currentPrimaryDecision: primaryDecision,
+        finalProductionKind: "unknown",
+        finalProductionStatus: "unhandled",
+        read,
+        persistence,
+        http,
+        config,
+        logger: this.getLogger()
+      });
       return;
     }
     this.getLogger().info(`PERSONAL_IMAGE_AUTO_FALLBACK_V1 stage=pipeline_started route=${route}`);
@@ -9788,7 +9919,9 @@ var C = class extends j.App {
     }, route, {
       intentSource: "auto",
       primaryVisionDecision: primaryDecision,
-      primaryVisionAttempted: true
+      primaryVisionAttempted: true,
+      shadowFile: diagnostic && diagnostic._image_classification_v1_shadow_file,
+      shadowContent: diagnostic && diagnostic._image_classification_v1_shadow_content
     });
   }
   async personalImageMediaSettleRetryJob(jobContext, read, modify, http, persistence) {
@@ -9970,6 +10103,9 @@ var C = class extends j.App {
     const config = await this.receiptOcrConfig(read);
     let statusMessageId = "";
     let outcome = "failed";
+    let shadowFile = options.shadowFile;
+    let shadowContent = options.shadowContent;
+    let shadowPrimaryDecision = options.primaryVisionDecision;
     try {
       const diagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(sourceMessage));
       let primaryDecision = options.primaryVisionDecision;
@@ -9980,6 +10116,9 @@ var C = class extends j.App {
           this.getLogger().warn(`Primary Vision manual routing failed; preserving legacy fallback: ${error && error.message || error}`);
         }
       }
+      shadowPrimaryDecision = primaryDecision;
+      shadowFile = shadowFile || diagnostic._image_classification_v1_shadow_file;
+      shadowContent = shadowContent || diagnostic._image_classification_v1_shadow_content;
       // A manual selection is offered only when the primary classifier did not
       // produce a terminal HIGH route. Preserve the explicit user choice; the
       // primary decision remains a positive financial/document safety guard
@@ -10047,6 +10186,21 @@ var C = class extends j.App {
       record.updatedAt = Date.now();
       await G.writeManualImageSelection(persistence, record);
       await G.completePostMessageClaim(sourceMessage, claimToken, persistence, this.getLogger());
+      const finalProductionKind = /^receipt-|^not-receipt/.test(outcome) ? "receipt" : /^work-photo-/.test(outcome) ? "work_photo" : /^mailing-/.test(outcome) ? "mailing_proof" : "unknown";
+      const finalProductionStatus = /forwarded|already-published|recorded/.test(outcome) ? "accepted" : /blocked|not-receipt/.test(outcome) ? "rejected" : outcome === "processing-error" ? "error" : "processed";
+      G.scheduleImageClassificationV1Shadow({
+        enabled: config.imageClassificationV1ShadowEnabled,
+        file: shadowFile,
+        content: shadowContent,
+        currentPrimaryDecision: shadowPrimaryDecision,
+        finalProductionKind,
+        finalProductionStatus,
+        read,
+        persistence,
+        http,
+        config,
+        logger: this.getLogger()
+      });
     }
     return true;
   }

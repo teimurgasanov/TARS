@@ -36,6 +36,7 @@ const imageClassification = {
   confidence: 0.96,
   work_photo: { category: "hair", client_type: "female", service: "styling" },
   safety: { is_banking: false, is_document: false, has_payment_ui: false, has_receipt_text: false },
+  evidence: { has_visible_client: true, has_visible_service_result: true, has_salon_context: true, has_messaging_ui: false, has_receipt_layout: false, has_document_layout: false },
   reason_code: "WORK_PHOTO_HAIR"
 };
 
@@ -141,6 +142,11 @@ async function run() {
   );
   assert.strictEqual(classification.valid, true);
   assert.strictEqual(classification.value.kind, "work_photo");
+  assert.strictEqual(classification.providerUsed, "yandex_ai_studio");
+  assert.strictEqual(classification.providerModel, "qwen3.6-35b-a3b");
+  assert.strictEqual(classification.providerErrorCode, "NONE");
+  assert.strictEqual(classification.yandexResult.valid, true);
+  assert.strictEqual(classification.openAiResult, void 0, "successful Yandex shadow result must not trigger OpenAI");
 
   const primary = await api.primaryVisionDecisionForImage(
     { id: "primary-upload", name: "primary.png", type: "image/png" },
@@ -188,6 +194,29 @@ async function run() {
     assert(image && image.image_url.startsWith("data:image/png;base64,"));
     assert.strictEqual(Object.prototype.hasOwnProperty.call(image, "detail"), false, "Yandex image input must use its compatible shape");
   }
+
+  const separatedCalls = [];
+  const separatedClassification = await api.requestOpenAiImageClassification(
+    { name: "separated.png", type: "image/png" },
+    Buffer.from([54, 55, 56]),
+    {
+      post: async (url) => {
+        separatedCalls.push(url);
+        return url === YANDEX_URL
+          ? { statusCode: 500, data: {} }
+          : responseFor(imageClassification);
+      }
+    },
+    yandexConfig,
+    { warn: () => {} }
+  );
+  assert.strictEqual(separatedClassification.valid, false, "OpenAI benchmark must not replace the primary Yandex verdict");
+  assert.strictEqual(separatedClassification.providerUsed, "yandex_ai_studio");
+  assert.strictEqual(separatedClassification.providerErrorCode, "PROVIDER_RETRY_EXHAUSTED");
+  assert.strictEqual(separatedClassification.yandexResult.valid, false);
+  assert.strictEqual(separatedClassification.openAiResult.valid, true);
+  assert.strictEqual(separatedClassification.openAiResult.value.kind, "work_photo");
+  assert.deepStrictEqual(separatedCalls, [YANDEX_URL, YANDEX_URL, "https://api.openai.com/v1/responses"]);
 
   const fallbackCalls = [];
   const fallbackCandidate = await api.requestOpenAiReceiptCheck(
