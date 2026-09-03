@@ -174,6 +174,7 @@ async function run() {
   assert.strictEqual(receiptCall.request.data.text.format.name, "tars_receipt_fields_v1");
   assert.strictEqual(receiptCall.request.data.text.format.strict, true);
   assert.strictEqual(receiptCall.request.data.text.format.schema.additionalProperties, false);
+  assert.strictEqual(receiptCall.request.data.max_output_tokens, 4096, "Yandex receipt Vision must leave room for its default reasoning before strict JSON");
   assert(receiptCall.request.data.text.format.schema.required.includes("amount"));
   assert(receiptCall.request.data.text.format.schema.required.includes("date"));
 
@@ -209,6 +210,7 @@ async function run() {
   assert.deepStrictEqual(fallbackCalls.map((call) => call.url), [YANDEX_URL, "https://api.openai.com/v1/responses"], "malformed Yandex output must fall back once to OpenAI");
   assert.strictEqual(fallbackCalls[1].request.headers.Authorization, "Bearer openai-test-secret");
   assert.strictEqual(fallbackCalls[1].request.data.text.format.name, "tars_receipt_fields_v1");
+  assert.strictEqual(fallbackCalls[1].request.data.max_output_tokens, 800, "OpenAI fallback keeps the existing bounded output budget");
 
   const schemaFallbackCalls = [];
   const schemaFallbackCandidate = await api.requestOpenAiReceiptCheck(

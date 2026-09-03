@@ -5052,7 +5052,13 @@ var require_upload_duplicate_guard = __commonJS({
                 schema: diagnosticRole === "primary" && !focusAmount && !focusDate ? RECEIPT_PRIMARY_VISION_SCHEMA : RECEIPT_VISION_SCHEMA
               }
             },
-            max_output_tokens: 800
+            // Qwen 3.6 uses reasoning mode by default in Yandex AI Studio.
+            // The Responses API counts those hidden reasoning tokens against
+            // max_output_tokens, so a receipt request can otherwise finish
+            // with HTTP 2xx but no final structured JSON. Keep the OpenAI
+            // budget unchanged and reserve enough room only for Yandex to
+            // emit the strict receipt object after its visual analysis.
+            max_output_tokens: provider.id === "yandex_ai_studio" ? 4096 : 800
           },
           timeout: 14e3
         });
