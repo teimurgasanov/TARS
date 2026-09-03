@@ -67,6 +67,7 @@ function runtime(suffix, options = {}) {
     getUserReader() {
       return {
         async getByUsername(username) { return username === "tars" ? appUser : username === user.username ? user : undefined; },
+        async getById(id) { return String(id) === user.id ? user : String(id) === appUser.id ? appUser : undefined; },
         async getAppUser() { return appUser; }
       };
     },
@@ -192,9 +193,13 @@ function runtime(suffix, options = {}) {
     messages.set(input.id, input);
     await app.executePostMessageSent(input, read, http, persistence, modify);
   }
-  async function runJob(index = 0) {
+  async function runJob(index = 0, contextShape = "direct") {
     assert(jobs[index], `scheduled job ${index} is missing`);
-    await app.automaticPersonalImageClassificationJob(jobs[index].data, read, modify, http, persistence);
+    const data = jobs[index].data;
+    const context = contextShape === "serialized-data" ? { data: JSON.stringify(data) }
+      : contextShape === "serialized-job-data" ? { jobData: JSON.stringify(data) }
+      : data;
+    await app.automaticPersonalImageClassificationJob(context, read, modify, http, persistence);
   }
   return { app, counters, deleted, execute, file, guard, http, jobs, message, messages, modify, persistence, providerCalls, published, read, records, room, runJob, user };
 }
@@ -226,6 +231,25 @@ function selectionRecord(state) {
     assert.strictEqual(photo.providerCalls.length, 1, "automatic route must make one Vision decision");
     await photo.runJob();
     assert.strictEqual(photo.counters.photo, 1, "repeated scheduler delivery must be idempotent");
+
+    const schedulerWrapped = runtime("scheduler-wrapped", { kind: "work_photo" });
+    await schedulerWrapped.execute();
+    const storedWithoutMedia = { ...schedulerWrapped.message };
+    delete storedWithoutMedia.file;
+    storedWithoutMedia.files = [];
+    schedulerWrapped.messages.set(storedWithoutMedia.id, storedWithoutMedia);
+    await schedulerWrapped.runJob(0, "serialized-job-data");
+    assert.strictEqual(schedulerWrapped.providerCalls.length, 1, "serialized scheduler data must reach Vision");
+    assert.strictEqual(schedulerWrapped.counters.photo, 1, "persisted canonical upload must survive a media-less MessageReader result");
+    assert.strictEqual(selectionRecord(schedulerWrapped).status, "completed");
+
+    const sourceRecreated = runtime("source-recreated", { kind: "work_photo" });
+    await sourceRecreated.execute();
+    sourceRecreated.messages.delete(sourceRecreated.message.id);
+    await sourceRecreated.runJob(0, "serialized-data");
+    assert.strictEqual(sourceRecreated.providerCalls.length, 1, "persisted upload must reach Vision when the source message is unavailable");
+    assert.strictEqual(sourceRecreated.counters.photo, 1, "room, sender, and canonical upload must be safely reconstructed");
+    assert.strictEqual(selectionRecord(sourceRecreated).status, "completed");
 
     const receipt = runtime("auto-receipt", { kind: "receipt" });
     await receipt.execute();

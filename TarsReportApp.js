@@ -1266,6 +1266,92 @@ var require_upload_duplicate_guard = __commonJS({
       const key = String(selectionKey || "");
       return key ? new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `manual-image-selection-v1:${key}`) : void 0;
     }
+    function scheduledManualImageSelectionKey(jobContext) {
+      const candidates = [
+        { value: jobContext, shape: "direct" },
+        { value: jobContext && jobContext.data, shape: "data" },
+        { value: jobContext && jobContext.jobData, shape: "job_data" },
+        { value: jobContext && jobContext.payload, shape: "payload" }
+      ];
+      for (const candidate of candidates) {
+        let value = candidate.value;
+        if (typeof value === "string") {
+          try {
+            value = JSON.parse(value);
+          } catch (_2) {
+            value = void 0;
+          }
+        }
+        const selectionKey = String(value && value.selectionKey || "");
+        if (selectionKey && selectionKey.length <= 512 && !/[\u0000-\u001f\u007f]/.test(selectionKey)) {
+          return { selectionKey, shape: candidate.shape };
+        }
+      }
+      return { selectionKey: "", shape: "unknown" };
+    }
+    function manualImageSelectionSourceDescriptor(message) {
+      let best;
+      for (const file of messageImageFiles(message)) {
+        const uploadId = String(file && (file._id || file.id) || "");
+        if (!uploadId) continue;
+        const name = String(file && (file.name || file.title || "") || "").split("?")[0].split("/").pop();
+        const previewFallback = Boolean(message && message.__mediaV2PreviewOnly === true || /^thumb[-_]/i.test(name));
+        const priority = previewFallback ? 1 : 2;
+        if (!best || priority > best.priority) {
+          best = {
+            sourceUploadId: uploadId,
+            sourceMimeType: /^image\/(?:jpeg|png|webp|heic|heif)$/i.test(String(file && (file.type || file.mimeType) || "")) ? String(file.type || file.mimeType).toLowerCase() : "image/jpeg",
+            sourcePreviewFallback: previewFallback,
+            priority
+          };
+        }
+      }
+      if (!best) return { sourceUploadId: "", sourceMimeType: "", sourcePreviewFallback: false };
+      return {
+        sourceUploadId: best.sourceUploadId,
+        sourceMimeType: best.sourceMimeType,
+        sourcePreviewFallback: best.sourcePreviewFallback
+      };
+    }
+    async function manualImageSelectionSourceMessage(read, record) {
+      if (!read || !record) return void 0;
+      let message;
+      try {
+        message = await read.getMessageReader().getById(record.sourceMessageId);
+      } catch (_2) {
+        message = void 0;
+      }
+      let room = message && message.room;
+      if ((!room || !isPersonalTarsRoom(room)) && record.roomId) {
+        try {
+          room = await read.getRoomReader().getById(record.roomId) || room;
+        } catch (_2) {
+        }
+      }
+      let sender = message && message.sender;
+      if (!sender && record.requestedBy) {
+        try {
+          sender = await read.getUserReader().getById(record.requestedBy);
+        } catch (_2) {
+        }
+      }
+      const hydrated = { ...message || {}, room, sender };
+      if (!messageImageFiles(hydrated).length && record.sourceUploadId) {
+        const type = /^image\/(?:jpeg|png|webp|heic|heif)$/i.test(String(record.sourceMimeType || "")) ? String(record.sourceMimeType).toLowerCase() : "image/jpeg";
+        const extension = type.split("/")[1] === "jpeg" ? "jpg" : type.split("/")[1];
+        const file = {
+          _id: String(record.sourceUploadId),
+          id: String(record.sourceUploadId),
+          type,
+          name: `${record.sourcePreviewFallback ? "thumb-fallback" : "canonical"}.${extension}`
+        };
+        hydrated.file = file;
+        hydrated.files = [file];
+        hydrated.__mediaV2PreviewOnly = record.sourcePreviewFallback === true;
+      }
+      if (!hydrated.id && record.sourceMessageId) hydrated.id = String(record.sourceMessageId);
+      return hydrated;
+    }
     async function readManualImageSelection(read, selectionKey) {
       const association = manualImageSelectionAssociation(selectionKey);
       if (!read || !association) return void 0;
@@ -7994,6 +8080,9 @@ var require_upload_duplicate_guard = __commonJS({
       postMessageClaimKey,
       readManualImageSelection,
       writeManualImageSelection,
+      scheduledManualImageSelectionKey,
+      manualImageSelectionSourceDescriptor,
+      manualImageSelectionSourceMessage,
       cleanupDuplicateReportForwardsInOtchet,
       cleanupMailingProofForwardsInOtchet,
       IMAGE_CLASSIFICATION_V1_SCHEMA,
@@ -9167,32 +9256,32 @@ var C = class extends j.App {
     }
   }
   async automaticPersonalImageClassificationJob(jobContext, read, modify, http, persistence) {
-    const selectionKey = String(jobContext && (jobContext.selectionKey || jobContext.data && jobContext.data.selectionKey) || "");
-    if (!selectionKey || !read || !modify || !persistence) return;
+    const scheduledContext = G.scheduledManualImageSelectionKey(jobContext);
+    const selectionKey = scheduledContext.selectionKey;
+    if (!selectionKey || !read || !modify || !persistence) {
+      this.getLogger().warn(`PERSONAL_IMAGE_AUTO_FALLBACK_V1 stage=context_invalid context_shape=${scheduledContext.shape}`);
+      return;
+    }
     const config = await this.receiptOcrConfig(read);
-    if (!config.personalImageAutoFallbackEnabled) return;
+    if (!config.personalImageAutoFallbackEnabled) {
+      this.getLogger().info(`PERSONAL_IMAGE_AUTO_FALLBACK_V1 stage=setting_disabled context_shape=${scheduledContext.shape}`);
+      return;
+    }
     let record = await G.readManualImageSelection(read, selectionKey);
-    if (!record || record.status !== "pending" || Number(record.expiresAt || 0) <= Date.now()) return;
-    let sourceMessage;
-    try {
-      sourceMessage = await read.getMessageReader().getById(record.sourceMessageId);
-    } catch (_2) {
-      sourceMessage = void 0;
+    if (!record || record.status !== "pending" || Number(record.expiresAt || 0) <= Date.now()) {
+      this.getLogger().info(`PERSONAL_IMAGE_AUTO_FALLBACK_V1 stage=state_inactive context_shape=${scheduledContext.shape} selection_state=${record ? String(record.status || "unknown") : "missing"}`);
+      return;
     }
-    if (sourceMessage && !G.isPersonalTarsRoom(sourceMessage.room) && record.roomId) {
-      try {
-        const sourceRoom = await read.getRoomReader().getById(record.roomId);
-        if (sourceRoom) sourceMessage = { ...sourceMessage, room: sourceRoom };
-      } catch (_2) {
-      }
-    }
+    const sourceMessage = await G.manualImageSelectionSourceMessage(read, record);
     if (!sourceMessage || !G.isPersonalTarsRoom(sourceMessage.room) || !G.messageImageFiles(sourceMessage).length) {
       record.status = "needs_intent";
       record.outcome = "auto-source-unavailable";
       record.updatedAt = Date.now();
       await G.writeManualImageSelection(persistence, record);
+      this.getLogger().warn(`PERSONAL_IMAGE_AUTO_FALLBACK_V1 stage=source_unavailable context_shape=${scheduledContext.shape}`);
       return;
     }
+    this.getLogger().info(`PERSONAL_IMAGE_AUTO_FALLBACK_V1 stage=vision_started context_shape=${scheduledContext.shape} source=${record.sourceUploadId ? "persisted_upload" : "message"}`);
     const diagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(sourceMessage));
     let primaryDecision;
     let route = "";
@@ -9222,8 +9311,10 @@ var C = class extends j.App {
       record.outcome = primaryDecision && primaryDecision.parser_state === "parsed" ? "auto-unknown" : "auto-provider-unavailable";
       record.updatedAt = Date.now();
       await G.writeManualImageSelection(persistence, record);
+      this.getLogger().info(`PERSONAL_IMAGE_AUTO_FALLBACK_V1 stage=manual_fallback route=unknown`);
       return;
     }
+    this.getLogger().info(`PERSONAL_IMAGE_AUTO_FALLBACK_V1 stage=pipeline_started route=${route}`);
     await this.handleManualImageTypeSelection(read, http, persistence, modify, {
       room: sourceMessage.room,
       user: { id: record.requestedBy },
@@ -9282,6 +9373,7 @@ var C = class extends j.App {
         sourceMessageId: String(message.id || ""),
         roomId: String(message.room.id || ""),
         requestedBy: String(message.sender.id || ""),
+        ...G.manualImageSelectionSourceDescriptor(message),
         promptMessageId: String(promptMessageId || ""),
         status: "pending",
         selectedType: "",
@@ -9347,19 +9439,7 @@ var C = class extends j.App {
       await this.removeManualImageSelectionPrompt(read, modify, data, record);
       return true;
     }
-    let sourceMessage;
-    try {
-      sourceMessage = await read.getMessageReader().getById(record.sourceMessageId);
-    } catch (_2) {
-      sourceMessage = void 0;
-    }
-    if (sourceMessage && !G.isPersonalTarsRoom(sourceMessage.room) && record.roomId) {
-      try {
-        const sourceRoom = await read.getRoomReader().getById(record.roomId);
-        if (sourceRoom) sourceMessage = { ...sourceMessage, room: sourceRoom };
-      } catch (_2) {
-      }
-    }
+    const sourceMessage = await G.manualImageSelectionSourceMessage(read, record);
     if (!sourceMessage || !G.messageImageFiles(sourceMessage).length || !G.isPersonalTarsRoom(sourceMessage.room)) {
       record.status = "completed";
       record.selectedType = selectedType;
