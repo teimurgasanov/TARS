@@ -169,6 +169,14 @@ async function run() {
   assert.strictEqual(receiptCandidate.receiptDate, "2026-09-03");
   assert.strictEqual(receiptCandidate.receiptAmount, 1300);
 
+  const receiptCall = calls[calls.length - 1];
+  assert.strictEqual(receiptCall.request.data.text.format.type, "json_schema");
+  assert.strictEqual(receiptCall.request.data.text.format.name, "tars_receipt_fields_v1");
+  assert.strictEqual(receiptCall.request.data.text.format.strict, true);
+  assert.strictEqual(receiptCall.request.data.text.format.schema.additionalProperties, false);
+  assert(receiptCall.request.data.text.format.schema.required.includes("amount"));
+  assert(receiptCall.request.data.text.format.schema.required.includes("date"));
+
   assert.strictEqual(calls.length, 4, "each isolated Vision path must make one provider call");
   for (const call of calls) {
     assert.strictEqual(call.url, YANDEX_URL);
@@ -179,6 +187,78 @@ async function run() {
     assert(image && image.image_url.startsWith("data:image/png;base64,"));
     assert.strictEqual(Object.prototype.hasOwnProperty.call(image, "detail"), false, "Yandex image input must use its compatible shape");
   }
+
+  const fallbackCalls = [];
+  const fallbackCandidate = await api.requestOpenAiReceiptCheck(
+    { name: "fallback.png", type: "image/png" },
+    Buffer.from([61, 62, 63]),
+    {
+      post: async (url, request) => {
+        fallbackCalls.push({ url, request });
+        if (url === YANDEX_URL) {
+          return { statusCode: 200, data: { output: [{ content: [{ type: "output_text", text: "not-json" }] }] } };
+        }
+        return responseFor(receipt);
+      }
+    },
+    yandexConfig,
+    "2026-09-03",
+    { warn: () => {} }
+  );
+  assert.strictEqual(fallbackCandidate.receiptAmount, 1300);
+  assert.deepStrictEqual(fallbackCalls.map((call) => call.url), [YANDEX_URL, "https://api.openai.com/v1/responses"], "malformed Yandex output must fall back once to OpenAI");
+  assert.strictEqual(fallbackCalls[1].request.headers.Authorization, "Bearer openai-test-secret");
+  assert.strictEqual(fallbackCalls[1].request.data.text.format.name, "tars_receipt_fields_v1");
+
+  const schemaFallbackCalls = [];
+  const schemaFallbackCandidate = await api.requestOpenAiReceiptCheck(
+    { name: "schema-fallback.png", type: "image/png" },
+    Buffer.from([64, 65, 66]),
+    {
+      post: async (url, request) => {
+        schemaFallbackCalls.push({ url, request });
+        return url === YANDEX_URL ? responseFor({ is_receipt: true }) : responseFor(receipt);
+      }
+    },
+    yandexConfig,
+    "2026-09-03",
+    { warn: () => {} }
+  );
+  assert.strictEqual(schemaFallbackCandidate.receiptAmount, 1300);
+  assert.deepStrictEqual(schemaFallbackCalls.map((call) => call.url), [YANDEX_URL, "https://api.openai.com/v1/responses"], "schema-mismatched Yandex output must fall back once to OpenAI");
+
+  const transportFallbackCalls = [];
+  const transportFallbackCandidate = await api.requestOpenAiReceiptCheck(
+    { name: "transport-fallback.png", type: "image/png" },
+    Buffer.from([71, 72, 73]),
+    {
+      post: async (url, request) => {
+        transportFallbackCalls.push({ url, request });
+        return url === YANDEX_URL ? { statusCode: 500, data: {} } : responseFor(receipt);
+      }
+    },
+    yandexConfig,
+    "2026-09-03",
+    { warn: () => {} },
+    1
+  );
+  assert.strictEqual(transportFallbackCandidate.receiptDate, "2026-09-03");
+  assert.deepStrictEqual(transportFallbackCalls.map((call) => call.url), [YANDEX_URL, "https://api.openai.com/v1/responses"], "exhausted Yandex transport retry must fall back once to OpenAI");
+
+  const noOpenAiCalls = [];
+  const noOpenAiCandidate = await api.requestOpenAiReceiptCheck(
+    { name: "no-openai.png", type: "image/png" },
+    Buffer.from([81, 82, 83]),
+    { post: async (url) => {
+      noOpenAiCalls.push(url);
+      return { statusCode: 200, data: { output: [{ content: [{ type: "output_text", text: "not-json" }] }] } };
+    } },
+    { ...yandexConfig, openaiApiKey: "" },
+    "2026-09-03",
+    { warn: () => {} }
+  );
+  assert.strictEqual(noOpenAiCandidate, void 0, "without an OpenAI key malformed Yandex output must preserve the previous inconclusive result");
+  assert.deepStrictEqual(noOpenAiCalls, [YANDEX_URL]);
 
   const config = await readReceiptOcrConfigFromCanonicalBundle({
     yandex_ai_studio_api_key: "runtime-yandex-key",
