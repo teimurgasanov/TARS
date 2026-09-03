@@ -155,6 +155,7 @@ jobs:
           node --check tests/scanner2-deploy-token-hygiene.test.js
           node --check tests/receipt-vision-engine-v1.test.js
           node --check tests/receipt-extraction-fixes-v1.test.js
+          node --check tests/receipt-replay-v1.test.js
           git diff --check
 
       - name: Run all Scanner 2.0 tests
@@ -190,7 +191,8 @@ jobs:
           set -euo pipefail
           node tests/receipt-vision-engine-v1.test.js
           node tests/receipt-extraction-fixes-v1.test.js
-          echo "RECEIPT_VISION_ENGINE_V1_TEST_COUNT=2" >> "$GITHUB_ENV"
+          node tests/receipt-replay-v1.test.js
+          echo "RECEIPT_VISION_ENGINE_V1_TEST_COUNT=3" >> "$GITHUB_ENV"
 
       - name: Run 77 legacy TARS tests
         shell: bash
@@ -201,7 +203,7 @@ jobs:
             echo "==> $test_file"
             node "$test_file"
             legacy_count=$((legacy_count + 1))
-          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' ! -name 'yandex-ai-studio-vision-provider.test.js' ! -name 'receipt-vision-engine-v1.test.js' ! -name 'receipt-extraction-fixes-v1.test.js' | sort)
+          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' ! -name 'yandex-ai-studio-vision-provider.test.js' ! -name 'receipt-vision-engine-v1.test.js' ! -name 'receipt-extraction-fixes-v1.test.js' ! -name 'receipt-replay-v1.test.js' | sort)
           test "$legacy_count" -eq 77
           echo "LEGACY_TEST_COUNT=$legacy_count" >> "$GITHUB_ENV"
 
