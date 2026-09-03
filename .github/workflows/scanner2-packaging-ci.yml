@@ -25,6 +25,7 @@ on:
       - fix/preselected-photo-financial-veto-only
       - fix/photo-button-vision-safety-only
       - feature/image-classification-v1-shadow
+      - feature/image-classification-v1-shadow-isolated
       - fix/receipt-openai-unavailable-fallback
       - fix/receipt-openai-runtime-fallback
       - feature/tars-maximum-vision
@@ -87,6 +88,8 @@ jobs:
       || github.base_ref == 'fix/photo-button-vision-safety-only'
       || github.head_ref == 'feature/image-classification-v1-shadow'
       || github.base_ref == 'feature/image-classification-v1-shadow'
+      || github.head_ref == 'feature/image-classification-v1-shadow-isolated'
+      || github.base_ref == 'feature/image-classification-v1-shadow-isolated'
       || github.head_ref == 'fix/receipt-openai-unavailable-fallback'
       || github.base_ref == 'fix/receipt-openai-unavailable-fallback'
       || github.head_ref == 'fix/receipt-openai-runtime-fallback'

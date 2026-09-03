@@ -46,22 +46,34 @@ const safety = (overrides = {}) => ({
   ...overrides
 });
 
+const evidence = (overrides = {}) => ({
+  has_visible_client: false,
+  has_visible_service_result: false,
+  has_salon_context: false,
+  has_messaging_ui: false,
+  has_receipt_layout: false,
+  has_document_layout: false,
+  ...overrides
+});
+
 const classification = (overrides = {}) => ({
   schema_version: "personal-image-classification-v1",
   kind: "other",
   confidence: 0.5,
   work_photo: null,
   safety: safety(),
+  evidence: evidence(),
   reason_code: "OTHER_IMAGE",
   ...overrides
 });
 
 const validCases = [
-  classification({ kind: "receipt", confidence: 0.98, safety: safety({ is_banking: true, has_payment_ui: true, has_receipt_text: true }), reason_code: "RECEIPT_OR_PAYMENT" }),
-  classification({ kind: "work_photo", confidence: 0.94, work_photo: { category: "hair", client_type: "female", service: "coloring" }, reason_code: "WORK_PHOTO_HAIR" }),
+  classification({ kind: "receipt", confidence: 0.98, safety: safety({ is_banking: true, has_payment_ui: true, has_receipt_text: true }), evidence: evidence({ has_receipt_layout: true, has_document_layout: true }), reason_code: "RECEIPT_OR_PAYMENT" }),
+  classification({ kind: "work_photo", confidence: 0.94, work_photo: { category: "hair", client_type: "female", service: "coloring" }, evidence: evidence({ has_visible_client: true, has_visible_service_result: true, has_salon_context: true }), reason_code: "WORK_PHOTO_HAIR" }),
   classification({ kind: "work_photo", confidence: 0.91, work_photo: { category: "hair", client_type: "male", service: "haircut" }, reason_code: "WORK_PHOTO_HAIR" }),
   classification({ kind: "work_photo", confidence: 0.9, work_photo: { category: "nails", client_type: "unknown", service: "nails" }, reason_code: "WORK_PHOTO_NAILS" }),
   classification({ kind: "work_photo", confidence: 0.89, work_photo: { category: "brows", client_type: "female", service: "brows" }, reason_code: "WORK_PHOTO_BROWS" }),
+  classification({ kind: "work_photo", confidence: 0.72, work_photo: { category: "other", client_type: "unknown", service: null }, reason_code: "WORK_PHOTO_OTHER" }),
   classification({ kind: "mailing_proof", confidence: 0.93, reason_code: "MAILING_PROOF" }),
   classification({ kind: "report_or_screenshot", confidence: 0.88, reason_code: "REPORT_OR_SCREENSHOT" }),
   classification({ kind: "other", confidence: 0.8, reason_code: "OTHER_IMAGE" }),
@@ -95,6 +107,7 @@ assert.strictEqual(api.IMAGE_CLASSIFICATION_MODEL, "gpt-5.4-nano-2026-03-17");
 assert.strictEqual(api.IMAGE_CLASSIFICATION_V1_SCHEMA.additionalProperties, false);
 assert.strictEqual(api.IMAGE_CLASSIFICATION_V1_SCHEMA.properties.work_photo.anyOf[1].additionalProperties, false);
 assert.strictEqual(api.IMAGE_CLASSIFICATION_V1_SCHEMA.properties.safety.additionalProperties, false);
+assert.strictEqual(api.IMAGE_CLASSIFICATION_V1_SCHEMA.properties.evidence.additionalProperties, false);
 
 function responseFor(value, statusCode = 200) {
   return {
@@ -103,7 +116,12 @@ function responseFor(value, statusCode = 200) {
   };
 }
 
-const config = { openaiApiKey: "test-key" };
+const folderId = "b1gtestfolder";
+const config = {
+  yandexAiStudioApiKey: "test-yandex-key",
+  yandexAiStudioFolderId: folderId,
+  yandexAiStudioModel: "qwen3.6-35b-a3b"
+};
 const file = { name: "canonical.png", type: "image/png" };
 
 async function run() {
@@ -120,15 +138,16 @@ async function run() {
   const result = await api.requestOpenAiImageClassification(file, imageBytes, successHttp, config);
   assert.strictEqual(result.valid, true);
   assert.strictEqual(successCalls, 1);
-  assert.strictEqual(capturedRequest.data.model, "gpt-5.4-nano-2026-03-17");
+  assert.strictEqual(capturedRequest.data.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
   assert.strictEqual(capturedRequest.data.store, false);
   assert.deepStrictEqual(capturedRequest.data.reasoning, { effort: "none" });
   assert.strictEqual(capturedRequest.data.text.format.type, "json_schema");
   assert.strictEqual(capturedRequest.data.text.format.strict, true);
   assert.strictEqual(capturedRequest.data.text.format.schema.additionalProperties, false);
-  assert.strictEqual(capturedRequest.data.max_output_tokens, 220);
+  assert.strictEqual(capturedRequest.data.max_output_tokens, 4096);
   const imageInput = capturedRequest.data.input[0].content.find((part) => part.type === "input_image");
   assert.strictEqual(imageInput.image_url, `data:image/png;base64,${imageBytes.toString("base64")}`);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(imageInput, "detail"), false);
 
   const cached = await api.requestOpenAiImageClassification({ name: "different-name.png", type: "image/png" }, Buffer.from(imageBytes), successHttp, config);
   assert.strictEqual(cached.valid, true);
@@ -148,6 +167,15 @@ async function run() {
   assert.strictEqual(timeoutResult.errorCode, "PROVIDER_TIMEOUT");
   assert.strictEqual(timeoutCalls, 2, "timeout must be retried exactly once");
   assert(timeoutLogs.every((line) => !line.includes("test-key") && !line.includes("base64")), "logs must not expose credentials or image data");
+  let recoveryCalls = 0;
+  const recovered = await api.requestOpenAiImageClassification(file, Buffer.from([5]), {
+    post: async () => {
+      recoveryCalls += 1;
+      return responseFor(validCases[0]);
+    }
+  }, config);
+  assert.strictEqual(recovered.valid, true);
+  assert.strictEqual(recoveryCalls, 1, "provider failures must not become successful cache entries");
 
   for (const statusCode of [429, 500]) {
     let calls = 0;
@@ -171,6 +199,25 @@ async function run() {
   assert.strictEqual(badRequest.valid, false);
   assert.strictEqual(badRequestCalls, 1, "non-retryable HTTP errors must not be retried");
 
+  const providerCalls = [];
+  const separated = await api.requestOpenAiImageClassification(file, Buffer.from([9, 9]), {
+    post: async (url) => {
+      providerCalls.push(url);
+      return url === "https://ai.api.cloud.yandex.net/v1/responses"
+        ? responseFor({}, 500)
+        : responseFor(validCases[1]);
+    }
+  }, { ...config, openaiApiKey: "test-openai-key" });
+  assert.strictEqual(separated.valid, false, "OpenAI must not replace the Yandex shadow verdict");
+  assert.strictEqual(separated.providerUsed, "yandex_ai_studio");
+  assert.strictEqual(separated.yandexResult.valid, false);
+  assert.strictEqual(separated.openAiResult.valid, true);
+  assert.deepStrictEqual(providerCalls, [
+    "https://ai.api.cloud.yandex.net/v1/responses",
+    "https://ai.api.cloud.yandex.net/v1/responses",
+    "https://api.openai.com/v1/responses"
+  ]);
+
   const productionBlocks = [
     ["async function personalImageKindForPreUpload(file", "async function personalImageIsReceiptForPreUpload"],
     ["async function shouldForwardConfirmedWorkPhoto", "async function detectPersonalMailingProof"],
@@ -189,8 +236,14 @@ async function run() {
 
   const publicRequestOccurrences = source.match(/requestOpenAiImageClassification\s*\(/g) || [];
   assert.strictEqual(publicRequestOccurrences.length, 2, "new classifier must only be declared and called by the passive shadow runner");
+  assert.match(source, /id:\s*"image_classification_v1_shadow_enabled"[\s\S]{0,240}?packageValue:\s*false/,
+    "ImageClassificationV1 shadow must remain disabled by package default");
+  assert.match(source, /id:\s*"yandex_ai_studio_api_key"[\s\S]{0,240}?type:\s*[A-Za-z_$][\w$]*\.SettingType\.PASSWORD[\s\S]{0,240}?public:\s*false/,
+    "Yandex AI Studio credential must remain a private app setting");
+  assert.match(source, /id:\s*"yandex_ai_studio_model"[\s\S]{0,240}?packageValue:\s*"qwen3\.6-35b-a3b"/,
+    "the isolated shadow provider must default to qwen3.6-35b-a3b");
   const shadowRunnerStart = source.indexOf("async function maybeRunImageClassificationV1Shadow");
-  const shadowRunnerEnd = source.indexOf("let imageClassificationV1ShadowQueue", shadowRunnerStart);
+  const shadowRunnerEnd = source.indexOf("function scheduleImageClassificationV1Shadow", shadowRunnerStart);
   assert(shadowRunnerStart >= 0 && shadowRunnerEnd > shadowRunnerStart, "passive shadow runner block not found");
   assert(source.slice(shadowRunnerStart, shadowRunnerEnd).includes("requestOpenAiImageClassification"), "classifier call must remain isolated in the passive shadow runner");
 

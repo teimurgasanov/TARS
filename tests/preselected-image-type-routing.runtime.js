@@ -3,6 +3,20 @@
 const assert = require("assert");
 const { loadTrackedAppWithGuard } = require("./helpers/canonical-tars-runtime");
 
+function currentSamaraReceiptDate() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Samara",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return {
+    iso: `${byType.year}-${byType.month}-${byType.day}`,
+    display: `${byType.day}.${byType.month}.${byType.year}`
+  };
+}
+
 function workPhotoPayload() {
   return {
     kind: "work_photo",
@@ -214,7 +228,7 @@ async function execute(state) {
   const receiptWithVisionUnavailable = runtime(financialPayload(), {
     intent: "receipt",
     openaiStatus: 403,
-    yandexText: "Сбербанк. Чек по операции. Перевод выполнен. Сумма 1200 ₽. 02.09.2026"
+    yandexText: `Сбербанк. Чек по операции. Перевод выполнен. Сумма 1200 ₽. ${currentSamaraReceiptDate().display}`
   });
   receiptWithVisionUnavailable.message.file.name = "receipt.jpg";
   receiptWithVisionUnavailable.message.files[0].name = "receipt.jpg";
@@ -225,7 +239,7 @@ async function execute(state) {
   const receiptIndex = receiptWithVisionUnavailable.records.get("receipt-duplicate-index-v1") || [];
   const acceptedReceipts = receiptIndex.flatMap((record) => Array.isArray(record && record.photos) ? record.photos : []).filter((entry) => entry && entry.source === "confirmed");
   assert.strictEqual(acceptedReceipts.length, 1, "a strict Yandex receipt must be accepted when OpenAI is unavailable");
-  assert.strictEqual(acceptedReceipts[0].receiptDate, "2026-09-02");
+  assert.strictEqual(acceptedReceipts[0].receiptDate, currentSamaraReceiptDate().iso);
   assert.strictEqual(acceptedReceipts[0].receiptAmount, 1200);
 
   const nonReceiptSelectedAsReceipt = runtime(workPhotoPayload(), { intent: "receipt" });

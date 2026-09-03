@@ -1974,6 +1974,125 @@ var require_upload_duplicate_guard = __commonJS({
     }
     const IMAGE_CLASSIFICATION_SCHEMA_VERSION = "personal-image-classification-v1";
     const IMAGE_CLASSIFICATION_MODEL = "gpt-5.4-nano-2026-03-17";
+    const IMAGE_CLASSIFICATION_YANDEX_URL = "https://ai.api.cloud.yandex.net/v1/responses";
+    const IMAGE_CLASSIFICATION_YANDEX_MODEL = "qwen3.6-35b-a3b";
+    function normalizedImageClassificationYandexModel(value) {
+      const model = String(value || IMAGE_CLASSIFICATION_YANDEX_MODEL).trim().replace(/^gpt:\/\/[^/]+\//, "").replace(/\/latest$/, "");
+      return /^[A-Za-z0-9._-]{1,120}$/.test(model) ? model : IMAGE_CLASSIFICATION_YANDEX_MODEL;
+    }
+    function imageClassificationYandexProviderForConfig(config) {
+      if (!config) return void 0;
+      const apiKey = String(config.yandexAiStudioApiKey || "").trim();
+      const folderId = String(config.yandexAiStudioFolderId || "").trim();
+      if (!apiKey || !/^[A-Za-z0-9_-]{6,80}$/.test(folderId)) return void 0;
+      return Object.freeze({
+        id: "yandex_ai_studio",
+        url: IMAGE_CLASSIFICATION_YANDEX_URL,
+        model: `gpt://${folderId}/${normalizedImageClassificationYandexModel(config.yandexAiStudioModel)}/latest`,
+        publicModel: normalizedImageClassificationYandexModel(config.yandexAiStudioModel),
+        headers: { Authorization: "Api-Key " + apiKey, "Content-Type": "application/json" },
+        includeImageDetail: false
+      });
+    }
+    function imageClassificationOpenAiProviderForConfig(config) {
+      if (!config) return void 0;
+      const apiKey = String(config.openaiApiKey || "").trim();
+      if (!apiKey) return void 0;
+      return Object.freeze({
+        id: "openai",
+        url: "https://api.openai.com/v1/responses",
+        model: IMAGE_CLASSIFICATION_MODEL,
+        publicModel: IMAGE_CLASSIFICATION_MODEL,
+        headers: { Authorization: "Bearer " + apiKey, "Content-Type": "application/json" },
+        includeImageDetail: true
+      });
+    }
+    function imageClassificationVisionInput(provider, imageUrl) {
+      return provider && provider.includeImageDetail
+        ? { type: "input_image", image_url: imageUrl, detail: "high" }
+        : { type: "input_image", image_url: imageUrl };
+    }
+
+    // Production requests never wait for this admission tracker. It only
+    // prevents queued shadow work from starting while production Vision is
+    // active, and gives synchronously arriving production work the first turn.
+    const visionAdmissionState = {
+      productionActive: 0,
+      productionWaiting: 0,
+      shadowActive: false,
+      shadowQueue: [],
+      drainScheduled: false
+    };
+    function scheduleShadowVisionAdmissionDrain() {
+      if (visionAdmissionState.drainScheduled) return;
+      visionAdmissionState.drainScheduled = true;
+      Promise.resolve().then(() => {
+        visionAdmissionState.drainScheduled = false;
+        drainShadowVisionAdmissionQueue();
+      });
+    }
+    function beginProductionVisionAdmission() {
+      visionAdmissionState.productionWaiting += 1;
+      // Production admission is immediate and cannot be blocked by shadow.
+      visionAdmissionState.productionWaiting -= 1;
+      visionAdmissionState.productionActive += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        visionAdmissionState.productionActive = Math.max(0, visionAdmissionState.productionActive - 1);
+        scheduleShadowVisionAdmissionDrain();
+      };
+    }
+    async function runProductionVisionRequest(request) {
+      const release = beginProductionVisionAdmission();
+      try {
+        return await request();
+      } finally {
+        release();
+      }
+    }
+    function drainShadowVisionAdmissionQueue() {
+      if (
+        visionAdmissionState.shadowActive ||
+        visionAdmissionState.productionActive > 0 ||
+        visionAdmissionState.productionWaiting > 0
+      ) return;
+      const entry = visionAdmissionState.shadowQueue.shift();
+      if (!entry) return;
+      visionAdmissionState.shadowActive = true;
+      Promise.resolve().then(entry.run).then(
+        (value) => {
+          visionAdmissionState.shadowActive = false;
+          entry.resolve(Object.freeze({ admitted: true, value }));
+          scheduleShadowVisionAdmissionDrain();
+        },
+        () => {
+          visionAdmissionState.shadowActive = false;
+          entry.resolve(Object.freeze({ admitted: true, value: Object.freeze({ attempted: true, recorded: false }) }));
+          scheduleShadowVisionAdmissionDrain();
+        }
+      );
+    }
+    function queueShadowVisionRequest(run, maxPending = 4) {
+      if (typeof run !== "function") return Promise.resolve(Object.freeze({ admitted: false, reason: "invalid" }));
+      const boundedMax = Number.isSafeInteger(maxPending) && maxPending > 0 ? maxPending : 4;
+      if (visionAdmissionState.shadowQueue.length >= boundedMax) {
+        return Promise.resolve(Object.freeze({ admitted: false, reason: "queue_full" }));
+      }
+      return new Promise((resolve) => {
+        visionAdmissionState.shadowQueue.push({ run, resolve });
+        scheduleShadowVisionAdmissionDrain();
+      });
+    }
+    function visionAdmissionSnapshot() {
+      return Object.freeze({
+        production_active: visionAdmissionState.productionActive,
+        production_waiting: visionAdmissionState.productionWaiting,
+        shadow_active: visionAdmissionState.shadowActive,
+        shadow_queued: visionAdmissionState.shadowQueue.length
+      });
+    }
     const PRIMARY_IMAGE_VISION_MODEL = "gpt-5.6-sol";
     const PRIMARY_IMAGE_VISION_SCHEMA = {
       type: "object",
@@ -2031,7 +2150,7 @@ var require_upload_duplicate_guard = __commonJS({
     const IMAGE_CLASSIFICATION_V1_SCHEMA = {
       type: "object",
       additionalProperties: false,
-      required: ["schema_version", "kind", "confidence", "work_photo", "safety", "reason_code"],
+      required: ["schema_version", "kind", "confidence", "work_photo", "safety", "evidence", "reason_code"],
       properties: {
         schema_version: { type: "string", const: IMAGE_CLASSIFICATION_SCHEMA_VERSION },
         kind: { type: "string", enum: IMAGE_CLASSIFICATION_KINDS },
@@ -2046,7 +2165,7 @@ var require_upload_duplicate_guard = __commonJS({
               properties: {
                 category: { type: "string", enum: ["hair", "nails", "brows", "other"] },
                 client_type: { type: "string", enum: ["male", "female", "unknown"] },
-                service: { type: "string", enum: ["haircut", "coloring", "styling", "nails", "brows", "other"] }
+                service: { anyOf: [{ type: "string", enum: ["haircut", "coloring", "styling", "nails", "brows", "other"] }, { type: "null" }] }
               }
             }
           ]
@@ -2060,6 +2179,19 @@ var require_upload_duplicate_guard = __commonJS({
             is_document: { type: "boolean" },
             has_payment_ui: { type: "boolean" },
             has_receipt_text: { type: "boolean" }
+          }
+        },
+        evidence: {
+          type: "object",
+          additionalProperties: false,
+          required: ["has_visible_client", "has_visible_service_result", "has_salon_context", "has_messaging_ui", "has_receipt_layout", "has_document_layout"],
+          properties: {
+            has_visible_client: { type: "boolean" },
+            has_visible_service_result: { type: "boolean" },
+            has_salon_context: { type: "boolean" },
+            has_messaging_ui: { type: "boolean" },
+            has_receipt_layout: { type: "boolean" },
+            has_document_layout: { type: "boolean" }
           }
         },
         reason_code: { type: "string", enum: IMAGE_CLASSIFICATION_REASON_CODES }
@@ -2088,7 +2220,7 @@ var require_upload_duplicate_guard = __commonJS({
           return invalidImageClassification("INVALID_JSON");
         }
       }
-      if (!imageClassificationHasExactKeys(value, ["schema_version", "kind", "confidence", "work_photo", "safety", "reason_code"])) return invalidImageClassification("INVALID_ROOT_PROPERTIES");
+      if (!imageClassificationHasExactKeys(value, ["schema_version", "kind", "confidence", "work_photo", "safety", "evidence", "reason_code"])) return invalidImageClassification("INVALID_ROOT_PROPERTIES");
       if (value.schema_version !== IMAGE_CLASSIFICATION_SCHEMA_VERSION) return invalidImageClassification("INVALID_SCHEMA_VERSION");
       if (IMAGE_CLASSIFICATION_KINDS.indexOf(value.kind) === -1) return invalidImageClassification("INVALID_KIND");
       if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) return invalidImageClassification("INVALID_CONFIDENCE");
@@ -2097,11 +2229,15 @@ var require_upload_duplicate_guard = __commonJS({
       for (const key of ["is_banking", "is_document", "has_payment_ui", "has_receipt_text"]) {
         if (typeof value.safety[key] !== "boolean") return invalidImageClassification("INVALID_SAFETY_VALUE");
       }
+      if (!imageClassificationHasExactKeys(value.evidence, ["has_visible_client", "has_visible_service_result", "has_salon_context", "has_messaging_ui", "has_receipt_layout", "has_document_layout"])) return invalidImageClassification("INVALID_EVIDENCE_PROPERTIES");
+      for (const key of ["has_visible_client", "has_visible_service_result", "has_salon_context", "has_messaging_ui", "has_receipt_layout", "has_document_layout"]) {
+        if (typeof value.evidence[key] !== "boolean") return invalidImageClassification("INVALID_EVIDENCE_VALUE");
+      }
       if (value.kind === "work_photo") {
         if (!imageClassificationHasExactKeys(value.work_photo, ["category", "client_type", "service"])) return invalidImageClassification("INVALID_WORK_PHOTO_PROPERTIES");
         if (["hair", "nails", "brows", "other"].indexOf(value.work_photo.category) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_CATEGORY");
         if (["male", "female", "unknown"].indexOf(value.work_photo.client_type) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_CLIENT_TYPE");
-        if (["haircut", "coloring", "styling", "nails", "brows", "other"].indexOf(value.work_photo.service) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_SERVICE");
+        if (value.work_photo.service !== null && ["haircut", "coloring", "styling", "nails", "brows", "other"].indexOf(value.work_photo.service) === -1) return invalidImageClassification("INVALID_WORK_PHOTO_SERVICE");
       } else if (value.work_photo !== null) {
         return invalidImageClassification("UNEXPECTED_WORK_PHOTO");
       }
@@ -2113,38 +2249,39 @@ var require_upload_duplicate_guard = __commonJS({
     function imageClassificationTimeout(error) {
       return /(?:timeout|timed\s*out|etimedout)/i.test(String(error && (error.code || error.message) || error || ""));
     }
-    async function requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt = 0) {
-      if (!config || !config.openaiApiKey || !content || !content.length || !http) return invalidImageClassification("NOT_CONFIGURED");
+    async function requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt = 0, providerOverride) {
+      const provider = providerOverride || imageClassificationYandexProviderForConfig(config);
+      if (!provider || !content || !content.length || !http) return invalidImageClassification("NOT_CONFIGURED");
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
       try {
-        response = await http.post("https://api.openai.com/v1/responses", {
-          headers: { Authorization: "Bearer " + config.openaiApiKey, "Content-Type": "application/json" },
+        response = await http.post(provider.url, {
+          headers: provider.headers,
           data: {
-            model: IMAGE_CLASSIFICATION_MODEL,
+            model: provider.model,
             store: false,
             reasoning: { effort: "none" },
             input: [{
               role: "user",
               content: [
-                { type: "input_text", text: "Classify the actual image into exactly one allowed kind. Use work_photo only for a visible salon service result. For coloring, return service=coloring only; never infer a named technique such as Airtouch, balayage or shatush. Set confidence conservatively. Do not describe the image." },
-                { type: "input_image", image_url: imageUrl, detail: "high" }
+                { type: "input_text", text: "Classify the actual image into exactly one allowed kind. Use work_photo only for a visible salon service result. For coloring, return service=coloring only; never infer a named technique such as Airtouch, balayage or shatush. If the exact service is not visually certain, set work_photo.service=null. Set every safety and evidence boolean from visible image evidence only. Set confidence conservatively. Do not describe the image." },
+                imageClassificationVisionInput(provider, imageUrl)
               ]
             }],
             text: { format: { type: "json_schema", name: "personal_image_classification_v1", strict: true, schema: IMAGE_CLASSIFICATION_V1_SCHEMA } },
-            max_output_tokens: 220
+            max_output_tokens: provider.id === "yandex_ai_studio" ? 4096 : 220
           },
           timeout: 14e3
         });
       } catch (error) {
-        if (attempt < 1 && imageClassificationTimeout(error)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1);
-        if (logger) logger.warn(`Image classification request failed attempt=${attempt + 1} kind=${imageClassificationTimeout(error) ? "timeout" : "other"}`);
+        if (attempt < 1 && imageClassificationTimeout(error)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1, provider);
+        if (logger) logger.warn(`Image classification request failed provider=${provider.id} attempt=${attempt + 1} kind=${imageClassificationTimeout(error) ? "timeout" : "other"}`);
         return invalidImageClassification(imageClassificationTimeout(error) ? "PROVIDER_TIMEOUT" : "PROVIDER_ERROR");
       }
       const statusCode = Number(response && response.statusCode || 0);
       if (statusCode < 200 || statusCode >= 300) {
-        if (attempt < 1 && imageClassificationRetryableStatus(statusCode)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1);
-        if (logger) logger.warn(`Image classification HTTP failed attempt=${attempt + 1} status=${statusCode || "unknown"}`);
+        if (attempt < 1 && imageClassificationRetryableStatus(statusCode)) return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1, provider);
+        if (logger) logger.warn(`Image classification HTTP failed provider=${provider.id} attempt=${attempt + 1} status=${statusCode || "unknown"}`);
         return invalidImageClassification(imageClassificationRetryableStatus(statusCode) ? "PROVIDER_RETRY_EXHAUSTED" : "PROVIDER_HTTP_ERROR");
       }
       let payload = response.data || response.content || response;
@@ -2155,18 +2292,66 @@ var require_upload_duplicate_guard = __commonJS({
           return invalidImageClassification("INVALID_PROVIDER_RESPONSE");
         }
       }
-      return parseImageClassification(openAiReceiptOutputText(payload));
+      const parsed = parseImageClassification(openAiReceiptOutputText(payload));
+      if (!parsed.valid && provider.id === "yandex_ai_studio" && attempt < 1) {
+        return requestOpenAiImageClassificationUncached(file, content, http, config, logger, attempt + 1, provider);
+      }
+      return parsed;
     }
     const imageClassificationCache = /* @__PURE__ */ new Map();
+    async function requestImageClassificationProviderCached(file, content, http, config, logger, provider) {
+      if (!content || !content.length) return invalidImageClassification("EMPTY_IMAGE");
+      if (!provider) return invalidImageClassification("NOT_CONFIGURED");
+      const key = `${IMAGE_CLASSIFICATION_SCHEMA_VERSION}:${provider.id}:${provider.model}:${exactHash(content)}`;
+      const cached = imageClassificationCache.get(key);
+      if (cached && Date.now() - Number(cached.createdAt || 0) < 10 * 60 * 1e3) return cached.promise;
+      const promise = requestOpenAiImageClassificationUncached(file, content, http, config, logger, 0, provider);
+      imageClassificationCache.set(key, { createdAt: Date.now(), promise });
+      if (imageClassificationCache.size > 200) imageClassificationCache.delete(imageClassificationCache.keys().next().value);
+      try {
+        const result = await promise;
+        if (!result || result.valid !== true) imageClassificationCache.delete(key);
+        return result;
+      } catch (error) {
+        imageClassificationCache.delete(key);
+        throw error;
+      }
+    }
+    function imageClassificationProviderResult(provider, result, attempted = true) {
+      const normalized = result && typeof result === "object" ? result : invalidImageClassification("INVALID_CLASSIFICATION");
+      return Object.freeze({
+        attempted: attempted === true,
+        provider: provider && provider.id === "yandex_ai_studio" ? "yandex_ai_studio" : provider && provider.id === "openai" ? "openai" : "unknown",
+        model: provider && /^[A-Za-z0-9._:-]{1,120}$/.test(String(provider.publicModel || "")) ? String(provider.publicModel) : "unknown",
+        valid: normalized.valid === true,
+        value: normalized.valid === true ? normalized.value : void 0,
+        errorCode: normalized.valid === true ? "NONE" : String(normalized.errorCode || "INVALID_CLASSIFICATION")
+      });
+    }
     async function requestOpenAiImageClassification(file, content, http, config, logger) {
       if (!content || !content.length) return invalidImageClassification("EMPTY_IMAGE");
-      const key = `${IMAGE_CLASSIFICATION_SCHEMA_VERSION}:${IMAGE_CLASSIFICATION_MODEL}:${exactHash(content)}`;
-      const cached = imageClassificationCache.get(key);
-      if (cached) return cached;
-      const promise = requestOpenAiImageClassificationUncached(file, content, http, config, logger);
-      imageClassificationCache.set(key, promise);
-      if (imageClassificationCache.size > 200) imageClassificationCache.delete(imageClassificationCache.keys().next().value);
-      return promise;
+      const yandexProvider = imageClassificationYandexProviderForConfig(config);
+      if (!yandexProvider) return invalidImageClassification("NOT_CONFIGURED");
+      const yandexRaw = await requestImageClassificationProviderCached(file, content, http, config, logger, yandexProvider);
+      const yandexResult = imageClassificationProviderResult(yandexProvider, yandexRaw);
+      let openAiResult;
+      if (yandexRaw.valid !== true) {
+        const openAiProvider = imageClassificationOpenAiProviderForConfig(config);
+        if (openAiProvider) {
+          const openAiRaw = await requestImageClassificationProviderCached(file, content, http, config, logger, openAiProvider);
+          openAiResult = imageClassificationProviderResult(openAiProvider, openAiRaw);
+        }
+      }
+      return Object.freeze({
+        valid: yandexResult.valid,
+        value: yandexResult.value,
+        errorCode: yandexResult.errorCode,
+        providerUsed: "yandex_ai_studio",
+        providerModel: yandexResult.model,
+        providerErrorCode: yandexResult.errorCode,
+        yandexResult,
+        openAiResult
+      });
     }
     const IMAGE_CLASSIFICATION_V1_SHADOW_SCHEMA_VERSION = "personal-image-classification-v1-shadow-observation-v1";
     const IMAGE_CLASSIFICATION_V1_SHADOW_NAMESPACE = "image-classification-v1-shadow:v1";
@@ -2190,6 +2375,8 @@ var require_upload_duplicate_guard = __commonJS({
       "INVALID_REASON_CODE",
       "INVALID_SAFETY_PROPERTIES",
       "INVALID_SAFETY_VALUE",
+      "INVALID_EVIDENCE_PROPERTIES",
+      "INVALID_EVIDENCE_VALUE",
       "INVALID_WORK_PHOTO_PROPERTIES",
       "INVALID_WORK_PHOTO_CATEGORY",
       "INVALID_WORK_PHOTO_CLIENT_TYPE",
@@ -2217,37 +2404,81 @@ var require_upload_duplicate_guard = __commonJS({
     function sanitizeImageClassificationV1ShadowObservation(input) {
       const source = input && typeof input === "object" ? input : {};
       const result = source.classification && typeof source.classification === "object" ? source.classification : invalidImageClassification("INVALID_CLASSIFICATION");
-      const valid = result.valid === true && result.value && typeof result.value === "object";
-      const value = valid ? result.value : {};
+      const providerResult = (candidate, expectedProvider) => {
+        const attempted = Boolean(candidate && candidate.attempted === true);
+        const valid = Boolean(attempted && candidate.valid === true && candidate.value && typeof candidate.value === "object");
+        const value = valid ? candidate.value : {};
+        const kind = valid ? imageClassificationV1ShadowEnum(value.kind, IMAGE_CLASSIFICATION_KINDS, "other") : null;
+        const rawErrorCode = String(candidate && candidate.errorCode || (attempted ? "INVALID_CLASSIFICATION" : "NONE")).trim().toUpperCase();
+        const errorCode = valid || !attempted ? "NONE" : IMAGE_CLASSIFICATION_V1_SHADOW_ERROR_CODES.indexOf(rawErrorCode) === -1 ? "INVALID_CLASSIFICATION" : rawErrorCode;
+        return Object.freeze({
+          attempted,
+          provider: expectedProvider,
+          model: attempted && /^[A-Za-z0-9._:-]{1,120}$/.test(String(candidate.model || "")) ? String(candidate.model) : "unknown",
+          valid,
+          error_code: errorCode,
+          kind,
+          confidence: valid && typeof value.confidence === "number" && Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1 ? value.confidence : null,
+          work_photo: valid && kind === "work_photo" && value.work_photo ? {
+            category: imageClassificationV1ShadowEnum(value.work_photo.category, ["hair", "nails", "brows", "other"], "other"),
+            client_type: imageClassificationV1ShadowEnum(value.work_photo.client_type, ["male", "female", "unknown"], "unknown"),
+            service: value.work_photo.service === null ? null : imageClassificationV1ShadowEnum(value.work_photo.service, ["haircut", "coloring", "styling", "nails", "brows", "other"], "other")
+          } : null,
+          safety: {
+            is_banking: valid && value.safety && value.safety.is_banking === true,
+            is_document: valid && value.safety && value.safety.is_document === true,
+            has_payment_ui: valid && value.safety && value.safety.has_payment_ui === true,
+            has_receipt_text: valid && value.safety && value.safety.has_receipt_text === true
+          },
+          evidence: {
+            has_visible_client: valid && value.evidence && value.evidence.has_visible_client === true,
+            has_visible_service_result: valid && value.evidence && value.evidence.has_visible_service_result === true,
+            has_salon_context: valid && value.evidence && value.evidence.has_salon_context === true,
+            has_messaging_ui: valid && value.evidence && value.evidence.has_messaging_ui === true,
+            has_receipt_layout: valid && value.evidence && value.evidence.has_receipt_layout === true,
+            has_document_layout: valid && value.evidence && value.evidence.has_document_layout === true
+          },
+          reason_code: valid && IMAGE_CLASSIFICATION_REASON_CODES.indexOf(value.reason_code) !== -1 ? value.reason_code : null
+        });
+      };
+      const implicitYandexResult = result.yandexResult || (result.providerUsed === void 0 ? {
+        attempted: true,
+        model: IMAGE_CLASSIFICATION_YANDEX_MODEL,
+        valid: result.valid,
+        value: result.value,
+        errorCode: result.errorCode
+      } : void 0);
+      const yandexResult = providerResult(implicitYandexResult, "yandex_ai_studio");
+      const openAiResult = providerResult(result.openAiResult, "openai");
+      const selected = yandexResult;
+      const valid = selected.valid;
       const currentKind = imageClassificationV1ShadowEnum(source.current_kind, ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other", "unknown"], "unknown");
-      const newKind = valid ? imageClassificationV1ShadowEnum(value.kind, IMAGE_CLASSIFICATION_KINDS, "other") : null;
-      const rawErrorCode = String(result.errorCode || "INVALID_CLASSIFICATION").trim().toUpperCase();
-      const errorCode = valid ? "NONE" : IMAGE_CLASSIFICATION_V1_SHADOW_ERROR_CODES.indexOf(rawErrorCode) === -1 ? "INVALID_CLASSIFICATION" : rawErrorCode;
-      const workPhoto = valid && newKind === "work_photo" && value.work_photo ? {
-        category: imageClassificationV1ShadowEnum(value.work_photo.category, ["hair", "nails", "brows", "other"], "other"),
-        client_type: imageClassificationV1ShadowEnum(value.work_photo.client_type, ["male", "female", "unknown"], "unknown"),
-        service: imageClassificationV1ShadowEnum(value.work_photo.service, ["haircut", "coloring", "styling", "nails", "brows", "other"], "other")
-      } : null;
+      const finalKind = source.final_production_kind === void 0
+        ? currentKind
+        : imageClassificationV1ShadowEnum(source.final_production_kind, ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other", "unknown"], "unknown");
+      const finalStatus = imageClassificationV1ShadowEnum(source.final_production_status, ["accepted", "rejected", "blocked", "processed", "unhandled", "error", "unknown"], "unknown");
       const safe = {
         schema_version: IMAGE_CLASSIFICATION_V1_SHADOW_SCHEMA_VERSION,
         captured_at: Number.isSafeInteger(source.captured_at) && source.captured_at >= 0 ? source.captured_at : Date.now(),
         case_id: /^img-[a-f0-9]{48}$/.test(String(source.case_id || "")) ? String(source.case_id) : "",
-        model: IMAGE_CLASSIFICATION_MODEL,
+        provider_used: "yandex_ai_studio",
+        provider_model: selected.model,
+        provider_error_code: selected.error_code,
+        yandex_result: yandexResult,
+        openai_result: openAiResult,
         current_kind: currentKind,
-        new_kind: newKind,
-        confidence: valid && typeof value.confidence === "number" && Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1 ? value.confidence : null,
-        work_photo: workPhoto,
-        safety: {
-          is_banking: valid && value.safety && value.safety.is_banking === true,
-          is_document: valid && value.safety && value.safety.is_document === true,
-          has_payment_ui: valid && value.safety && value.safety.has_payment_ui === true,
-          has_receipt_text: valid && value.safety && value.safety.has_receipt_text === true
-        },
-        reason_code: valid && IMAGE_CLASSIFICATION_REASON_CODES.indexOf(value.reason_code) !== -1 ? value.reason_code : null,
+        final_production_kind: finalKind,
+        final_production_status: finalStatus,
+        new_kind: selected.kind,
+        confidence: selected.confidence,
+        work_photo: selected.work_photo,
+        safety: selected.safety,
+        evidence: selected.evidence,
+        reason_code: selected.reason_code,
         valid,
-        error_code: errorCode,
-        agreement: valid ? currentKind === newKind : false,
-        disagreement: valid ? currentKind !== newKind : false
+        error_code: selected.error_code,
+        agreement: valid ? finalKind === selected.kind : false,
+        disagreement: valid ? finalKind !== selected.kind : false
       };
       return Object.freeze(safe);
     }
@@ -2295,7 +2526,7 @@ var require_upload_duplicate_guard = __commonJS({
     async function maybeRunImageClassificationV1Shadow(input) {
       try {
         if (!input || input.enabled !== true) return Object.freeze({ attempted: false, recorded: false });
-        if (!input.content || !input.content.length || !input.config || !input.config.openaiApiKey) return Object.freeze({ attempted: false, recorded: false });
+        if (!input.content || !input.content.length || !imageClassificationYandexProviderForConfig(input.config)) return Object.freeze({ attempted: false, recorded: false });
         const classification = typeof input.classify === "function"
           ? await input.classify(input.file, input.content, input.http, input.config, input.logger)
           : await requestOpenAiImageClassification(input.file, input.content, input.http, input.config, input.logger);
@@ -2303,6 +2534,8 @@ var require_upload_duplicate_guard = __commonJS({
           case_id: imageClassificationV1ShadowCaseId(input.content),
           captured_at: Date.now(),
           current_kind: normalizeCurrentImageClassificationV1Kind(input.currentPrimaryDecision),
+          final_production_kind: input.finalProductionKind,
+          final_production_status: input.finalProductionStatus,
           classification
         });
         const recorder = typeof input.record === "function" ? input.record : recordImageClassificationV1ShadowObservation;
@@ -2313,23 +2546,10 @@ var require_upload_duplicate_guard = __commonJS({
         return Object.freeze({ attempted: true, recorded: false });
       }
     }
-    let imageClassificationV1ShadowQueue = Promise.resolve();
-    let imageClassificationV1ShadowPending = 0;
     function scheduleImageClassificationV1Shadow(input) {
-      if (!input || input.enabled !== true || !input.content || !input.content.length || imageClassificationV1ShadowPending >= 4) return false;
-      imageClassificationV1ShadowPending += 1;
-      const run = imageClassificationV1ShadowQueue.then(
-        () => maybeRunImageClassificationV1Shadow(input),
-        () => maybeRunImageClassificationV1Shadow(input)
-      );
-      imageClassificationV1ShadowQueue = run.then(
-        () => {
-          imageClassificationV1ShadowPending -= 1;
-        },
-        () => {
-          imageClassificationV1ShadowPending -= 1;
-        }
-      );
+      if (!input || input.enabled !== true || !input.content || !input.content.length) return false;
+      if (visionAdmissionState.shadowQueue.length >= 4) return false;
+      queueShadowVisionRequest(() => maybeRunImageClassificationV1Shadow(input), 4);
       return true;
     }
     const RECEIPT_VISUAL_CRITERIA = "КРИТЕРИИ БАНКОВСКОГО ЧЕКА. Считай изображение чеком, банковской квитанцией или справкой по операции, если главным объектом является официальный банковский документ, банковский экран либо чек, открытый на экране другого телефона. Ищи совокупность признаков: название или логотип банка/платёжного сервиса; слова Чек, Квитанция, Справка по операции, Перевод, Платёж, Оплата, СБП или SberPay; дата и время операции; итоговая сумма рядом с ₽, руб, Р, RUB или RUR; статус Успешно, Исполнено, Выполнено, Оплачено, Completed или иной статус; отправитель, получатель, счёт/карта, номер операции, QR или СБП. Чек может быть повёрнут, снят под углом, с бликами, на белом PDF-листе или на экране телефона. Для классификации достаточно ясно видимого банковского интерфейса/документа и нескольких согласованных признаков; для зачёта суммы обязательно отдельно прочитай именно итог операции. Не считай чеком: одиночное число без банковского контекста, баланс, время, номер телефона/карты, обычную переписку, рассылку, интерфейс Rocket.Chat, фото человека или салонной работы. ";
@@ -2341,7 +2561,7 @@ var require_upload_duplicate_guard = __commonJS({
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
           if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
-          const response = await http.post("https://api.openai.com/v1/responses", {
+          const response = await runProductionVisionRequest(() => http.post("https://api.openai.com/v1/responses", {
           headers: {
             Authorization: "Bearer " + config.openaiApiKey,
             "Content-Type": "application/json"
@@ -2361,7 +2581,7 @@ var require_upload_duplicate_guard = __commonJS({
             max_output_tokens: 180
           },
           timeout: 2e4
-        });
+        }));
           if (!response || response.statusCode < 200 || response.statusCode >= 300) {
             if (diagnostic) diagnostic.dedicated_transport = response && response.statusCode === 429 ? "429" : response && response.statusCode >= 500 ? "5xx" : "other_error";
             if (logger) logger.warn(`Dedicated work-photo Vision HTTP failed attempt=${attempt + 1} status=${response && response.statusCode || "unknown"}`);
@@ -3999,7 +4219,7 @@ var require_upload_duplicate_guard = __commonJS({
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
       try {
-        response = await http.post("https://api.openai.com/v1/responses", {
+        response = await runProductionVisionRequest(() => http.post("https://api.openai.com/v1/responses", {
           headers: {
             Authorization: "Bearer " + config.openaiApiKey,
             "Content-Type": "application/json"
@@ -4029,7 +4249,7 @@ var require_upload_duplicate_guard = __commonJS({
             max_output_tokens: 320
           },
           timeout: 14e3
-        });
+        }));
       } catch (error) {
         if (retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
@@ -4908,7 +5128,7 @@ var require_upload_duplicate_guard = __commonJS({
       const amountFocusPrompt = focusedPrompt + "ВАЖНО: официальная надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод; для неё верни status=success. Оплата SberPay со статусом «Исполнено» также является успешной операцией. Не путай их с отдельным промежуточным статусом «Отправлен». ";
       let response;
       try {
-        response = await http.post("https://api.openai.com/v1/responses", {
+        response = await runProductionVisionRequest(() => http.post("https://api.openai.com/v1/responses", {
           headers: {
             Authorization: "Bearer " + config.openaiApiKey,
             "Content-Type": "application/json"
@@ -4928,7 +5148,7 @@ var require_upload_duplicate_guard = __commonJS({
             max_output_tokens: 500
           },
           timeout: 14e3
-        });
+        }));
       } catch (networkError) {
         if (retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
@@ -7957,6 +8177,13 @@ var require_upload_duplicate_guard = __commonJS({
       cleanupMailingProofForwardsInOtchet,
       IMAGE_CLASSIFICATION_V1_SCHEMA,
       IMAGE_CLASSIFICATION_MODEL,
+      IMAGE_CLASSIFICATION_YANDEX_MODEL,
+      normalizedImageClassificationYandexModel,
+      imageClassificationYandexProviderForConfig,
+      imageClassificationOpenAiProviderForConfig,
+      runProductionVisionRequest,
+      queueShadowVisionRequest,
+      visionAdmissionSnapshot,
       PRIMARY_IMAGE_VISION_MODEL,
       PRIMARY_IMAGE_VISION_SCHEMA,
       parseImageClassification,
@@ -8136,6 +8363,31 @@ var C = class extends j.App {
       public: false,
       i18nLabel: "yandex_ocr_folder_id_label",
       i18nDescription: "yandex_ocr_folder_id_description"
+    });
+    await e.settings.provideSetting({
+      id: "yandex_ai_studio_api_key",
+      type: z.SettingType.PASSWORD,
+      required: false,
+      public: false,
+      i18nLabel: "yandex_ai_studio_api_key_label",
+      i18nDescription: "yandex_ai_studio_api_key_description"
+    });
+    await e.settings.provideSetting({
+      id: "yandex_ai_studio_folder_id",
+      type: z.SettingType.STRING,
+      required: false,
+      public: false,
+      i18nLabel: "yandex_ai_studio_folder_id_label",
+      i18nDescription: "yandex_ai_studio_folder_id_description"
+    });
+    await e.settings.provideSetting({
+      id: "yandex_ai_studio_model",
+      type: z.SettingType.STRING,
+      packageValue: "qwen3.6-35b-a3b",
+      required: false,
+      public: false,
+      i18nLabel: "yandex_ai_studio_model_label",
+      i18nDescription: "yandex_ai_studio_model_description"
     });
     await e.settings.provideSetting({
       id: "openai_receipt_api_key",
@@ -8552,6 +8804,7 @@ var C = class extends j.App {
         let explicitMailingIntent = false;
         let selectedPrimaryDecision;
         let selectedPrimaryVisionUnavailable = false;
+        let scheduleShadowOutcome;
         if (hasPersonalImageUpload) {
           [explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent] = await Promise.all([
             this.activePhotoReportIntent(n, e.room),
@@ -8574,11 +8827,13 @@ var C = class extends j.App {
             selectedPrimaryVisionUnavailable = true;
             this.getLogger().warn(`Primary Vision intent verification failed: ${visionError && visionError.message || visionError}`);
           }
-          G.scheduleImageClassificationV1Shadow({
+          scheduleShadowOutcome = (finalProductionKind, finalProductionStatus) => G.scheduleImageClassificationV1Shadow({
             enabled: i.imageClassificationV1ShadowEnabled,
             file: primaryRoutingDiagnostic && primaryRoutingDiagnostic._image_classification_v1_shadow_file,
             content: primaryRoutingDiagnostic && primaryRoutingDiagnostic._image_classification_v1_shadow_content,
             currentPrimaryDecision: selectedPrimaryDecision,
+            finalProductionKind,
+            finalProductionStatus,
             read: n,
             persistence: s,
             http: t,
@@ -8620,6 +8875,7 @@ var C = class extends j.App {
                 ? "⚠️ Чек не принят: Vision не подтвердил финансовый документ."
                 : "⚠️ Рассылка не принята: Vision не подтвердил скриншот рассылки.";
             if (appUser) await r.getCreator().finish(r.getCreator().startMessage().setSender(appUser).setRoom(e.room).setText(mismatchText));
+            scheduleShadowOutcome("unknown", "blocked");
             return;
           }
         }
@@ -8644,6 +8900,7 @@ var C = class extends j.App {
           const appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();
           if (appUser) await r.getCreator().finish(r.getCreator().startMessage().setSender(appUser).setRoom(e.room).setText("✅ РАССЫЛКИ ПРИНЯТЫ"));
           await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
+          if (typeof scheduleShadowOutcome === "function") scheduleShadowOutcome("mailing_proof", "accepted");
           return;
         }
       if (uploadEventKey && !postMessageClaimToken) {
@@ -8674,6 +8931,11 @@ var C = class extends j.App {
           allowYandexSafetyFallback: explicitPhotoIntent
         }
       );
+      if (typeof scheduleShadowOutcome === "function") {
+        const finalKind = mediaV2 && mediaV2.status === "work-photo-forwarded" ? "work_photo" : explicitTransferIntent ? "receipt" : "unknown";
+        const finalStatus = mediaV2 && mediaV2.handled ? mediaV2.status === "work-photo-forwarded" ? "accepted" : "processed" : "unhandled";
+        scheduleShadowOutcome(finalKind, finalStatus);
+      }
       if (mediaV2.handled) {
         if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
         if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);
@@ -8717,6 +8979,9 @@ var C = class extends j.App {
     return {
       apiKey: String(await n.getValueById("yandex_ocr_api_key") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       folderId: String(await n.getValueById("yandex_ocr_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
+      yandexAiStudioApiKey: String(await n.getValueById("yandex_ai_studio_api_key") || "").trim(),
+      yandexAiStudioFolderId: String(await n.getValueById("yandex_ai_studio_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
+      yandexAiStudioModel: G.normalizedImageClassificationYandexModel(await n.getValueById("yandex_ai_studio_model")),
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
       openaiReceiptModel: String(await n.getValueById("openai_receipt_model") || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
       imageClassificationV1ShadowEnabled: imageClassificationV1ShadowEnabledSetting === true || String(imageClassificationV1ShadowEnabledSetting || "").toLowerCase() === "true",
@@ -9107,6 +9372,9 @@ var C = class extends j.App {
     const config = await this.receiptOcrConfig(read);
     let statusMessageId = "";
     let outcome = "failed";
+    let shadowFile;
+    let shadowContent;
+    let shadowPrimaryDecision;
     try {
       const diagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(sourceMessage));
       let primaryDecision;
@@ -9115,6 +9383,9 @@ var C = class extends j.App {
       } catch (error) {
         this.getLogger().warn(`Primary Vision manual routing failed; preserving legacy fallback: ${error && error.message || error}`);
       }
+      shadowPrimaryDecision = primaryDecision;
+      shadowFile = diagnostic._image_classification_v1_shadow_file;
+      shadowContent = diagnostic._image_classification_v1_shadow_content;
       // A manual selection is offered only when the primary classifier did not
       // produce a terminal HIGH route. Preserve the explicit user choice; the
       // primary decision remains a positive financial/document safety guard
@@ -9182,6 +9453,21 @@ var C = class extends j.App {
       record.updatedAt = Date.now();
       await G.writeManualImageSelection(persistence, record);
       await G.completePostMessageClaim(sourceMessage, claimToken, persistence, this.getLogger());
+      const finalProductionKind = /^receipt-|^not-receipt/.test(outcome) ? "receipt" : /^work-photo-/.test(outcome) ? "work_photo" : /^mailing-/.test(outcome) ? "mailing_proof" : "unknown";
+      const finalProductionStatus = /forwarded|already-published|recorded/.test(outcome) ? "accepted" : /blocked|not-receipt/.test(outcome) ? "rejected" : outcome === "processing-error" ? "error" : "processed";
+      G.scheduleImageClassificationV1Shadow({
+        enabled: config.imageClassificationV1ShadowEnabled,
+        file: shadowFile,
+        content: shadowContent,
+        currentPrimaryDecision: shadowPrimaryDecision,
+        finalProductionKind,
+        finalProductionStatus,
+        read,
+        persistence,
+        http,
+        config,
+        logger: this.getLogger()
+      });
     }
     return true;
   }

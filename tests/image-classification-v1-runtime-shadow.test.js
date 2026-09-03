@@ -29,7 +29,11 @@ const loadImplementation = new Function(
     sanitizeImageClassificationV1ShadowObservation,
     recordImageClassificationV1ShadowObservation,
     maybeRunImageClassificationV1Shadow,
-    normalizeCurrentImageClassificationV1Kind
+    normalizeCurrentImageClassificationV1Kind,
+    requestOpenAiImageClassification,
+    runProductionVisionRequest,
+    queueShadowVisionRequest,
+    visionAdmissionSnapshot
   };`
 );
 
@@ -53,6 +57,16 @@ const safety = (overrides = {}) => ({
   ...overrides
 });
 
+const evidence = (overrides = {}) => ({
+  has_visible_client: false,
+  has_visible_service_result: false,
+  has_salon_context: false,
+  has_messaging_ui: false,
+  has_receipt_layout: false,
+  has_document_layout: false,
+  ...overrides
+});
+
 const classification = (overrides = {}) => ({
   valid: true,
   value: {
@@ -61,6 +75,7 @@ const classification = (overrides = {}) => ({
     confidence: 0.8,
     work_photo: null,
     safety: safety(),
+    evidence: evidence(),
     reason_code: "OTHER_IMAGE",
     ...overrides
   }
@@ -97,7 +112,11 @@ function createPersistenceHarness(options = {}) {
 async function run() {
   const file = { name: "synthetic.png", type: "image/png" };
   const content = Buffer.from([137, 80, 78, 71, 1, 2, 3]);
-  const config = { openaiApiKey: "test-only-key" };
+  const config = {
+    yandexAiStudioApiKey: "test-yandex-key",
+    yandexAiStudioFolderId: "b1gtestfolder",
+    yandexAiStudioModel: "qwen3.6-35b-a3b"
+  };
   const productionDecision = {
     kind: "work_photo",
     confidence: "high",
@@ -139,6 +158,7 @@ async function run() {
         kind: "work_photo",
         confidence: 0.96,
         work_photo: { category: "hair", client_type: "female", service: "coloring" },
+        evidence: evidence({ has_visible_client: true, has_visible_service_result: true, has_salon_context: true }),
         reason_code: "WORK_PHOTO_HAIR"
       });
     },
@@ -301,11 +321,13 @@ async function run() {
   assert(!store.values.has(`image-classification-v1-shadow:v1:img-${"1".repeat(48)}`), "expired record was retained");
   assert(!store.values.has(`image-classification-v1-shadow:v1:img-${"2".repeat(48)}`), "overflow record was retained");
 
-  // I. The runtime hook is a standalone observation statement. Its return
-  // value is neither assigned nor used by any production decision function.
+  // I. The runtime hook is scheduled only after the unchanged production
+  // outcome is known. Its return value is neither awaited nor used by any
+  // production decision function.
   assert(source.includes('id: "image_classification_v1_shadow_enabled"'));
   assert(source.includes('packageValue: false'));
-  assert.match(source, /\n\s+G\.scheduleImageClassificationV1Shadow\(\{[\s\S]*?currentPrimaryDecision: selectedPrimaryDecision,[\s\S]*?\n\s+\}\);/);
+  assert.match(source, /scheduleShadowOutcome = \(finalProductionKind, finalProductionStatus\) => G\.scheduleImageClassificationV1Shadow\(\{[\s\S]*?currentPrimaryDecision: selectedPrimaryDecision,[\s\S]*?finalProductionKind,[\s\S]*?finalProductionStatus,[\s\S]*?\n\s+\}\);/);
+  assert.match(source, /scheduleShadowOutcome\(finalKind, finalStatus\);/);
   assert(!source.includes("selectedPrimaryDecision = G.scheduleImageClassificationV1Shadow"));
   for (const functionName of [
     "personalImageKindForPreUpload",
@@ -323,7 +345,100 @@ async function run() {
   }
   assert(!source.match(/(?:evaluateRules|resolveConflicts|makeDecision|runOfflineComparison|runOfflineDataset)\s*\([\s\S]{0,300}ImageClassificationV1/));
 
-  console.log("PASS: ImageClassificationV1 runtime shadow is disabled by default, privacy-safe, bounded and fail-open");
+  // K. A production request that arrives in the same turn is admitted before
+  // queued shadow work.
+  const priorityEvents = [];
+  const queuedBeforeProduction = api.queueShadowVisionRequest(async () => {
+    priorityEvents.push("shadow");
+    return true;
+  });
+  const immediateProduction = api.runProductionVisionRequest(async () => {
+    priorityEvents.push("production");
+    return true;
+  });
+  await immediateProduction;
+  await queuedBeforeProduction;
+  assert.deepStrictEqual(priorityEvents, ["production", "shadow"]);
+
+  // L/M. New shadow work cannot start while production is active, and another
+  // production request is never blocked by that waiting shadow queue.
+  let releaseProduction;
+  const productionGate = new Promise((resolve) => { releaseProduction = resolve; });
+  const activeEvents = [];
+  const activeProduction = api.runProductionVisionRequest(async () => {
+    activeEvents.push("production-active");
+    await productionGate;
+    activeEvents.push("production-released");
+  });
+  await Promise.resolve();
+  let waitingShadowStarted = false;
+  const waitingShadow = api.queueShadowVisionRequest(async () => {
+    waitingShadowStarted = true;
+    activeEvents.push("shadow-started");
+  });
+  await Promise.resolve();
+  assert.strictEqual(waitingShadowStarted, false, "shadow started while production Vision was active");
+  const secondProduction = api.runProductionVisionRequest(async () => {
+    activeEvents.push("production-second");
+  });
+  await secondProduction;
+  assert.strictEqual(waitingShadowStarted, false, "shadow queue blocked or overtook a production request");
+  releaseProduction();
+  await activeProduction;
+  await waitingShadow;
+  assert.deepStrictEqual(activeEvents, ["production-active", "production-second", "production-released", "shadow-started"]);
+  assert.deepStrictEqual(api.visionAdmissionSnapshot(), {
+    production_active: 0,
+    production_waiting: 0,
+    shadow_active: false,
+    shadow_queued: 0
+  });
+
+  // N. The bounded queue drops excess work without mutating the production
+  // decision or leaking an error into its control flow.
+  let releaseBoundedProduction;
+  const boundedGate = new Promise((resolve) => { releaseBoundedProduction = resolve; });
+  const boundedProduction = api.runProductionVisionRequest(() => boundedGate);
+  const boundedShadow = [];
+  for (let index = 0; index < 4; index += 1) {
+    boundedShadow.push(api.queueShadowVisionRequest(async () => index, 4));
+  }
+  const dropped = await api.queueShadowVisionRequest(async () => "must-not-run", 4);
+  assert.strictEqual(dropped.admitted, false);
+  assert.strictEqual(dropped.reason, "queue_full");
+  assert.strictEqual(JSON.stringify(productionDecision), baseline);
+  releaseBoundedProduction();
+  await boundedProduction;
+  await Promise.all(boundedShadow);
+
+  // O. Shadow 429/timeout retries stay inside the shadow provider and cannot
+  // invoke or alter any production fallback.
+  for (const failureKind of ["429", "timeout"]) {
+    const urls = [];
+    const decision = { kind: "receipt", marker: failureKind };
+    const before = JSON.stringify(decision);
+    const failed = await api.requestOpenAiImageClassification(
+      file,
+      Buffer.from([...content, failureKind === "429" ? 121 : 122]),
+      {
+        post: async (url) => {
+          urls.push(url);
+          if (failureKind === "429") return { statusCode: 429, data: {} };
+          const error = new Error("request timed out");
+          error.code = "ETIMEDOUT";
+          throw error;
+        }
+      },
+      config,
+      { warn() {} }
+    );
+    assert.strictEqual(failed.valid, false);
+    assert.strictEqual(urls.length, 2, `${failureKind} must use one bounded retry`);
+    assert(urls.every((url) => url === "https://ai.api.cloud.yandex.net/v1/responses"));
+    assert.strictEqual(JSON.stringify(decision), before);
+  }
+
+  console.log("PASS: ImageClassificationV1 shadow is passive, privacy-safe, bounded, fail-open and production-priority admitted");
 }
 
 run().catch((error) => {
