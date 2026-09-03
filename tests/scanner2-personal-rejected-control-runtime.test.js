@@ -80,6 +80,22 @@ function runtimeScenario(guard, mode, suffix, options = {}) {
             ].join("\n");
         return { statusCode: 200, data: { result: { textAnnotation: { fullText: text, blocks: [] } } } };
       }
+      const format = options && options.data && options.data.text && options.data.text.format;
+      if (format && format.name === "receipt_vision_engine_v1") {
+        providerCalls.push("openai:vision-engine");
+        return openAiResponse({
+          is_receipt: true,
+          bank_or_provider: null,
+          operation_date: null,
+          operation_time: null,
+          amount: null,
+          currency: "unknown",
+          status: "unknown",
+          amount_label: null,
+          confidence: 0,
+          ambiguity_reason: "legacy regression scenario"
+        });
+      }
       const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
       if (prompt.includes("строгую классификацию изображения")) {
         dedicatedCalls += 1;
