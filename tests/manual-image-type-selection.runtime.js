@@ -300,9 +300,9 @@ async function createSelection(state) {
   const source = fs.readFileSync("TarsReportApp.js", "utf8");
   const postBlock = source.slice(source.indexOf("async executePostMessageSent"), source.indexOf("photoReportIntentAssociation", source.indexOf("async executePostMessageSent")));
   assert.match(postBlock, /const intentCount = \[explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent\]\.filter\(Boolean\)\.length/);
-  assert.match(postBlock, /if \(intentCount !== 1\) \{[\s\S]*handleUploadMenuButton[\s\S]*return;/);
-  assert.doesNotMatch(postBlock, /ensureManualImageSelection/, "post-upload manual selection must be disabled");
-  assert.ok(postBlock.indexOf("intentCount !== 1") < postBlock.indexOf("primaryVisionDecisionForPersonalMessage"), "preselected intent must be required before Vision and every downstream pipeline");
+  assert.match(postBlock, /if \(intentCount !== 1\) \{[\s\S]*personalImageAutoFallbackEnabled[\s\S]*ensureManualImageSelection[\s\S]*handleUploadMenuButton[\s\S]*return;/,
+    "post-upload selection and delayed auto fallback must be isolated behind the default-off setting");
+  assert.ok(postBlock.indexOf("intentCount !== 1") < postBlock.indexOf("primaryVisionDecisionForPersonalMessage"), "preselected intent or the delayed fallback must be resolved before Vision and every downstream pipeline");
   assert.doesNotMatch(source, /(evaluateRules|resolveConflicts|makeDecision|runOfflineComparison|runOfflineDataset)\s*\(/);
 
   console.log("PASS: three-button preselection chooses one pipeline and V3 Vision provides the safety confirmation");

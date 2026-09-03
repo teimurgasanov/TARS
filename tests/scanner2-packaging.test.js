@@ -11,7 +11,7 @@ const root = path.resolve(__dirname, "..");
 const sourcePath = path.join(root, "TarsReportApp.js");
 const manifestPath = path.join(root, "app.json");
 const buildDir = path.join(root, ".build");
-const expectedSourceSha = "ccc69d9b3c5be4f06ed2d32bfb4c64be0138eca5933d744fcac16b4725a6ec01";
+const expectedSourceSha = "29c3dd91b3c059380d013505cd14fb4b93217c210ce51c19cb86569f3f891265";
 const expectedManifestSha = "07e8c27709c789a8a08b3d8ef90157f9c69b4227712c5b5fe0543d06f0f678e7";
 const expectedEntries = ["app.json", "TarsReportApp.js", "en.json", "ru.json", "icon.png"];
 
@@ -73,12 +73,14 @@ assert.match(productionSource, /PERSONAL_IMAGE_PIPELINE_V2/, "production source 
 assert.match(productionSource, /MANUAL_IMAGE_SELECTION_V1/, "production source must include privacy-safe manual selection telemetry");
 assert.match(productionSource, /personal-image-router-v3/, "production source must load the isolated primary Vision type router");
 assert.match(productionSource, /intentCount !== 1/, "production source must require exactly one preselected upload type");
+assert.match(productionSource, /id:\s*"personal_image_auto_fallback_enabled"[\s\S]*packageValue:\s*false[\s\S]*public:\s*false/,
+  "automatic image fallback must remain private and disabled by default");
 assert.match(productionSource, /personal-image-selector:v3:/, "production source must persist one standalone personal image selector");
 assert.match(productionSource, /await this\.sendPersonalImageSelector\(e, n, t, s\);/, "personal room refresh must publish the selector without a command");
-assert.doesNotMatch(
+assert.match(
   productionSource.slice(productionSource.indexOf("async executePostMessageSent"), productionSource.indexOf("async receiptOcrConfig")),
-  /ensureManualImageSelection/,
-  "production execution must not use the old post-upload classifier selection"
+  /personalImageAutoFallbackEnabled[\s\S]*ensureManualImageSelection[\s\S]*scheduleAutomaticPersonalImageClassification[\s\S]*handleUploadMenuButton/,
+  "post-upload fallback must be isolated behind its default-off setting"
 );
 assert.match(productionSource, /id:\s*"scanner2_shadow_sample_percent"[\s\S]*packageValue:\s*"0"/,
   "packaged sampling must remain write-disabled by default");
@@ -168,6 +170,11 @@ execFileSync(process.execPath, [path.join(root, "tests", "personal-image-router-
   stdio: "pipe"
 });
 execFileSync(process.execPath, [path.join(root, "tests", "preselected-image-type-routing.runtime.js")], {
+  cwd: root,
+  encoding: "utf8",
+  stdio: "pipe"
+});
+execFileSync(process.execPath, [path.join(root, "tests", "personal-image-auto-fallback.runtime.js")], {
   cwd: root,
   encoding: "utf8",
   stdio: "pipe"

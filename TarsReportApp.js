@@ -8111,6 +8111,8 @@ var MAILING_UPLOAD_ACTION = "start-mailing-upload";
 var MANUAL_IMAGE_RECEIPT_ACTION = "manual-image-type-receipt-v1";
 var MANUAL_IMAGE_PHOTO_ACTION = "manual-image-type-photo-v1";
 var MANUAL_IMAGE_MAILING_ACTION = "manual-image-type-mailing-v1";
+var PERSONAL_IMAGE_AUTO_FALLBACK_PROCESSOR = "personal-image-auto-fallback-v1";
+var PERSONAL_IMAGE_AUTO_FALLBACK_GRACE_MS = 45 * 1e3;
 var RECEIPT_APPROVAL_AMOUNT_VIEW_PREFIX = "receipt-approval-amount:";
 var RECEIPT_APPROVAL_AMOUNT_BLOCK = "receipt-approval-amount";
 var manualImageSelectionPromptQueue = Promise.resolve();
@@ -8238,6 +8240,15 @@ var C = class extends j.App {
       public: false,
       i18nLabel: "image_classification_v1_shadow_enabled_label",
       i18nDescription: "image_classification_v1_shadow_enabled_description"
+    });
+    await e.settings.provideSetting({
+      id: "personal_image_auto_fallback_enabled",
+      type: z.SettingType.BOOLEAN,
+      packageValue: false,
+      required: false,
+      public: false,
+      i18nLabel: "personal_image_auto_fallback_enabled_label",
+      i18nDescription: "personal_image_auto_fallback_enabled_description"
     });
     await e.settings.provideSetting({
       id: "scanner2_shadow_mode",
@@ -8425,6 +8436,9 @@ var C = class extends j.App {
     }, {
       id: "forward-pending-report-photos-now",
       processor: this.forwardPendingReportPhotosJob
+    }, {
+      id: PERSONAL_IMAGE_AUTO_FALLBACK_PROCESSOR,
+      processor: async (jobContext, read, modify, http, persistence) => this.automaticPersonalImageClassificationJob(jobContext, read, modify, http, persistence)
     }]);
     e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.api.provideApi({
       visibility: A.ApiVisibility.PUBLIC,
@@ -8636,10 +8650,23 @@ var C = class extends j.App {
           ]);
           const intentCount = [explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent].filter(Boolean).length;
           if (intentCount !== 1) {
-            // New V3 contract: the user chooses the pipeline before upload.
-            // No automatic classifier or downstream pipeline runs without one
-            // unambiguous active intent.
-            await this.handleUploadMenuButton(n, r, { room: e.room, user: e.sender });
+            if (i.personalImageAutoFallbackEnabled) {
+              // The existing buttons remain authoritative during the grace
+              // window. A per-image prompt and one delayed classifier job are
+              // created idempotently; neither operation starts a pipeline.
+              const selection = await this.ensureManualImageSelection(n, s, r, e, {
+                event_kind: G.manualImageSelectionEventKind(e),
+                media_signal: true,
+                expect_media: true,
+                resolved_image_count_bucket: G.manualImageSelectionImageCountBucket(resolvedImages.length),
+                source_type: G.personalImageDiagnosticSourceType(e)
+              });
+              await this.scheduleAutomaticPersonalImageClassification(r, s, selection);
+            } else {
+              // Default-off rollback path: preserve the current V3 contract
+              // exactly when automatic fallback is disabled.
+              await this.handleUploadMenuButton(n, r, { room: e.room, user: e.sender });
+            }
             return;
           }
           primaryRoutingDiagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(e));
@@ -8790,6 +8817,7 @@ var C = class extends j.App {
     const cutoffSetting = await n.getValueById("receipt_workday_cutoff");
     const archiveEnabledSetting = await n.getValueById("receipt_archive_enabled");
     const imageClassificationV1ShadowEnabledSetting = await n.getValueById("image_classification_v1_shadow_enabled");
+    const personalImageAutoFallbackEnabledSetting = await n.getValueById("personal_image_auto_fallback_enabled");
     return {
       apiKey: String(await n.getValueById("yandex_ocr_api_key") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       folderId: String(await n.getValueById("yandex_ocr_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
@@ -8799,6 +8827,7 @@ var C = class extends j.App {
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
       openaiReceiptModel: String(await n.getValueById("openai_receipt_model") || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
       imageClassificationV1ShadowEnabled: imageClassificationV1ShadowEnabledSetting === true || String(imageClassificationV1ShadowEnabledSetting || "").toLowerCase() === "true",
+      personalImageAutoFallbackEnabled: personalImageAutoFallbackEnabledSetting === true || String(personalImageAutoFallbackEnabledSetting || "").toLowerCase() === "true",
       scanner2ShadowMode: String(await n.getValueById("scanner2_shadow_mode") || "OFF").toUpperCase() === "RECORD_ONLY" ? "RECORD_ONLY" : "OFF",
       scanner2ShadowHmacSecret: String(await n.getValueById("scanner2_shadow_hmac_secret") || ""),
       scanner2ShadowTokenKeyVersion: String(await n.getValueById("scanner2_shadow_token_key_version") || "k1").trim() || "k1",
@@ -9107,6 +9136,104 @@ var C = class extends j.App {
   async clearTransferReportIntent(persistence, room) {
     if (persistence && room && room.id) await persistence.removeByAssociation(this.transferReportIntentAssociation(room.id));
   }
+  async scheduleAutomaticPersonalImageClassification(modify, persistence, record) {
+    if (!modify || !persistence || !record || record.status !== "pending" || !record.selectionKey) return false;
+    if (Number(record.autoScheduledAt || 0) > 0) return true;
+    const now = Date.now();
+    const scheduled = {
+      ...record,
+      autoScheduledAt: now,
+      autoRunAt: now + PERSONAL_IMAGE_AUTO_FALLBACK_GRACE_MS,
+      updatedAt: now
+    };
+    await G.writeManualImageSelection(persistence, scheduled);
+    try {
+      await modify.getScheduler().scheduleOnce({
+        id: PERSONAL_IMAGE_AUTO_FALLBACK_PROCESSOR,
+        when: new Date(scheduled.autoRunAt),
+        data: { selectionKey: scheduled.selectionKey }
+      });
+      return true;
+    } catch (error) {
+      // The buttons remain fully usable when scheduling is unavailable. Reset
+      // the marker so a later duplicate upload event can retry the one-time job.
+      scheduled.autoScheduledAt = 0;
+      scheduled.autoRunAt = 0;
+      scheduled.autoScheduleFailed = true;
+      scheduled.updatedAt = Date.now();
+      await G.writeManualImageSelection(persistence, scheduled);
+      this.getLogger().warn(`Automatic personal image classification was not scheduled: ${error && error.message || error}`);
+      return false;
+    }
+  }
+  async automaticPersonalImageClassificationJob(jobContext, read, modify, http, persistence) {
+    const selectionKey = String(jobContext && (jobContext.selectionKey || jobContext.data && jobContext.data.selectionKey) || "");
+    if (!selectionKey || !read || !modify || !persistence) return;
+    const config = await this.receiptOcrConfig(read);
+    if (!config.personalImageAutoFallbackEnabled) return;
+    let record = await G.readManualImageSelection(read, selectionKey);
+    if (!record || record.status !== "pending" || Number(record.expiresAt || 0) <= Date.now()) return;
+    let sourceMessage;
+    try {
+      sourceMessage = await read.getMessageReader().getById(record.sourceMessageId);
+    } catch (_2) {
+      sourceMessage = void 0;
+    }
+    if (sourceMessage && !G.isPersonalTarsRoom(sourceMessage.room) && record.roomId) {
+      try {
+        const sourceRoom = await read.getRoomReader().getById(record.roomId);
+        if (sourceRoom) sourceMessage = { ...sourceMessage, room: sourceRoom };
+      } catch (_2) {
+      }
+    }
+    if (!sourceMessage || !G.isPersonalTarsRoom(sourceMessage.room) || !G.messageImageFiles(sourceMessage).length) {
+      record.status = "needs_intent";
+      record.outcome = "auto-source-unavailable";
+      record.updatedAt = Date.now();
+      await G.writeManualImageSelection(persistence, record);
+      return;
+    }
+    const diagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(sourceMessage));
+    let primaryDecision;
+    let route = "";
+    try {
+      primaryDecision = await G.primaryVisionDecisionForPersonalMessage(sourceMessage, read, http, config, this.getLogger(), diagnostic);
+      route = G.primaryVisionDominantKind(primaryDecision);
+    } catch (error) {
+      this.getLogger().warn(`Automatic personal image classification unavailable; keeping buttons active: ${error && error.message || error}`);
+    }
+    G.scheduleImageClassificationV1Shadow({
+      enabled: config.imageClassificationV1ShadowEnabled,
+      file: diagnostic && diagnostic._image_classification_v1_shadow_file,
+      content: diagnostic && diagnostic._image_classification_v1_shadow_content,
+      currentPrimaryDecision: primaryDecision,
+      read,
+      persistence,
+      http,
+      config,
+      logger: this.getLogger()
+    });
+    // A button may have won while the provider request was in flight. Re-read
+    // the state before attempting the existing shared processing claim.
+    record = await G.readManualImageSelection(read, selectionKey);
+    if (!record || record.status !== "pending") return;
+    if (!/^(?:receipt|photo|mailing)$/.test(route)) {
+      record.status = "needs_intent";
+      record.outcome = primaryDecision && primaryDecision.parser_state === "parsed" ? "auto-unknown" : "auto-provider-unavailable";
+      record.updatedAt = Date.now();
+      await G.writeManualImageSelection(persistence, record);
+      return;
+    }
+    await this.handleManualImageTypeSelection(read, http, persistence, modify, {
+      room: sourceMessage.room,
+      user: { id: record.requestedBy },
+      value: selectionKey
+    }, route, {
+      intentSource: "auto",
+      primaryVisionDecision: primaryDecision,
+      primaryVisionAttempted: true
+    });
+  }
   async ensureManualImageSelection(read, persistence, modify, message, telemetryContext = {}) {
     const run = async () => {
       if (!read || !persistence || !modify || !message || !message.room || !message.sender) return false;
@@ -9121,7 +9248,7 @@ var C = class extends j.App {
         publisher_result: "not_attempted",
         error_class: "none"
       };
-      if (existing && Number(existing.expiresAt || 0) > now && ["pending", "processing", "completed"].includes(String(existing.status || ""))) {
+      if (existing && Number(existing.expiresAt || 0) > now && ["pending", "needs_intent", "processing", "completed"].includes(String(existing.status || ""))) {
         G.emitManualImageSelectionTelemetry(this.getLogger(), {
           ...telemetry,
           stage: "gate_reached",
@@ -9211,7 +9338,7 @@ var C = class extends j.App {
       this.getLogger().warn(`Could not remove manual image processing status: ${error && error.message || error}`);
     }
   }
-  async handleManualImageTypeSelection(read, http, persistence, modify, data, selectedType) {
+  async handleManualImageTypeSelection(read, http, persistence, modify, data, selectedType, options = {}) {
     if (!read || !persistence || !modify || !data || !data.room || !data.user) return false;
     const selectionKey = String(data.value || "");
     const record = await G.readManualImageSelection(read, selectionKey);
@@ -9247,6 +9374,7 @@ var C = class extends j.App {
     if (!claimToken) return true;
     record.status = "processing";
     record.selectedType = selectedType;
+    record.intentSource = options.intentSource === "auto" ? "auto" : "button";
     record.updatedAt = Date.now();
     await G.writeManualImageSelection(persistence, record);
     await this.removeManualImageSelectionPrompt(read, modify, data, record);
@@ -9255,11 +9383,13 @@ var C = class extends j.App {
     let outcome = "failed";
     try {
       const diagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(sourceMessage));
-      let primaryDecision;
-      try {
-        primaryDecision = await G.primaryVisionDecisionForPersonalMessage(sourceMessage, read, http, config, this.getLogger(), diagnostic);
-      } catch (error) {
-        this.getLogger().warn(`Primary Vision manual routing failed; preserving legacy fallback: ${error && error.message || error}`);
+      let primaryDecision = options.primaryVisionDecision;
+      if (options.primaryVisionAttempted !== true) {
+        try {
+          primaryDecision = await G.primaryVisionDecisionForPersonalMessage(sourceMessage, read, http, config, this.getLogger(), diagnostic);
+        } catch (error) {
+          this.getLogger().warn(`Primary Vision manual routing failed; preserving legacy fallback: ${error && error.message || error}`);
+        }
       }
       // A manual selection is offered only when the primary classifier did not
       // produce a terminal HIGH route. Preserve the explicit user choice; the

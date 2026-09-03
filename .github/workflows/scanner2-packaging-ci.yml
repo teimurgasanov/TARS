@@ -29,6 +29,7 @@ on:
       - fix/receipt-openai-runtime-fallback
       - feature/tars-maximum-vision
       - feature/yandex-ai-studio-vision-provider
+      - feature/personal-image-auto-fallback
   pull_request:
   workflow_dispatch:
 
@@ -96,6 +97,8 @@ jobs:
       || github.base_ref == 'feature/tars-maximum-vision'
       || github.head_ref == 'feature/yandex-ai-studio-vision-provider'
       || github.base_ref == 'feature/yandex-ai-studio-vision-provider'
+      || github.head_ref == 'feature/personal-image-auto-fallback'
+      || github.base_ref == 'feature/personal-image-auto-fallback'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

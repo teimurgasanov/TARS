@@ -18,6 +18,8 @@
     "openai_receipt_model_description": "Example: gpt-4.1-mini. If empty, gpt-4.1-mini is used",
     "image_classification_v1_shadow_enabled_label": "ImageClassificationV1 passive shadow",
     "image_classification_v1_shadow_enabled_description": "Off by default. Runs a privacy-safe comparison without changing image routing or TARS decisions",
+    "personal_image_auto_fallback_enabled_label": "Automatic image type fallback",
+    "personal_image_auto_fallback_enabled_description": "Off by default. If no upload type was selected, waits 45 seconds and uses a HIGH-confidence Vision result to start exactly one existing pipeline",
     "scanner2_shadow_mode_label": "Scanner 2.0 shadow recorder mode",
     "scanner2_shadow_mode_description": "OFF by default. RECORD_ONLY stores privacy-safe structured observations without changing TARS decisions",
     "scanner2_shadow_hmac_secret_label": "Scanner 2.0 shadow HMAC secret",

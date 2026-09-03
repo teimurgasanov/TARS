@@ -34,9 +34,8 @@ assert.match(selectionBlock, /MANUAL_IMAGE_PHOTO_ACTION/);
 assert.match(selectionBlock, /MANUAL_IMAGE_MAILING_ACTION/);
 for (const label of ['📸 ФОТО', '🧾 ЧЕК', '✉️ РАССЫЛКА']) assert.match(menuBlock, new RegExp(label));
 assert.match(postBlock, /const intentCount = \[explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent\]\.filter\(Boolean\)\.length/);
-assert.match(postBlock, /if \(intentCount !== 1\) \{[\s\S]*handleUploadMenuButton[\s\S]*return;/);
-assert.doesNotMatch(postBlock, /ensureManualImageSelection/);
-assert(postBlock.indexOf('intentCount !== 1') < postBlock.indexOf('primaryVisionDecisionForPersonalMessage'), 'one preselected type must precede primary Vision');
+assert.match(postBlock, /if \(intentCount !== 1\) \{[\s\S]*personalImageAutoFallbackEnabled[\s\S]*ensureManualImageSelection[\s\S]*handleUploadMenuButton[\s\S]*return;/);
+assert(postBlock.indexOf('intentCount !== 1') < postBlock.indexOf('primaryVisionDecisionForPersonalMessage'), 'one preselected type or the delayed default-off fallback must precede primary Vision');
 assert.match(classifyBlock, /primaryVisionDecisionForImage[\s\S]*primaryVisionDominantKind\(primaryDecision\)[\s\S]*if \(dominantKind\) return dominantKind;[\s\S]*if \(ocrReceipt\) return "receipt";/);
 assert.match(source, /for \(const messageFile of imageFiles\)/);
 

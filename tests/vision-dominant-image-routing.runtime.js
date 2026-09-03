@@ -328,8 +328,8 @@ const logger = { info() {}, warn() {}, error() {} };
   const postBlock = productionSource.slice(postStart, postEnd);
   assert.ok(postBlock.indexOf("intentCount !== 1") < postBlock.indexOf("primaryVisionDecisionForPersonalMessage"),
     "one explicit pre-upload choice must exist before primary Vision runs");
-  assert.doesNotMatch(postBlock, /ensureManualImageSelection/,
-    "the old post-upload selection gate must not remain in the runtime path");
+  assert.match(postBlock, /personalImageAutoFallbackEnabled[\s\S]*ensureManualImageSelection[\s\S]*scheduleAutomaticPersonalImageClassification/,
+    "the optional post-upload fallback must remain isolated behind its default-off setting");
   assert.match(postBlock, /const selectedRoute = explicitPhotoIntent \? "photo" : explicitTransferIntent \? "receipt" : "mailing"/,
     "Vision must confirm the one user-selected route");
   assert.match(postBlock, /selectedRoute === "photo"[\s\S]*!photoVisionBlocked[\s\S]*allowYandexSafetyFallback: explicitPhotoIntent/,
