@@ -5101,7 +5101,14 @@ var require_upload_duplicate_guard = __commonJS({
     function openAiReceiptCandidateFromJson(json, requiredDate) {
       if (!json || typeof json !== "object") return void 0;
       const text = JSON.stringify(json);
-      const containerRejection = json.is_screenshot_of_chat === true || json.is_container_screenshot === true ? "🚫 ЧЕК НЕ ПРИНЯТ: СКРИНШОТ ЧАТА ИЛИ СТРАНИЦЫ" : "";
+      const visualType = String(json.visual_type || "").trim().toLowerCase();
+      const positiveReceiptVisual = /^(?:bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt)$/.test(visualType);
+      const containerFlag = json.is_screenshot_of_chat === true || json.is_container_screenshot === true;
+      // A photographed receipt displayed on a phone is still a receipt. Some
+      // providers describe any visible screen as a "screenshot" even when the
+      // same structured result explicitly confirms a bank receipt. Preserve
+      // the hard container veto unless both positive signals agree.
+      const containerRejection = containerFlag && !(json.is_receipt === true && positiveReceiptVisual) ? "🚫 ЧЕК НЕ ПРИНЯТ: СКРИНШОТ ЧАТА ИЛИ СТРАНИЦЫ" : "";
       if (json.is_receipt === false && !containerRejection) {
         return { text, receiptDate: void 0, receiptAmount: void 0, statusRejection: "", containerRejection: "", aiReceipt: true };
       }
@@ -5202,7 +5209,15 @@ var require_upload_duplicate_guard = __commonJS({
       const useFallbackProvider = async (reason) => {
         if (!fallbackProvider) return void 0;
         if (logger) logger.warn(`RECEIPT_PROVIDER_FALLBACK from=yandex_ai_studio to=openai reason=${reason}`);
-        return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, focusAmount, focusDate, diagnostic, diagnosticRole, fallbackProvider, true);
+        try {
+          return await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, focusAmount, focusDate, diagnostic, diagnosticRole, fallbackProvider, true);
+        } catch (fallbackError) {
+          if (/OpenAI receipt HTTP 40[13]/i.test(String(fallbackError && fallbackError.message || fallbackError))) {
+            if (logger) logger.warn("RECEIPT_PROVIDER_FALLBACK_UNAVAILABLE provider=openai class=authorization");
+            return void 0;
+          }
+          throw fallbackError;
+        }
       };
       const model = provider.model;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
@@ -5281,6 +5296,11 @@ var require_upload_duplicate_guard = __commonJS({
         if (diagnosticRole === "primary") candidate.primaryVisionDecision = primaryVisionDecisionFromCandidate(candidate, parserState);
       }
       captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, "2xx", parserState, parsed, candidate);
+      // Retry one incomplete Yandex 2xx response before using another provider.
+      if (provider.id === "yandex_ai_studio" && parserState !== "parsed" && retryAttempt < 1) {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole, provider, providerFallbackAttempted);
+      }
       if (fallbackProvider && parserState !== "parsed") return useFallbackProvider(parserState);
       if (!candidate && fallbackProvider) return useFallbackProvider("schema_mismatch");
       if (!candidate && logger) logger.warn(`${provider.id === "yandex_ai_studio" ? "Yandex AI Studio" : "OpenAI"} receipt check returned no parseable JSON`);

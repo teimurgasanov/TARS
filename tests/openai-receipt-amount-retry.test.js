@@ -63,4 +63,24 @@ assert.strictEqual(candidate.receiptDate, '2026-08-28');
 assert.strictEqual(candidate.receiptAmount, 600);
 assert.strictEqual(candidate.statusRejection, '');
 
+const photographedPhoneReceipt = evaluateCandidate()({
+  is_receipt: true,
+  visual_type: 'receipt_on_phone',
+  is_screenshot_of_chat: true,
+  date: '2026-09-03',
+  amount: 1000,
+  status: 'success'
+}, '2026-09-03');
+assert.strictEqual(photographedPhoneReceipt.containerRejection, '', 'a positively identified receipt on a phone must not be rejected as a generic screen');
+
+const actualChatScreenshot = evaluateCandidate()({
+  is_receipt: false,
+  visual_type: 'chat_screenshot',
+  is_screenshot_of_chat: true,
+  date: null,
+  amount: null,
+  status: 'unknown'
+}, '2026-09-03');
+assert.match(actualChatScreenshot.containerRejection, /СКРИНШОТ ЧАТА/, 'a real chat screenshot must keep the hard receipt veto');
+
 console.log('PASS: OpenAI independently rechecks every receipt amount and reads SberPay 600 ₽ on 28.08.2026');
