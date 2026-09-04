@@ -5979,9 +5979,18 @@ var require_upload_duplicate_guard = __commonJS({
     }
     const RECEIPT_REPLAY_SCHEMA_VERSION = "receipt-replay-v1";
     const RECEIPT_REPLAY_COOLDOWN_MS = 30 * 1e3;
+    const RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS = 120;
+    const RECEIPT_REPLAY_PRODUCTION_WAIT_POLL_MS = 250;
     let receiptReplayActive = false;
     let receiptReplayLastStartedAt = 0;
     let productionReceiptExtractionActive = 0;
+    async function waitForReceiptReplayProductionIdle(maxPolls = RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS) {
+      const boundedPolls = Number.isInteger(maxPolls) ? Math.max(0, Math.min(RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS, maxPolls)) : RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS;
+      for (let attempt = 0; productionReceiptExtractionActive > 0 && attempt < boundedPolls; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, RECEIPT_REPLAY_PRODUCTION_WAIT_POLL_MS));
+      }
+      return productionReceiptExtractionActive === 0;
+    }
     function normalizedReceiptReplayDate(value) {
       const date = String(value || "");
       return /^20\d{2}-\d{2}-\d{2}$/.test(date) ? date : null;
@@ -6240,21 +6249,23 @@ var require_upload_duplicate_guard = __commonJS({
       }
       return null;
     }
-    async function runReceiptReplayV1(read, http, config, request) {
+    async function runReceiptReplayV1(read, http, config, request, runtimeOptions) {
       const authorized = request && request.authorized === true;
       if (!authorized) return safeReceiptReplayResultV1({ replayOutcome: "forbidden", reasonCode: "forbidden", providerErrorCode: "none" });
       const uploadId = normalizedReceiptReplayUploadId(request && request.uploadId);
       if (!uploadId) return safeReceiptReplayResultV1({ replayOutcome: "rejected", reasonCode: "invalid_upload_id", providerErrorCode: "none" });
       const now = Date.now();
-      if (receiptReplayActive || productionReceiptExtractionActive > 0) {
-        return safeReceiptReplayResultV1({ replayOutcome: "busy", reasonCode: "busy", providerErrorCode: productionReceiptExtractionActive > 0 ? "production_priority" : "none" });
-      }
+      if (receiptReplayActive) return safeReceiptReplayResultV1({ replayOutcome: "busy", reasonCode: "busy", providerErrorCode: "none" });
       if (now - receiptReplayLastStartedAt < RECEIPT_REPLAY_COOLDOWN_MS) {
         return safeReceiptReplayResultV1({ replayOutcome: "rate_limited", reasonCode: "rate_limited", providerErrorCode: "none" });
       }
       receiptReplayActive = true;
       receiptReplayLastStartedAt = now;
       try {
+        const configuredWaitPolls = runtimeOptions && Number.isInteger(runtimeOptions.productionWaitPolls) ? runtimeOptions.productionWaitPolls : RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS;
+        if (!await waitForReceiptReplayProductionIdle(configuredWaitPolls)) {
+          return safeReceiptReplayResultV1({ replayOutcome: "busy", reasonCode: "busy", providerErrorCode: "production_priority" });
+        }
         const canonical = await resolveCanonicalReceiptReplayUpload(read, uploadId);
         if (!canonical) return safeReceiptReplayResultV1({ replayOutcome: "rejected", reasonCode: "canonical_original_unresolved", providerErrorCode: "none" });
         const referenceDate = receiptReplayReferenceDate(canonical.upload, config);
@@ -6262,7 +6273,7 @@ var require_upload_duplicate_guard = __commonJS({
         const trace = createReceiptReplayTraceV1(referenceDate);
         const replayHttp = {
           async post(url, options) {
-            if (productionReceiptExtractionActive > 0) {
+            if (!await waitForReceiptReplayProductionIdle(configuredWaitPolls)) {
               trace.providerErrorCode = "production_priority";
               throw new Error("production_priority");
             }

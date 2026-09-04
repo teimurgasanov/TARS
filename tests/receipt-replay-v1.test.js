@@ -259,13 +259,59 @@ async function invokeReplay(loaded, scenario, sender, uploadOverrides) {
       makeRead(configValues(), priorityCounters),
       makeHttp({ engine: engineResult("2026-09-03", 800), ocrDate: "2026-09-03", ocrAmount: 800 }, priorityCounters),
       { timeZone: "Europe/Samara" },
-      { authorized: true, uploadId: "private-upload-id" }
+      { authorized: true, uploadId: "private-upload-id" },
+      { productionWaitPolls: 0 }
     );
     assert.strictEqual(blockedByProduction.replay_outcome, "busy");
     assert.strictEqual(blockedByProduction.provider_error_code, "production_priority");
     assert.strictEqual(priorityCounters.uploadMetadataReads, 0, "production priority must be decided before upload access");
     releaseProvider();
     await productionPromise;
+
+    guard.resetReceiptReplayRuntimeForTests();
+    const deferredProductionCounters = makeCounters();
+    let releaseDeferredProduction;
+    let deferredProductionStarted;
+    const deferredProductionStartedPromise = new Promise((resolve) => { deferredProductionStarted = resolve; });
+    const deferredProductionPromise = guard.validateReceiptDate(
+      { _id: "deferred-production-file", name: "production.jpg", type: "image/jpeg" },
+      Buffer.from("deferred-production-canonical-bytes"),
+      {
+        async post() {
+          deferredProductionStarted();
+          return new Promise((resolve) => {
+            releaseDeferredProduction = () => resolve({ statusCode: 200, data: { output_text: JSON.stringify(engineResult("2026-09-04", 702)) } });
+          });
+        }
+      },
+      { yandexAiStudioApiKey: "key", yandexAiStudioFolderId: "folder", yandexAiStudioModel: "qwen3.6-35b-a3b", timeZone: "Europe/Samara" },
+      { info() {}, warn() {} }
+    );
+    await deferredProductionStartedPromise;
+    const deferredReplayPromise = guard.runReceiptReplayV1(
+      makeRead(configValues(), deferredProductionCounters),
+      makeHttp({ engine: engineResult("2026-09-03", 800), ocrDate: "2026-09-03", ocrAmount: 800 }, deferredProductionCounters),
+      {
+        apiKey: "private-ocr-key",
+        folderId: "test-folder",
+        yandexAiStudioApiKey: "private-studio-key",
+        yandexAiStudioFolderId: "test-studio-folder",
+        yandexAiStudioModel: "qwen3.6-35b-a3b",
+        openaiApiKey: "private-openai-key",
+        openaiReceiptModel: "gpt-4.1-mini",
+        timeZone: "Europe/Samara"
+      },
+      { authorized: true, uploadId: "private-upload-id" },
+      { productionWaitPolls: 8 }
+    );
+    Promise.resolve().then(releaseDeferredProduction);
+    await deferredProductionPromise;
+    const deferredReplay = await deferredReplayPromise;
+    assert.strictEqual(deferredReplay.replay_outcome, "fields_resolved", "replay must resume after the higher-priority production extraction finishes");
+    assert.strictEqual(deferredReplay.provider_error_code, "none");
+    assert.strictEqual(deferredReplay.normalized_amount, 800);
+    assert.strictEqual(deferredProductionCounters.uploadMetadataReads, 1, "replay must not read the upload until production releases admission");
+    assert(deferredProductionCounters.providerCalls > 0);
 
     guard.resetReceiptReplayRuntimeForTests();
     const overlapCounters = makeCounters();
