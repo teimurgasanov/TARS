@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Probe Rocket.Chat auth and installed TARS app details
+        if: ${{ false }}
         shell: bash
         env:
           ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
@@ -111,3 +112,126 @@ jobs:
           PY
 
           echo 'Read-only installed-app probe complete. No POST request, ZIP upload, install, update, enable, disable, or delete action was sent.'
+
+      - name: Enable only Receipt Verification V2 shadow and verify
+        shell: bash
+        env:
+          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
+          ROCKETCHAT_USER: ${{ secrets.ROCKETCHAT_USER }}
+          ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
+          TARS_APP_ID: 4c07ba1e-e87d-4d85-9e76-7d818d567439
+          TARGET_SETTING_ID: receipt_verification_v2_shadow_enabled
+        run: |
+          set -euo pipefail
+          AUTH_TOKEN=''
+          USER_ID=''
+          APP_BODY="$(mktemp "$RUNNER_TEMP/tars-app-settings.XXXXXX")"
+          UPDATE_BODY="$(mktemp "$RUNNER_TEMP/tars-app-settings-update.XXXXXX")"
+          PAYLOAD="$(mktemp "$RUNNER_TEMP/tars-app-settings-payload.XXXXXX")"
+
+          cleanup() {
+            original_status=$?
+            trap - EXIT
+            set +e
+            if [ -n "$AUTH_TOKEN" ] && [ -n "$USER_ID" ]; then
+              logout_code=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+                -X POST -H "X-Auth-Token: $AUTH_TOKEN" -H "X-User-Id: $USER_ID" \
+                "$ROCKETCHAT_URL/api/v1/logout")
+              if [ "$logout_code" -ge 200 ] && [ "$logout_code" -lt 300 ]; then
+                echo 'Rocket.Chat setting session logout: OK'
+              else
+                echo "Rocket.Chat setting session logout failed: HTTP $logout_code"
+                [ "$original_status" -ne 0 ] || original_status=1
+              fi
+            fi
+            AUTH_TOKEN=''
+            USER_ID=''
+            rm -f "$APP_BODY" "$UPDATE_BODY" "$PAYLOAD"
+            exit "$original_status"
+          }
+          trap cleanup EXIT
+
+          LOGIN_JSON=$(curl --fail-with-body --silent --show-error \
+            -H 'Content-Type: application/json' \
+            --data "$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({'user': os.environ['ROCKETCHAT_USER'], 'password': os.environ['ROCKETCHAT_PASSWORD']}))
+          PY
+          )" "$ROCKETCHAT_URL/api/v1/login")
+          AUTH_TOKEN=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("data",{}).get("authToken", ""))' <<<"$LOGIN_JSON")
+          USER_ID=$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("data",{}).get("userId", ""))' <<<"$LOGIN_JSON")
+          LOGIN_JSON=''
+          test -n "$AUTH_TOKEN"
+          test -n "$USER_ID"
+          echo "::add-mask::$AUTH_TOKEN"
+          echo "::add-mask::$USER_ID"
+          echo 'Rocket.Chat setting authentication: OK'
+
+          GET_ROUTE="/api/v1/apps/$TARS_APP_ID"
+          get_code=$(curl --silent --show-error --output "$APP_BODY" --write-out '%{http_code}' \
+            -H "X-Auth-Token: $AUTH_TOKEN" -H "X-User-Id: $USER_ID" \
+            "$ROCKETCHAT_URL$GET_ROUTE")
+          if [ "$get_code" -lt 200 ] || [ "$get_code" -ge 300 ]; then
+            GET_ROUTE="/apps/$TARS_APP_ID"
+            get_code=$(curl --silent --show-error --output "$APP_BODY" --write-out '%{http_code}' \
+              -H "X-Auth-Token: $AUTH_TOKEN" -H "X-User-Id: $USER_ID" \
+              "$ROCKETCHAT_URL$GET_ROUTE")
+          fi
+          test "$get_code" -ge 200
+          test "$get_code" -lt 300
+
+          APP_BODY="$APP_BODY" PAYLOAD="$PAYLOAD" python3 - <<'PY'
+          import json, os
+          source=json.load(open(os.environ['APP_BODY'], encoding='utf-8'))
+          app=source.get('app', source) if isinstance(source, dict) else {}
+          settings=app.get('settings', source.get('settings') if isinstance(source, dict) else None)
+          if isinstance(settings, dict):
+              settings=list(settings.values())
+          if not isinstance(settings, list):
+              raise SystemExit('App settings were not returned; no update attempted')
+          target=os.environ['TARGET_SETTING_ID']
+          matches=[item for item in settings if isinstance(item, dict) and item.get('id') == target]
+          if len(matches) != 1:
+              raise SystemExit(f'Expected exactly one target app setting, found {len(matches)}; no update attempted')
+          before=matches[0].get('value', matches[0].get('packageValue'))
+          if before not in (False, True, None):
+              raise SystemExit('Target setting is not boolean; no update attempted')
+          matches[0]['value']=True
+          with open(os.environ['PAYLOAD'], 'w', encoding='utf-8') as out:
+              json.dump({'settings': settings}, out, separators=(',', ':'))
+          print('Target setting before:', str(bool(before)).lower())
+          print('Prepared exactly one setting value change: false -> true' if before is not True else 'Target setting already true')
+          PY
+
+          post_setting() {
+            local route="$1"
+            curl --silent --show-error --output "$UPDATE_BODY" --write-out '%{http_code}' \
+              -X POST -H "X-Auth-Token: $AUTH_TOKEN" -H "X-User-Id: $USER_ID" \
+              -H 'Content-Type: application/json' --data-binary "@$PAYLOAD" \
+              "$ROCKETCHAT_URL$route"
+          }
+          update_code=$(post_setting "/api/v1/apps/$TARS_APP_ID/settings")
+          if [ "$update_code" = '404' ] || [ "$update_code" = '405' ]; then
+            update_code=$(post_setting "/api/apps/$TARS_APP_ID/settings")
+          fi
+          echo "App settings update HTTP $update_code"
+          test "$update_code" -ge 200
+          test "$update_code" -lt 300
+
+          verify_code=$(curl --silent --show-error --output "$APP_BODY" --write-out '%{http_code}' \
+            -H "X-Auth-Token: $AUTH_TOKEN" -H "X-User-Id: $USER_ID" \
+            "$ROCKETCHAT_URL$GET_ROUTE")
+          test "$verify_code" -ge 200
+          test "$verify_code" -lt 300
+          APP_BODY="$APP_BODY" python3 - <<'PY'
+          import json, os
+          source=json.load(open(os.environ['APP_BODY'], encoding='utf-8'))
+          app=source.get('app', source) if isinstance(source, dict) else {}
+          settings=app.get('settings', source.get('settings') if isinstance(source, dict) else None)
+          if isinstance(settings, dict): settings=list(settings.values())
+          target=os.environ['TARGET_SETTING_ID']
+          matches=[item for item in settings or [] if isinstance(item, dict) and item.get('id') == target]
+          if len(matches) != 1 or matches[0].get('value') is not True:
+              raise SystemExit('Target setting verification failed')
+          print('receipt_verification_v2_shadow_enabled=true: VERIFIED')
+          PY
