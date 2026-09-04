@@ -164,6 +164,11 @@ async function execute(state) {
   }
 }
 
+// The strict receipt check only accepts today's receipts (Europe/Astrakhan
+// calendar date), so the fixture must follow the clock instead of a fixed day.
+const todayReceiptDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Astrakhan", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+const todayReceiptText = todayReceiptDate.split("-").reverse().join(".");
+
 (async () => {
   const state = runtime();
   await execute(state);
@@ -200,7 +205,7 @@ async function execute(state) {
 
   const openAiUnavailableFinancial = runtime(safeUnknownPhotoPayload(), {
     openaiStatus: 403,
-    yandexText: "Сбербанк. Чек по операции. Перевод выполнен. Сумма 1200 ₽. 02.09.2026"
+    yandexText: `Сбербанк. Чек по операции. Перевод выполнен. Сумма 1200 ₽. ${todayReceiptText}`
   });
   await execute(openAiUnavailableFinancial);
   assert.deepStrictEqual(openAiUnavailableFinancial.providerCalls, ["image_type_v3", "yandex"], "positive Yandex financial evidence must block immediately");
@@ -214,7 +219,7 @@ async function execute(state) {
   const receiptWithVisionUnavailable = runtime(financialPayload(), {
     intent: "receipt",
     openaiStatus: 403,
-    yandexText: "Сбербанк. Чек по операции. Перевод выполнен. Сумма 1200 ₽. 02.09.2026"
+    yandexText: `Сбербанк. Чек по операции. Перевод выполнен. Сумма 1200 ₽. ${todayReceiptText}`
   });
   receiptWithVisionUnavailable.message.file.name = "receipt.jpg";
   receiptWithVisionUnavailable.message.files[0].name = "receipt.jpg";
@@ -225,7 +230,7 @@ async function execute(state) {
   const receiptIndex = receiptWithVisionUnavailable.records.get("receipt-duplicate-index-v1") || [];
   const acceptedReceipts = receiptIndex.flatMap((record) => Array.isArray(record && record.photos) ? record.photos : []).filter((entry) => entry && entry.source === "confirmed");
   assert.strictEqual(acceptedReceipts.length, 1, "a strict Yandex receipt must be accepted when OpenAI is unavailable");
-  assert.strictEqual(acceptedReceipts[0].receiptDate, "2026-09-02");
+  assert.strictEqual(acceptedReceipts[0].receiptDate, todayReceiptDate);
   assert.strictEqual(acceptedReceipts[0].receiptAmount, 1200);
 
   const nonReceiptSelectedAsReceipt = runtime(workPhotoPayload(), { intent: "receipt" });
