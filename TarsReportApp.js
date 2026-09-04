@@ -3071,8 +3071,21 @@ var require_upload_duplicate_guard = __commonJS({
       const name = String(room && (room.displayName || room.name || "") || "").toLowerCase();
       return Boolean(slug.indexOf("tars-") === 0 || name.indexOf("tars") === 0);
     }
+    function isTarsAppUsername(value) {
+      const username = String(value || "").replace(/^@/, "").trim().toLowerCase();
+      return username === "tars" || username.indexOf("tars-report") === 0 || username.indexOf("tars.") === 0;
+    }
+    function directRoomIncludesTars(room) {
+      // A direct room is a TARS personal chat only when the TARS user is one of
+      // its members. Rooms hydrated by Rocket.Chat expose `usernames`; when the
+      // event carries no member list the decision stays permissive so mobile
+      // upload placeholders keep working.
+      const usernames = room && Array.isArray(room.usernames) ? room.usernames : null;
+      if (!usernames || !usernames.length) return true;
+      return usernames.some(isTarsAppUsername);
+    }
     function isPersonalTarsRoom(room) {
-      return isDirectRoom(room) || isMasterPrivateRoom(room);
+      return isDirectRoom(room) && directRoomIncludesTars(room) || isMasterPrivateRoom(room);
     }
     function isArchiveRoom(room) {
       const slug = String(room && room.slugifiedName || "").toLowerCase();
@@ -5326,13 +5339,13 @@ var require_upload_duplicate_guard = __commonJS({
     }
     function receiptStatusRejection(text) {
       const source = String(text || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ");
-      if (/успешно|исполнен[ао]?|выполнен[ао]?|оплачен[ао]?|платеж\s+выполнен|перевод\s+(?:выполнен|отправлен)|зачислен[ао]?|completed|success|successful|approved/i.test(source)) {
+      if (/(?<!не)успешно|(?<!не )исполнен[ао]?|(?<!не )выполнен[ао]?|(?<!не )оплачен[ао]?|платеж\s+выполнен|перевод\s+(?:выполнен|отправлен)|(?<!не )зачислен[ао]?|completed|(?<!un)success|(?<!un)successful|approved/i.test(source)) {
         return "";
       }
       if (/ожидает\s+(?:подтверждения|обработки|исполнения)|в\s+обработке|на\s+обработке|на\s+проверке|на\s+подпис(?:ь|ании)|к\s+отправке|готов\s+к\s+отправке|черновик|картотек|дневн\w*\s+очеред|поставлен\s+в\s+рейс|отправлен|платеж\s+(?:создан|обрабатывается)|request_sent|created|sending|timeout|processing|pending/i.test(source) && !isGazpromReceiptText(source)) {
         return "🚫 ПЛАТЕЖ НЕ ПОДТВЕРЖДЁН — СУММА НЕ ЗАСЧИТАНА";
       }
-      if (/отказ|отменен|отклонен|не\s+выполнен|неуспеш|ошибка\s+(?:платежа|операции)|rejected|failed|declined|error/i.test(source)) {
+      if (/отказ|отменен|отклонен|не\s+(?:выполнен|исполнен)|неуспеш|ошибка\s+(?:платежа|операции)|rejected|failed|declined|unsuccessful|error/i.test(source)) {
         return "🚫 ПЛАТЕЖ НЕ ВЫПОЛНЕН";
       }
       return "";
@@ -7621,6 +7634,8 @@ var require_upload_duplicate_guard = __commonJS({
       };
       const names = [];
       const add = (value) => {
+        const base = String(value || "").trim().replace(/^@/, "").replace(/[^a-zа-я0-9._-]+/gi, "").replace(/^[._-]+|[._-]+$/g, "").toLowerCase().replace(/ё/g, "е");
+        if (!base || stop[base]) return;
         const variants = transferNameVariants(value);
         for (const clean of variants) {
           if (!clean || stop[clean] || clean.length < 3) continue;
@@ -9557,7 +9572,7 @@ var C = class extends j.App {
         formData: this.submittedFormData({ rows: m, cash: f || 0, transfers: h || 0, mailings: 0 }),
         updatedAt: Date.now()
       }, association);
-      await this.upsertReportFinalizeQueue(s, {
+      await this.upsertReportFinalizeQueue(n, s, {
         userId: a.user.id,
         username: a.user.username || "",
         reportType,
@@ -9811,9 +9826,12 @@ var C = class extends j.App {
     for (const x of h) await r.createWithAssociation(x, d);
     if (h.length) this.getLogger().info(`Sent ${h.length} scheduled report reminder(s) for ${c} ${o}`);
   }
-  async upsertReportFinalizeQueue(e, n) {
-    if (!e || !n || !n.userId || !n.reportType || !n.workday) return;
-    const t = this.reportFinalizeQueueAssociation(), s = await e.getPersistenceReader().readByAssociation(t), r = (s || []).filter((a) => a && !(a.userId === n.userId && a.reportType === n.reportType && a.workday === n.workday));
+  async upsertReportFinalizeQueue(read, e, n) {
+    // `read` is the IRead accessor (persistence reader), `e` is the IPersistence
+    // writer. IPersistence has no getPersistenceReader(), so reading through the
+    // writer used to throw and the finalize queue was never written.
+    if (!read || !e || !n || !n.userId || !n.reportType || !n.workday) return;
+    const t = this.reportFinalizeQueueAssociation(), s = await read.getPersistenceReader().readByAssociation(t), r = (s || []).filter((a) => a && !(a.userId === n.userId && a.reportType === n.reportType && a.workday === n.workday));
     await e.removeByAssociation(t);
     for (const a of r) await e.createWithAssociation(a, t);
     await e.createWithAssociation(n, t);
@@ -12123,7 +12141,7 @@ var S = class extends A.ApiEndpoint {
       this.reportApp.getLogger().warn(`Report was published but state was not saved: ${stateError && stateError.message || stateError}`);
     }
     try {
-      await this.reportApp.upsertReportFinalizeQueue(a, {
+      await this.reportApp.upsertReportFinalizeQueue(t, a, {
         userId: ownerId,
         username: R.username || "",
         reportType: I,

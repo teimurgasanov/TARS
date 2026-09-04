@@ -169,7 +169,7 @@ jobs:
           node tests/image-classification-v1-runtime-shadow.test.js
           echo "IMAGE_CLASSIFICATION_V1_TEST_COUNT=2" >> "$GITHUB_ENV"
 
-      - name: Run 77 legacy TARS tests
+      - name: Run 78 legacy TARS tests
         shell: bash
         run: |
           set -euo pipefail
@@ -179,7 +179,7 @@ jobs:
             node "$test_file"
             legacy_count=$((legacy_count + 1))
           done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' | sort)
-          test "$legacy_count" -eq 77
+          test "$legacy_count" -eq 78
           echo "LEGACY_TEST_COUNT=$legacy_count" >> "$GITHUB_ENV"
 
       - name: Build canonical package
