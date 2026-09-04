@@ -5700,6 +5700,18 @@ var require_upload_duplicate_guard = __commonJS({
         const amount = normalizeReceiptAmount(value);
         return amount !== void 0 && amount > 0 ? amount : void 0;
       };
+      // A bank's explicit total line is stronger evidence than nearby numbers.
+      // Resolve it before the broad context scorer so a commission, balance,
+      // card suffix or OCR outlier cannot outrank `Итого 600 ₽` merely because
+      // it appears in the same context window.
+      const totalLineSource = raw.replace(/[\t ]+/g, " ");
+      const explicitTotalPattern = new RegExp(
+        "(?:^|\\n)\\s*(?:итого(?:\\s+к\\s+оплате)?|итог(?:овая\\s+сумма)?)\\s*(?:[:=—–-]\\s*)?(?:\\n\\s*)?" + number + "\\s*" + currency + amountBoundary,
+        "im"
+      );
+      const explicitTotalMatch = explicitTotalPattern.exec(totalLineSource);
+      const explicitTotalAmount = explicitTotalMatch ? cleanAmount(explicitTotalMatch[1]) : void 0;
+      if (explicitTotalAmount !== void 0 && explicitTotalAmount <= 5e5) return explicitTotalAmount;
       const scoreAmountContext = (context) => {
         const lower = String(context || "").toLowerCase().replace(/ё/g, "е");
         let score = 0;
@@ -9631,6 +9643,7 @@ var require_upload_duplicate_guard = __commonJS({
       receiptVisionEngineIsAuthoritativeNonReceipt,
       requestOpenAiReceiptVisionEngineV1,
       normalizeReceiptAmount,
+      extractReceiptAmount,
       receiptFieldFocusParserState,
       receiptFieldFocusCandidateFromJson,
       receiptFieldFocusCandidateFromEngineJson,

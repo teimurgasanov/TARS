@@ -143,6 +143,26 @@ async function runScenario(scenario) {
   for (const invalid of ["amount 1900 RUB", "1900 USD", "руб.", "not money", "1900 RUB extra", "-1900 ₽", "1.2.3 ₽", "19,00,0 ₽"]) {
     assert.strictEqual(guard.normalizeReceiptAmount(invalid), undefined, `non-money input must be rejected: ${invalid}`);
   }
+  assert.strictEqual(
+    guard.extractReceiptAmount("Квитанция\nИтого 600 ₽\nКомиссия 0 ₽\nБаланс 2 600 ₽\nНомер операции 26000000001"),
+    600,
+    "an explicit Итого line must win over nearby monetary values"
+  );
+  assert.strictEqual(
+    guard.extractReceiptAmount("Чек по операции\nИтого к оплате\n1 900 руб.\nБаланс 19 006 руб."),
+    1900,
+    "Итого к оплате may place the amount on the following line"
+  );
+  assert.strictEqual(
+    guard.extractReceiptAmount("Квитанция\nИтоговая сумма: 1 300 RUB\nКомиссия 50 RUB"),
+    1300,
+    "Итоговая сумма is an explicit total label"
+  );
+  assert.notStrictEqual(
+    guard.extractReceiptAmount("Квитанция\nПоследние 4 цифры карты 1300\nКомиссия 50 ₽"),
+    1300,
+    "a card suffix must not gain total-line priority"
+  );
 
   assert.deepStrictEqual(
     Object.keys(guard.RECEIPT_FIELD_FOCUS_SCHEMA.properties),
