@@ -2483,7 +2483,6 @@ var require_upload_duplicate_guard = __commonJS({
           },
           data: {
             model,
-            store: false,
             input: [{
               role: "user",
               content: [
