@@ -1372,7 +1372,10 @@ var require_upload_duplicate_guard = __commonJS({
               return void 0;
             }
           }
-          const builder = modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("⏳ Чек проверяется…");
+          const builder = attachReceiptResultToMessage(
+            modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("⏳ Чек проверяется…"),
+            message.id
+          );
           const statusMessageId = String(await modify.getCreator().finish(builder) || "");
           if (!statusMessageId) return void 0;
           try {
@@ -1731,6 +1734,11 @@ var require_upload_duplicate_guard = __commonJS({
       const username = String(user && user.username || user && user.name || user && user.id || "master").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "master", mime = String(file && file.type || "").toLowerCase(), extension = mime.indexOf("png") !== -1 ? "png" : mime.indexOf("webp") !== -1 ? "webp" : "jpg";
       return `rejected-receipt-${username}-${String(exact || Date.now()).slice(0, 16)}.${extension}`;
     }
+    function attachReceiptResultToMessage(builder, messageId) {
+      const threadId = String(messageId || "");
+      if (threadId && builder && typeof builder.setThreadId === "function") builder.setThreadId(threadId);
+      return builder;
+    }
     async function createReviewMessageForUpload(upload, filename, mimeType, room, appUser, modify, logger, details) {
       if (!upload || !upload.id || !room || !appUser || !modify || !modify.getCreator) return "";
       const uploadUrl = String(upload.url || ""), reason = String(details && details.reason || "чек не прошёл проверку"), master = details && details.user ? `@${details.user.username || details.user.name || details.user.id}` : "мастер", sourceRoom = details && details.sourceRoom ? details.sourceRoom.displayName || details.sourceRoom.name || details.sourceRoom.slugifiedName || "" : "", amount = details && Number.isFinite(Number(details.receiptAmount)) ? `\nСумма: ${Number(details.receiptAmount)} ₽` : "", date = details && details.receiptDate ? `\nДата: ${details.receiptDate}` : "";
@@ -1750,8 +1758,6 @@ var require_upload_duplicate_guard = __commonJS({
         description: reason
       };
       const text = `👁️ ЧЕК НА КОНТРОЛЬ\nМастер: ${master}${sourceRoom ? `\nОткуда: ${sourceRoom}` : ""}\nПричина: ${reason}${date}${amount}`;
-      const detailsBuilder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text);
-      const detailsMessageId = await modify.getCreator().finish(detailsBuilder);
       const fileBuilder = modify.getCreator().startMessage({
         room,
         sender: appUser,
@@ -1760,6 +1766,11 @@ var require_upload_duplicate_guard = __commonJS({
         attachments: [attachment],
         parseUrls: false
       });
+      const messageId = await modify.getCreator().finish(fileBuilder);
+      const detailsBuilder = attachReceiptResultToMessage(
+        modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text),
+        messageId
+      );
       if (details && details.exact) {
         const blocks = modify.getCreator().getBlockBuilder();
         blocks.addActionsBlock({
@@ -1769,9 +1780,9 @@ var require_upload_duplicate_guard = __commonJS({
             value: String(details.exact)
           })]
         });
-        fileBuilder.setBlocks(blocks);
+        detailsBuilder.setBlocks(blocks);
       }
-      const messageId = await modify.getCreator().finish(fileBuilder);
+      const detailsMessageId = await modify.getCreator().finish(detailsBuilder);
       if (logger) logger.info(`Receipt review reason created in ${RECEIPT_REVIEW_ROOM}: message=${detailsMessageId || "unknown"}`);
       if (logger) logger.info(`Receipt review message created in ${RECEIPT_REVIEW_ROOM}: message=${messageId || "unknown"} upload=${upload.id}`);
       return String(messageId || "");
@@ -3106,10 +3117,18 @@ var require_upload_duplicate_guard = __commonJS({
         }
         const reason = String(reviewDetails.reason || "чек не прошёл проверку"), master = user ? `@${user.username || user.name || user.id}` : "мастер", sourceRoom = reviewDetails.sourceRoom ? reviewDetails.sourceRoom.displayName || reviewDetails.sourceRoom.name || reviewDetails.sourceRoom.slugifiedName || "" : "", amount = Number.isFinite(Number(reviewDetails.receiptAmount)) ? `\nСумма: ${Number(reviewDetails.receiptAmount)} ₽` : "", date = reviewDetails.receiptDate ? `\nДата: ${reviewDetails.receiptDate}` : "";
         const text = `👁️ ЧЕК НА КОНТРОЛЬ\nМастер: ${master}${sourceRoom ? `\nОткуда: ${sourceRoom}` : ""}\nПричина: ${reason}${date}${amount}`;
-        const detailsBuilder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text);
+        const reviewMessage = await findArchiveMessageByUploadId(room.id, upload.id, read);
+        const reviewMessageId = String(reviewMessage && reviewMessage.id || "");
+        const detailsBuilder = attachReceiptResultToMessage(
+          modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text),
+          reviewMessageId
+        );
         await modify.getCreator().finish(detailsBuilder);
         if (reviewDetails.exact) {
-          const actionBuilder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText("Действие с чеком");
+          const actionBuilder = attachReceiptResultToMessage(
+            modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText("Действие с чеком"),
+            reviewMessageId
+          );
           const blocks = modify.getCreator().getBlockBuilder();
           blocks.addActionsBlock({
             elements: [blocks.newButtonElement({
@@ -7613,7 +7632,10 @@ var require_upload_duplicate_guard = __commonJS({
       const archiveText = entry.archiveKey && entry.archiveStatus === "stored" ? "\nАрхив: сохранено" : "";
       const warningText = entry.receiptWarning ? `\nПроверка: ${entry.receiptWarning}` : "";
       const text = `✅ ЧЕК ПРИНЯТ\nМастер: ${username}\nДата: ${dateText}\nСумма: ${amountText} ₽${warningText}${archiveText}`;
-      const builder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text);
+      const builder = attachReceiptResultToMessage(
+        modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text),
+        message.id
+      );
       const resultId = await modify.getCreator().finish(builder);
       entry.resultRoomId = room.id;
       entry.resultMessageId = resultId || "published";
