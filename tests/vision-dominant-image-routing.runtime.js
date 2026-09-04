@@ -228,7 +228,7 @@ const logger = { info() {}, warn() {}, error() {} };
     assert.strictEqual(guard.primaryVisionDominantKind(decision), "");
     const routed = await guard.shouldForwardConfirmedWorkPhoto(source.file, source.content, http, config, logger, false, void 0, { skipStrictReceiptFallback: true });
     assert.strictEqual(routed.forward, false);
-    assert.ok(http.calls.includes("dedicated"), "UNKNOWN must use the existing fallback classifier");
+    assert.deepStrictEqual(http.calls, ["primary"], "UNKNOWN must not trigger a second visual classifier");
   }
 
 
@@ -292,8 +292,8 @@ const logger = { info() {}, warn() {}, error() {} };
     assert.strictEqual((await guard.shouldForwardConfirmedWorkPhoto(source.file, source.content, http, config, logger)).forward, false);
   }
 
-  // I. A low-confidence blurry image invokes fallback and never becomes an
-  // accepted work photo by confidence alone.
+  // I. A low-confidence blurry image never starts a second visual classifier
+  // and never becomes an accepted work photo by confidence alone.
   {
     const source = image("blurry");
     const http = provider(primaryPayload({ confidence: "low" }), dedicatedPayload());
@@ -301,7 +301,7 @@ const logger = { info() {}, warn() {}, error() {} };
     assert.strictEqual(guard.primaryVisionDominantKind(decision), "");
     const routed = await guard.shouldForwardConfirmedWorkPhoto(source.file, source.content, http, config, logger, false, void 0, { skipStrictReceiptFallback: true });
     assert.strictEqual(routed.forward, false);
-    assert.deepStrictEqual(http.calls, ["primary", "dedicated", "dedicated"]);
+    assert.deepStrictEqual(http.calls, ["primary"]);
   }
 
   // J. Repeated preview/original processing of one canonical upload reuses the

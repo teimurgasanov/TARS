@@ -7,12 +7,13 @@ const end = source.indexOf("async function fastForwardPersonalReportPhotos", sta
 const block = source.slice(start, end);
 
 const documentBlock = block.indexOf('forward: false, reason: "document-or-screen"');
-const strictCheck = block.indexOf("validateReceiptStrict");
-const receiptBlock = block.indexOf('forward: false, reason: "strict-receipt-check"');
-const inconclusiveBlock = block.indexOf('forward: false, reason: "work-photo-not-strictly-confirmed"');
+const fallbackCheck = block.indexOf("personalImageOcrFallbackKind");
+const receiptBlock = block.indexOf('fallbackKind === "receipt"');
+const inconclusiveBlock = block.indexOf('primary-vision-inconclusive');
 assert(documentBlock >= 0, "documents/screens must remain blocked");
-assert(strictCheck > documentBlock && receiptBlock > strictCheck, "strict receipt validation must follow the document guard");
+assert(fallbackCheck > documentBlock && receiptBlock > fallbackCheck, "one OCR receipt fallback must follow the document guard");
 assert(inconclusiveBlock > receiptBlock, "inconclusive images must remain blocked after both financial guards");
+assert(!block.includes("validateReceiptStrict"), "work-photo routing must not invoke full receipt extraction");
 assert(!block.includes('forward: true, reason: "verified-non-receipt-image"'), "financial check failure cannot become a photo acceptance");
 
 console.log("PASS: only positively confirmed work photos pass the financial guards");

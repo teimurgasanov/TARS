@@ -2642,34 +2642,14 @@ var require_upload_duplicate_guard = __commonJS({
       if (dominantKind === "photo") return { forward: true, reason: "primary-vision-high-work-photo" };
       if (dominantKind === "receipt") return { forward: false, reason: "receipt" };
       if (dominantKind === "mailing") return { forward: false, reason: "mailing" };
-      let finalKind;
-      finalKind = await personalImageKindForPreUpload(file, content, http, config, logger, activeDiagnostic);
-      if (finalKind === "receipt") return { forward: false, reason: "receipt" };
-      if (finalKind === "mailing") return { forward: false, reason: "mailing" };
-      const dedicatedPhotoKind = finalKind === "photo" || finalKind === "unknown" || !finalKind ? await requestOpenAiWorkPhotoCheck(file, content, http, config, logger, activeDiagnostic) : "";
-      if (dedicatedPhotoKind === "work") {
-        return { forward: true, reason: "dedicated-work-photo-check" };
-      }
-      if (dedicatedPhotoKind === "document") {
-        // A distant or tilted bank document can be too difficult for the
-        // amount/date validator on its first pass. It must continue through
-        // receipt processing instead of being accepted as a salon work photo.
-        return { forward: false, reason: "document-or-screen" };
-      }
-      if (finalKind === "photo" || finalKind === "unknown" || !finalKind) {
-        if (options.skipStrictReceiptFallback) return { forward: false, reason: "manual-work-photo-not-strictly-confirmed" };
-        // A failed or inconclusive image check must never become a work photo
-        // by exclusion. Run the receipt validator only to preserve the block
-        // reason; forwarding still requires a positive dedicated Vision result.
-        try {
-          const receiptCheck = await validateReceiptStrict(file, content, http, config, logger, void 0, diagnostic);
-          if (receiptCheck && receiptCheck.ok) return { forward: false, reason: "strict-receipt-check" };
-        } catch (error) {
-          if (logger) logger.warn(`Work-photo strict receipt exclusion failed: ${error && error.message || error}`);
-        }
-        return { forward: false, reason: "work-photo-not-strictly-confirmed" };
-      }
-      return { forward: false, reason: finalKind || "unknown" };
+      // Primary Vision is the only visual classifier. If it is inconclusive,
+      // run one text-only safety fallback to detect a receipt or mailing. Do
+      // not cascade into another Vision classifier or the full receipt
+      // validator: unknown images stay in the personal chat for manual choice.
+      const fallbackKind = await personalImageOcrFallbackKind(file, content, http, config, logger);
+      if (fallbackKind === "receipt") return { forward: false, reason: "receipt" };
+      if (fallbackKind === "mailing") return { forward: false, reason: "mailing" };
+      return { forward: false, reason: primaryDecision && primaryDecision.parser_state === "parsed" ? "primary-vision-inconclusive" : "vision-unavailable" };
     }
     async function detectPersonalMailingProof(message, read, http, config, logger) {
       if (!message || !isPersonalTarsRoom(message.room)) return void 0;
@@ -4341,6 +4321,18 @@ var require_upload_duplicate_guard = __commonJS({
       const caseToken = sha256Bytes(utf8Bytes(`receipt-stage-v1:${uploadId}`)).slice(0, 16);
       logReceiptStage(logger, { caseToken }, "media_resolved");
     }
+    async function personalImageOcrFallbackKind(file, content, http, config, logger) {
+      if (!config || !content || !content.length || !http || !config.apiKey || !config.folderId) return "unknown";
+      try {
+        const payload = await requestReceiptOcr(file, content, http, config, "page");
+        const text = receiptOcrText(payload);
+        if (looksLikeMailingProofText(text)) return "mailing";
+        if (looksLikeBankReceiptText(text)) return "receipt";
+      } catch (error) {
+        if (logger) logger.warn(`Personal image OCR fallback failed: ${error && error.message || error}`);
+      }
+      return "unknown";
+    }
     async function personalImageKindForPreUploadUncached(file, content, http, config, logger, diagnostic) {
       if (!config || !content || !content.length) return void 0;
       let primaryDecision;
@@ -4356,24 +4348,7 @@ var require_upload_duplicate_guard = __commonJS({
       // photo cannot override a clearly visible finished work result.
       const dominantKind = primaryVisionDominantKind(primaryDecision);
       if (dominantKind) return dominantKind;
-      let ocrReceipt = false;
-      let ocrMailing = false;
-      if (config.apiKey && config.folderId) {
-        const models = ["page", "page-column-sort"];
-        for (const model of models) {
-          try {
-            const payload = await requestReceiptOcr(file, content, http, config, model);
-            const text = receiptOcrText(payload);
-            if (looksLikeMailingProofText(text)) ocrMailing = true;
-            if (looksLikeBankReceiptText(text)) ocrReceipt = true;
-          } catch (error) {
-            if (logger) logger.warn(`Pre-upload receipt content check failed (${model}): ${error && error.message || error}`);
-          }
-        }
-      }
-      if (ocrMailing) return "mailing";
-      if (ocrReceipt) return "receipt";
-      return "unknown";
+      return personalImageOcrFallbackKind(file, content, http, config, logger);
     }
     async function personalImageKindForPreUpload(file, content, http, config, logger, diagnostic) {
       if (!content || !content.length) return void 0;
@@ -4459,7 +4434,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (dominantKind === "mailing") return void 0;
       if (dominantKind === "receipt") return { ...PROTECTED_ROOMS.kassa, receiptValidationContext: receiptStageContext(file, content, config) };
       if (dominantKind === "photo") return PROTECTED_ROOMS.otchet;
-      const kind = await personalImageKindForPreUpload(file, content, http, config, logger, diagnostic);
+      const kind = await personalImageOcrFallbackKind(file, content, http, config, logger);
       if (kind === "mailing") {
         if (logger) logger.info(`Personal upload classified as mailing proof by image content: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
         return void 0;
@@ -4468,38 +4443,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (logger) logger.info(`Personal upload classified as receipt by image content: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
         return { ...PROTECTED_ROOMS.kassa, receiptValidationContext: receiptStageContext(file, content, config) };
       }
-      if (kind === "photo" || kind === "unknown") {
-        // Keep the dedicated visual result in the routing decision as well as
-        // in the fast photo-forwarding gate. Otherwise a banking screen that
-        // was correctly rejected as a work photo could fall through as an
-        // unclassified image and never reach the receipt ledger or control.
-        const dedicatedPhotoKind = await requestOpenAiWorkPhotoCheck(file, content, http, config, logger, diagnostic);
-        if (dedicatedPhotoKind === "work") {
-          if (logger) logger.info(`Personal upload confirmed as work photo by dedicated classifier: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
-          return PROTECTED_ROOMS.otchet;
-        }
-        if (dedicatedPhotoKind === "document") {
-          if (logger) logger.info(`Personal upload forced into receipt validation by document/screen classifier: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
-          return PROTECTED_ROOMS.kassa;
-        }
-        // The strict work-photo classifier is intentionally conservative and can return
-        // unknown for distant/tilted photos of a receipt on another phone.
-        // After Rocket.Chat has accepted the upload, run the full receipt
-        // validator before giving up. This keeps work photos and mailings out
-        // of the receipt ledger while allowing readable bank documents to be
-        // counted even when their visual type was not recognized up front.
-        const validationContext = receiptStageContext(file, content, config);
-        const receiptCheck = await validateReceiptStrict(file, content, http, config, logger, validationContext, diagnostic);
-        if (receiptCheck && (receiptCheck.ok || receiptCheck.financialDocumentConfirmed)) {
-          if (logger) logger.info(`Personal upload confirmed as ${receiptCheck.ok ? "accepted" : "rejected"} receipt by strict post-upload check: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
-          // Carry the already completed strict result into the existing receipt
-          // handler. Rejected financial documents must use the same index/control
-          // route as every other receipt, without repeating OCR or Vision.
-          return { ...PROTECTED_ROOMS.kassa, prevalidatedReceiptCheck: receiptCheck, receiptValidationContext: validationContext };
-        }
-        if (logger) logger.info(`Personal upload classification unknown after strict receipt check; keeping in personal chat for control: room=${message.room && message.room.id || "unknown"} file=${file && (file.name || file.id) || "unknown"}`);
-        return void 0;
-      }
+      if (logger) logger.info(`Personal upload classification remained unknown after the single OCR fallback; keeping in personal chat for manual choice: room=${message.room && message.room.id || "unknown"}`);
       return void 0;
     }
     function normalizedUsername(value) {

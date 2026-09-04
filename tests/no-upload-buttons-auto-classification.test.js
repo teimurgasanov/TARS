@@ -37,7 +37,7 @@ assert.match(postBlock, /const intentCount = \[explicitPhotoIntent, explicitTran
 assert.match(postBlock, /if \(intentCount !== 1\) \{[\s\S]*handleUploadMenuButton[\s\S]*return;/);
 assert.doesNotMatch(postBlock, /ensureManualImageSelection/);
 assert(postBlock.indexOf('intentCount !== 1') < postBlock.indexOf('primaryVisionDecisionForPersonalMessage'), 'one preselected type must precede primary Vision');
-assert.match(classifyBlock, /primaryVisionDecisionForImage[\s\S]*primaryVisionDominantKind\(primaryDecision\)[\s\S]*if \(dominantKind\) return dominantKind;[\s\S]*if \(ocrReceipt\) return "receipt";/);
+assert.match(classifyBlock, /primaryVisionDecisionForImage[\s\S]*primaryVisionDominantKind\(primaryDecision\)[\s\S]*if \(dominantKind\) return dominantKind;[\s\S]*personalImageOcrFallbackKind/);
 assert.match(source, /for \(const messageFile of imageFiles\)/);
 
 console.log('PASS: three pre-upload choices gate one Vision-confirmed image pipeline');

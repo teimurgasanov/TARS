@@ -10,15 +10,13 @@ const block = source.slice(start, end);
 const primaryRequest = block.indexOf('primaryVisionDecisionForImage');
 const primaryDecision = block.indexOf('primaryVisionDominantKind(primaryDecision)');
 const primaryReturn = block.indexOf('if (dominantKind) return dominantKind');
-const ocrMailing = block.indexOf('if (ocrMailing) return "mailing"');
-const ocrReceipt = block.indexOf('if (ocrReceipt) return "receipt"');
+const ocrFallback = block.indexOf('personalImageOcrFallbackKind');
 
-for (const [name, value] of Object.entries({primaryRequest, primaryDecision, primaryReturn, ocrMailing, ocrReceipt})) {
+for (const [name, value] of Object.entries({primaryRequest, primaryDecision, primaryReturn, ocrFallback})) {
   assert(value >= 0, `${name} branch not found`);
 }
 assert(primaryRequest < primaryDecision && primaryDecision < primaryReturn, 'one normalized primary Vision decision must own confident routing');
-assert(primaryReturn < ocrMailing, 'visual result must take priority over OCR fallback');
-assert(ocrMailing < ocrReceipt, 'OCR mailing fallback must keep priority over OCR receipt');
+assert(primaryReturn < ocrFallback, 'visual result must take priority over the single OCR fallback');
 const normalizerStart = source.indexOf('function primaryVisionDecisionFromCandidate');
 const normalizerEnd = source.indexOf('function primaryVisionDominantKind', normalizerStart);
 const normalizer = source.slice(normalizerStart, normalizerEnd);

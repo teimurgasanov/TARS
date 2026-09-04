@@ -80,6 +80,27 @@ function runtimeScenario(guard, mode, suffix) {
         return { statusCode: 200, data: { result: { textAnnotation: { fullText: text, blocks: [] } } } };
       }
       const format = options && options.data && options.data.text && options.data.text.format;
+      if (format && format.name === "tars_primary_image_vision_v1") {
+        providerCalls.push("openai:primary-image-type");
+        const isReceipt = mode !== "unknown";
+        return openAiResponse({
+          kind: isReceipt ? "receipt" : "unknown",
+          confidence: isReceipt ? "high" : "low",
+          service_kind: "none",
+          has_payment_ui: isReceipt,
+          has_receipt_layout: isReceipt,
+          has_financial_document: false,
+          has_document_layout: isReceipt,
+          has_visible_client: false,
+          has_visible_service_result: false,
+          is_receipt: isReceipt,
+          visual_type: isReceipt ? "bank_receipt" : "unknown",
+          date: isReceipt ? observedDate : null,
+          amount: isReceipt ? 1200 : null,
+          status: isReceipt ? "success" : "unknown",
+          bank: isReceipt ? "test-bank" : null
+        });
+      }
       if (format && format.name === "receipt_vision_engine_v1") {
         providerCalls.push("openai:vision-engine");
         return openAiResponse({
@@ -338,7 +359,7 @@ async function receiptIndex(guard, scenario) {
   const rejectedGuard = loadTrackedAppWithGuard().__testGuard;
   assert.ok(rejectedGuard && typeof rejectedGuard.processPersonalMediaV2 === "function");
 
-  // A. A financial document rejected by the strict fallback must use the
+  // A. A financial document selected by the single primary classifier must use the
   // existing rejected receipt route and must never reach the running total.
   const rejected = runtimeScenario(rejectedGuard, "rejected", "date-reject");
   const rejectedResult = await rejectedGuard.processPersonalMediaV2(
@@ -358,8 +379,8 @@ async function receiptIndex(guard, scenario) {
   );
   assert.strictEqual(rejectedSummary.count, 0);
   assert.strictEqual(rejectedSummary.total, 0);
-  assert.strictEqual(rejected.receiptCalls(), 4, "an inconclusive classifier must preserve the legacy strict primary plus focused checks");
-  assert.strictEqual(rejected.dedicatedCalls(), 2);
+  assert.ok(rejected.providerCalls.includes("openai:primary-image-type"));
+  assert.strictEqual(rejected.dedicatedCalls(), 0, "the removed secondary work-photo classifier must not run");
   const rejectedStatuses = rejected.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…");
   assert.strictEqual(rejectedStatuses.length, 1, "rejected receipt must publish one processing status");
   assert.strictEqual(rejectedStatuses[0].threadId, rejected.message.id, "receipt status must be attached to its source upload message");
@@ -378,11 +399,11 @@ async function receiptIndex(guard, scenario) {
   index = await receiptIndex(rejectedGuard, rejected);
   assert.strictEqual(index.photos.length, 1);
   assert.strictEqual(rejected.controlUploads.length, 1, "the same rejected receipt must not be republished");
-  assert.strictEqual(rejected.receiptCalls(), 4, "repeat event must not call providers again");
+  assert.ok(rejected.providerCalls.includes("openai:primary-image-type"));
   assert.strictEqual(rejected.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…").length, 1, "repeat event must not duplicate the status");
 
-  // Combined integration. The initial classifier remains unknown, then
-  // independent Yandex and primary OpenAI agree on the previous date. The
+  // Combined integration. The single primary classifier selects receipt, then
+  // independent Yandex and receipt extraction agree on the previous date. The
   // early mismatch must retain financial evidence and enter the same existing
   // rejected-control route without focused OpenAI passes.
   const consensusGuard = loadTrackedAppWithGuard().__testGuard;
@@ -402,7 +423,7 @@ async function receiptIndex(guard, scenario) {
   assert.ok(consensus.deletedMessages.includes(consensus.message.id), "existing rejected route must preserve source-chat deletion behavior");
   assert(!consensus.providerCalls.includes("openai:amount-focus"), `unexpected provider calls: ${consensus.providerCalls.join(", ")}`);
   assert(!consensus.providerCalls.includes("openai:date-focus"), `unexpected provider calls: ${consensus.providerCalls.join(", ")}`);
-  assert.strictEqual(consensus.receiptCalls(), 2, "inconclusive classifier must not replace the positive primary used by early mismatch");
+  assert.ok(consensus.providerCalls.includes("openai:primary-image-type"));
   const consensusSummary = await consensusGuard.confirmedTransferSummaryForUser(
     consensus.read, consensus.config, consensus.owner.id, consensus.requiredDate, [], undefined, consensus.message.room.id
   );
@@ -423,7 +444,7 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(unknown.controlUploads.length, 0);
   assert.strictEqual(unknown.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…").length, 0, "ordinary unknown images must not publish receipt status");
 
-  // C. A valid receipt through the same fallback keeps the existing accepted
+  // C. A valid receipt through the same primary decision keeps the existing accepted
   // index and 1 / 1200 RUB running-total path.
   const acceptedGuard = loadTrackedAppWithGuard().__testGuard;
   const accepted = runtimeScenario(acceptedGuard, "accepted", "valid-fallback");
@@ -439,8 +460,8 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(accepted.controlUploads.length, 0);
   const summaryMessages = accepted.publishedMessages.map((item) => String(item.text || "").replace(/[\u00a0\u202f]/g, " "));
   assert.ok(summaryMessages.some((text) => /Чеков: 1/.test(text) && /Общая сумма чеков: 1 200 ₽/.test(text)));
-  assert.strictEqual(accepted.receiptCalls(), 3, "valid fallback must reuse its strict two-pass result");
-  assert.strictEqual(accepted.dedicatedCalls(), 2);
+  assert.ok(accepted.providerCalls.includes("openai:primary-image-type"));
+  assert.strictEqual(accepted.dedicatedCalls(), 0, "the removed secondary work-photo classifier must not run");
   const acceptedStatuses = accepted.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…");
   assert.strictEqual(acceptedStatuses.length, 1, "accepted receipt must publish one processing status");
   assert.strictEqual(acceptedStatuses[0].threadId, accepted.message.id, "accepted receipt status must be attached to its source upload message");
