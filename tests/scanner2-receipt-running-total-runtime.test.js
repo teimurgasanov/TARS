@@ -142,7 +142,112 @@ function associationKey(association) {
   assert.match(text, /Чеков: 1/);
   assert.match(text, /Общая сумма чеков: 1 200 ₽/);
 
-  console.log("PASS: configured personal receipt reaches accepted index and running total 1 / 1200 RUB");
+  const originalConfirmedTransferSummaryForUser = guard.confirmedTransferSummaryForUser;
+  const reportOwner = { id: "aleksei-id", username: "aleksei", name: "Aleksei" };
+  const adminUploader = { id: "teimur-id", username: "teimur", name: "Teimur" };
+  const reportRoom = { id: "room-aleksei", type: "p", slugifiedName: "tars-aleksei" };
+  const storedFormData = {
+    rows: [{ name: "Стрижка", price: 2000, quantity: 1, expense: 0 }],
+    cash: 800,
+    transfers: 1200,
+    mailings: 0
+  };
+  const storedReport = {
+    userId: reportOwner.id,
+    reportType: "male",
+    workday: "2026-09-04",
+    roomId: reportRoom.id,
+    sourceRoomId: reportRoom.id,
+    messageId: "old-report-message",
+    ownerSummaryMessageId: "old-owner-summary",
+    preliminaryMessageId: "old-preliminary",
+    firstSubmittedAt: 1,
+    formData: storedFormData,
+    updatedAt: 2
+  };
+  const reconciledRecords = [];
+  const fullReportCalls = [];
+  const ownerSummaryCalls = [];
+  const deletedPreliminary = [];
+  const app = Object.create(runtime.TarsReportApp.prototype);
+  app.isPersonalReportRoom = () => true;
+  app.masterUserForPersonalReportRoom = async () => reportOwner;
+  app.reportAssociation = (userId, reportType, workday) => ({ key: `report:${userId}:${reportType}:${workday}` });
+  app.parseSubmittedReport = () => ({
+    rows: [{ label: "Стрижка", quantity: 1, unitPrice: 2000, amount: 2000, expense: 0, netAmount: 2000, kind: "service" }],
+    cash: storedFormData.cash,
+    transfers: storedFormData.transfers,
+    mailings: storedFormData.mailings
+  });
+  app.receiptOcrConfig = async () => config;
+  app.mailingProofStatus = async () => ({ count: 10, roomFound: true });
+  app.reportPhotoStatus = async () => ({ count: 1 });
+  app.payrollRule = () => ({ limit: { met: true }, proofOk: true });
+  app.reportFinalDueAt = () => 1;
+  app.reportTimeCorrection = () => ({ applied: false, amount: 0, label: "on time" });
+  app.latenessSummary = async () => ({ total: 0, count: 0, entries: [] });
+  app.sendReport = async (...args) => {
+    fullReportCalls.push(args);
+    return "new-report-message";
+  };
+  app.sendOwnerShortReport = async (...args) => {
+    ownerSummaryCalls.push(args);
+    return "new-owner-summary";
+  };
+  app.sendPreliminaryReportAnalysis = async () => {
+    throw new Error("expired preliminary analysis must not be recreated");
+  };
+  app.deletePreliminaryReportAnalysis = async (_modify, _read, messageId) => {
+    deletedPreliminary.push(messageId);
+  };
+  const reportRead = {
+    getPersistenceReader() {
+      return { async readByAssociation() { return [storedReport]; } };
+    }
+  };
+  const reportPersistence = {
+    async removeByAssociation() {},
+    async createWithAssociation(value) { reconciledRecords.push(value); }
+  };
+  try {
+    guard.confirmedTransferSummaryForUser = async (_read, _config, userId, workday, _from, currentValidatedReceipts, roomId) => {
+      assert.strictEqual(userId, reportOwner.id, "receipt reconciliation must use the personal-room owner");
+      assert.strictEqual(workday, "2026-09-04");
+      assert.strictEqual(roomId, reportRoom.id);
+      assert.strictEqual(currentValidatedReceipts.length, 1, "the just-accepted receipt must bridge persistence-reader lag");
+      assert.strictEqual(currentValidatedReceipts[0].receiptAmount, 800);
+      return { total: 2000, count: 2, missing: 0, pendingReview: 0 };
+    };
+    const refreshed = await app.refreshPreliminaryReportAnalysis(
+      reportRead,
+      reportPersistence,
+      {},
+      adminUploader,
+      reportRoom,
+      {
+        refreshFinancialReport: true,
+        workday: "2026-09-04",
+        currentValidatedReceipts: [{ receiptAmount: 800 }]
+      }
+    );
+    assert.strictEqual(refreshed, true);
+  } finally {
+    guard.confirmedTransferSummaryForUser = originalConfirmedTransferSummaryForUser;
+  }
+  assert.strictEqual(fullReportCalls.length, 1, "an accepted late receipt must replace the stored full report");
+  assert.strictEqual(fullReportCalls[0][2], reportOwner, "the report sender/owner must be the room owner, not the admin uploader");
+  assert.strictEqual(fullReportCalls[0][4], storedFormData.cash, "manual cash must remain unchanged");
+  assert.strictEqual(fullReportCalls[0][5], storedFormData.transfers, "manual transfer field must remain unchanged");
+  assert.strictEqual(fullReportCalls[0][8].total, 2000, "verified receipt total must be passed as the derived authority");
+  assert.strictEqual(ownerSummaryCalls.length, 1, "the owner shortage summary must be refreshed too");
+  assert.deepStrictEqual(deletedPreliminary, ["old-preliminary"], "expired preliminary status must only be removed");
+  assert.strictEqual(reconciledRecords.length, 1);
+  assert.deepStrictEqual(reconciledRecords[0].formData, storedFormData, "reconciliation must preserve the originally submitted form data");
+  assert.strictEqual(reconciledRecords[0].messageId, "new-report-message");
+  assert.strictEqual(reconciledRecords[0].ownerSummaryMessageId, "new-owner-summary");
+  assert.strictEqual(reconciledRecords[0].preliminaryMessageId, "");
+
+  console.log("PASS: receipt totals update and late accepted receipts reconcile stored reports for the room owner");
 })().catch((error) => {
   console.error(error && error.stack || error);
   process.exitCode = 1;

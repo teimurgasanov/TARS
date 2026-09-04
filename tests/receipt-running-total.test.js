@@ -46,4 +46,27 @@ const processingEnd = source.indexOf('function isTodayTransferSumRequest', proce
 const processing = source.slice(processingStart, processingEnd);
 assert.match(processing, /await publishMasterTransferSummary\(entry, message, read, persistence, modify, ocrConfig, logger, true, receiptEntries\)/);
 
-console.log('PASS: accepted receipts replace the daily running total with recalculated count and amount');
+const refreshStart = source.indexOf('async refreshPreliminaryReportAnalysis');
+const refreshEnd = source.indexOf('async sendQueuedReportReminder', refreshStart);
+if (refreshStart < 0 || refreshEnd <= refreshStart) throw new Error('refreshPreliminaryReportAnalysis block not found');
+const refresh = source.slice(refreshStart, refreshEnd);
+assert.match(refresh, /masterUserForPersonalReportRoom\(n, a, t\)/, 'late receipt reconciliation must resolve the room owner instead of the uploader');
+assert.match(refresh, /refreshFinancialReport === true/, 'full report replacement must be explicitly gated to accepted receipts');
+assert.match(refresh, /confirmedTransferSummaryForUser\(n, h, reportOwner\.id, o/, 'reconciliation must recalculate the verified receipt ledger for the report owner');
+assert.match(refresh, /this\.sendReport\(r, a, reportOwner, f\.rows, f\.cash, f\.transfers/, 'accepted late receipts must rebuild the existing report from stored form values');
+assert.match(refresh, /this\.sendOwnerShortReport\(/, 'accepted late receipts must refresh the owner summary');
+assert.doesNotMatch(refresh, /submittedFormData\(/, 'receipt reconciliation must not rewrite the master-entered form values');
+assert.ok(refresh.indexOf('this.sendReport(') < refresh.indexOf('Date.now() >= dueAt'), 'late receipts must rebuild the report even after the preliminary-report deadline');
+
+const postStart = source.indexOf('async executePostMessageSent');
+const postEnd = source.indexOf('async receiptOcrConfig', postStart);
+const post = source.slice(postStart, postEnd);
+assert.match(post, /receiptWasAcceptedForMessage\(n, e\)[\s\S]*refreshFinancialReport: receiptAccepted/, 'normal receipt uploads must refresh the financial report only after acceptance');
+
+const approvalStart = source.indexOf('async handleApproveReceiptCommand');
+const approvalEnd = source.indexOf('photoReportIntentAssociation', approvalStart);
+const approvals = source.slice(approvalStart, approvalEnd);
+assert.strictEqual((approvals.match(/refreshFinancialReport: true/g) || []).length, 2, 'both manual approval paths must reconcile the stored report');
+assert.strictEqual((approvals.match(/workday: targetDate/g) || []).length, 2, 'manual approvals must reconcile the report for the receipt date');
+
+console.log('PASS: accepted receipts update the running total and reconcile stored reports without changing manual form values');

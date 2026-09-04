@@ -7884,7 +7884,7 @@ var require_upload_duplicate_guard = __commonJS({
       await modify.getCreator().finish(modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("✅ ФОТО РАБОТЫ ПРИНЯТО"));
       return true;
     }
-    async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", processingStatusManager, personalImageDiagnostic) {
+    async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", processingStatusManager, personalImageDiagnostic, resultContext = {}) {
       if (await isKnownArchiveRoom(message && message.room, read)) return false;
       const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
       if (isTarsAppMessage(message, appUser)) return false;
@@ -8445,6 +8445,7 @@ var require_upload_duplicate_guard = __commonJS({
           const roomConfig = roomCache[indexName];
           return roomConfig && roomConfig.kind === "receipt" ? list.concat(acceptedByIndex[indexName] || []) : list;
         }, []);
+        resultContext.acceptedReceiptEntries = receiptEntries.slice();
         if (receiptEntries.length) {
           const refreshed = {};
           for (const entry of receiptEntries) {
@@ -8540,7 +8541,8 @@ var require_upload_duplicate_guard = __commonJS({
       }
       const processingStatusManager = createReceiptProcessingStatusManager(message, read, persistence, modify, logger, allowProcessingStatus);
       try {
-        const result = await rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent, processingStatusManager, personalImageDiagnostic);
+        const resultContext = {};
+        const result = await rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent, processingStatusManager, personalImageDiagnostic, resultContext);
         const handled = result === true || result === "processed";
         if (result === true) processingStatusManager.markAll("rejected_published", "ok");
         if (logger) logger.info(`MEDIA_V2_FINISH message=${String(message.id || "none")} handled=${handled} result=${String(result || "none")}`);
@@ -8554,7 +8556,7 @@ var require_upload_duplicate_guard = __commonJS({
           setPersonalImageFinalDiagnostic(personalImageDiagnostic, "unknown", finalReason, "final");
           emitPersonalImageClassificationDiagnostic(logger, personalImageDiagnostic);
         }
-        return { handled, status: handled ? "processed" : "unclassified", result };
+        return { handled, status: handled ? "processed" : "unclassified", result, acceptedReceiptEntries: resultContext.acceptedReceiptEntries || [] };
       } finally {
         await processingStatusManager.clearAll();
       }
@@ -9947,14 +9949,19 @@ var C = class extends j.App {
       if (mediaV2.handled) {
         if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
         if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);
-        if (hasPersonalImageUpload && G.directFileIntent(e) !== "mailing") await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
+        if (hasPersonalImageUpload && G.directFileIntent(e) !== "mailing") {
+          const currentValidatedReceipts = Array.isArray(mediaV2.acceptedReceiptEntries) ? mediaV2.acceptedReceiptEntries : [];
+          const receiptAccepted = currentValidatedReceipts.length > 0 || mediaV2.result === "processed" || await this.receiptWasAcceptedForMessage(n, e);
+          await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room, { refreshFinancialReport: receiptAccepted, currentValidatedReceipts });
+        }
         return;
       }
       if (hasPersonalImageUpload && !explicitPhotoIntent && !explicitMailingIntent && !explicitTransferIntent && !G.directFileIntent(e) && !await this.receiptWasAcceptedForMessage(n, e)) {
         await this.sendUnknownImageTypePrompt(n, r, e);
       }
       if (hasPersonalImageUpload && G.directFileIntent(e) !== "mailing") {
-        await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
+        const receiptAccepted = await this.receiptWasAcceptedForMessage(n, e);
+        await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room, { refreshFinancialReport: receiptAccepted });
       }
       if (G.isMasterTransferSumRequest(e) && await G.sendMasterTransferSummaryRequest(e, n, s, r, this.getLogger(), t, i)) return;
       if (G.isTodayTransferSumRequest(e)) await G.sendTodayTransferSummary(e, n, s, r, this.getLogger(), t, i);
@@ -10156,6 +10163,11 @@ var C = class extends j.App {
             userName: entry.userName || "",
             nameCandidates: [targetUsername]
           }, { room: masterRoom }, e, t, n, config, this.getLogger(), true, [entry]);
+          await this.refreshPreliminaryReportAnalysis(e, t, n, r, masterRoom, {
+            refreshFinancialReport: true,
+            workday: targetDate,
+            currentValidatedReceipts: [entry]
+          });
         }
       } catch (error) {
         this.getLogger().warn(`Could not refresh master transfer summary after manual approval: ${error && error.message || error}`);
@@ -10211,6 +10223,11 @@ var C = class extends j.App {
             userName: entry.userName || "",
             nameCandidates: [entry.username || ""]
           }, { room: masterRoom }, e, t, n, config, this.getLogger(), true, [entry]);
+          await this.refreshPreliminaryReportAnalysis(e, t, n, a.user, masterRoom, {
+            refreshFinancialReport: true,
+            workday: targetDate,
+            currentValidatedReceipts: [entry]
+          });
         }
       } catch (error) {
         this.getLogger().warn(`Could not refresh master transfer summary after receipt button approval: ${error && error.message || error}`);
@@ -10399,6 +10416,8 @@ var C = class extends j.App {
     const config = await this.receiptOcrConfig(read);
     let statusMessageId = "";
     let outcome = "failed";
+    let receiptAcceptedForRefresh = false;
+    let currentValidatedReceiptsForRefresh = [];
     try {
       const diagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(sourceMessage));
       let primaryDecision;
@@ -10415,6 +10434,8 @@ var C = class extends j.App {
       if (routedType === "receipt") {
         const result = await G.processPersonalMediaV2(sourceMessage, read, persistence, modify, this.getLogger(), http, config, "receipt", true);
         outcome = result && result.handled ? "receipt-processed" : "not-receipt";
+        currentValidatedReceiptsForRefresh = result && Array.isArray(result.acceptedReceiptEntries) ? result.acceptedReceiptEntries : [];
+        receiptAcceptedForRefresh = Boolean(result && result.result === "processed") || await this.receiptWasAcceptedForMessage(read, sourceMessage);
         if (!result || !result.handled) await this.publishManualImageSelectionText(read, modify, data.room, "⚠️ Это изображение не подтверждено как финансовый чек.");
       } else if (routedType === "photo") {
         statusMessageId = await this.publishManualImageSelectionText(read, modify, data.room, "⏳ Обрабатываю фото…");
@@ -10459,7 +10480,7 @@ var C = class extends j.App {
         }
       }
       try {
-        await this.refreshPreliminaryReportAnalysis(read, persistence, modify, sourceMessage.sender, sourceMessage.room);
+        await this.refreshPreliminaryReportAnalysis(read, persistence, modify, sourceMessage.sender, sourceMessage.room, { refreshFinancialReport: receiptAcceptedForRefresh, currentValidatedReceipts: currentValidatedReceiptsForRefresh });
       } catch (error) {
         this.getLogger().warn(`Could not refresh report after manual image selection: ${error && error.message || error}`);
       }
@@ -11154,26 +11175,34 @@ var C = class extends j.App {
       this.getLogger().warn(`Could not delete preliminary report analysis ${t}: ${s && s.message || s}`);
     }
   }
-  async refreshPreliminaryReportAnalysis(n, s, r, t, a) {
+  async refreshPreliminaryReportAnalysis(n, s, r, t, a, options = {}) {
     if (!n || !s || !r || !t || !t.id || !a || !this.isPersonalReportRoom(a)) return;
-    const o = this.reportWorkday(), c = ["male", "female", "brow", "manicure"];
+    const reportOwner = await this.masterUserForPersonalReportRoom(n, a, t);
+    if (!reportOwner || !reportOwner.id) return;
+    const requestedWorkday = String(options && options.workday || ""), o = /^\d{4}-\d{2}-\d{2}$/.test(requestedWorkday) ? requestedWorkday : this.reportWorkday(), refreshFinancialReport = options && options.refreshFinancialReport === true, c = ["male", "female", "brow", "manicure"];
     for (const d of c) {
-      const m = this.reportAssociation(t.id, d, o), u = await n.getPersistenceReader().readByAssociation(m), I = (u || []).filter((P) => P && P.userId === t.id && P.reportType === d && P.workday === o && P.formData).sort((P, x) => Number(x.updatedAt || 0) - Number(P.updatedAt || 0))[0];
+      const m = this.reportAssociation(reportOwner.id, d, o), u = await n.getPersistenceReader().readByAssociation(m), I = (u || []).filter((P) => P && P.userId === reportOwner.id && P.reportType === d && P.workday === o && P.formData).sort((P, x) => Number(x.updatedAt || 0) - Number(P.updatedAt || 0))[0];
       if (!I || !I.formData) continue;
       const f = this.parseSubmittedReport(I.formData, d);
       if (!f) continue;
-      const dueAt = this.reportFinalDueAt(Number(I.firstSubmittedAt || I.updatedAt || Date.now()), o);
-      if (Date.now() >= dueAt) {
-        await this.deletePreliminaryReportAnalysis(r, n, I.preliminaryMessageId || "");
-        await s.removeByAssociation(m);
-        await s.createWithAssociation({ ...I, preliminaryMessageId: "", updatedAt: Date.now() }, m);
-        return;
+      const h = await this.receiptOcrConfig(n), currentValidatedReceipts = options && Array.isArray(options.currentValidatedReceipts) ? options.currentValidatedReceipts : void 0, O = await G.confirmedTransferSummaryForUser(n, h, reportOwner.id, o, void 0, currentValidatedReceipts, a.id), B = await this.mailingProofStatus(n, reportOwner, o), L = await this.reportPhotoStatus(n, reportOwner, o), w = this.payrollRule(d, f.rows, f.mailings, B), dueAt = this.reportFinalDueAt(Number(I.firstSubmittedAt || I.updatedAt || Date.now()), o);
+      let messageId = I.messageId || "", ownerSummaryMessageId = I.ownerSummaryMessageId || "", preliminaryMessageId = I.preliminaryMessageId || "";
+      if (refreshFinancialReport) {
+        const timeCorrection = I.timeCorrection || this.reportTimeCorrection(I.firstSubmittedAt || I.updatedAt || Date.now(), I.scheduleStatus || null), penalties = await this.latenessSummary(n, reportOwner.id, o);
+        messageId = await this.sendReport(r, a, reportOwner, f.rows, f.cash, f.transfers, d, messageId, O, reportOwner, f.mailings, B, timeCorrection, penalties, true);
+        ownerSummaryMessageId = await this.sendOwnerShortReport(r, n, reportOwner, f.rows, f.cash, f.transfers, d, ownerSummaryMessageId, O, f.mailings, B, timeCorrection, penalties, true, o);
       }
-      const h = await this.receiptOcrConfig(n), O = await G.confirmedTransferSummaryForUser(n, h, t.id, o, void 0, void 0, a.id), B = await this.mailingProofStatus(n, t, o), L = await this.reportPhotoStatus(n, t, o), w = this.payrollRule(d, f.rows, f.mailings, B), E = await this.sendPreliminaryReportAnalysis(r, n, a, t, O, L, B, w, I.preliminaryMessageId || "", true);
+      if (Date.now() >= dueAt) {
+        await this.deletePreliminaryReportAnalysis(r, n, preliminaryMessageId);
+        preliminaryMessageId = "";
+      } else {
+        preliminaryMessageId = await this.sendPreliminaryReportAnalysis(r, n, a, reportOwner, O, L, B, w, preliminaryMessageId, true) || "";
+      }
       await s.removeByAssociation(m);
-      await s.createWithAssociation({ ...I, preliminaryMessageId: E || "", updatedAt: Date.now() }, m);
-      return;
+      await s.createWithAssociation({ ...I, roomId: a.id, sourceRoomId: a.id, messageId, ownerSummaryMessageId, preliminaryMessageId, updatedAt: Date.now() }, m);
+      return true;
     }
+    return false;
   }
   async sendQueuedReportReminder(e, n, t, s = Date.now()) {
     if (!e || !n || !t || !t.userId || !t.reportType || !t.workday) return t;
