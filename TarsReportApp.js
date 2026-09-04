@@ -1876,6 +1876,7 @@ var require_upload_duplicate_guard = __commonJS({
             if (logger) logger.warn(`Could not remove duplicate report forward ${duplicate.id || "unknown"}: ${error && error.message || error}`);
           }
         }
+        break;
       }
     }
     async function cleanupDuplicateReportForwardsInOtchet(read, modify, logger) {
@@ -2746,6 +2747,7 @@ var require_upload_duplicate_guard = __commonJS({
           entry.reportRoomId = entry.reportRoomId || room.id;
           entry.reportMessageId = entry.reportMessageId || "duplicate";
           entry.reportPublishedAt = entry.reportPublishedAt || Date.now();
+          delete entry.reportQueuedAt;
           published = true;
           continue;
         }
@@ -2822,8 +2824,12 @@ var require_upload_duplicate_guard = __commonJS({
         const reportMessageId = String(entry.reportMessageId || "");
         const staleStatus = reportMessageId === "duplicate" || reportMessageId === "blocked" || reportMessageId === "failed";
         if (entry.reportMessageId && entry.reportMessageId !== "publishing" && !staleStatus) return false;
+        // A photo already published under another entry stays "duplicate" until
+        // an explicit requeue; otherwise it would be re-marked on every run.
+        if (reportMessageId === "duplicate" && !entry.reportQueuedAt) return false;
         return !(entry.reportMessageId === "publishing" && Number(entry.reportPublishLockUntil || 0) > Date.now());
       }).slice(0, 50);
+      const MAX_QUEUE_ATTEMPTS = 5;
       if (!pending.length) return 0;
       let handled = 0;
       const grouped = /* @__PURE__ */ new Map();
@@ -2839,6 +2845,12 @@ var require_upload_duplicate_guard = __commonJS({
             for (const entry of entries) {
               entry.reportQueueAttempts = Number(entry.reportQueueAttempts || 0) + 1;
               entry.reportQueueLastAttemptAt = Date.now();
+              if (entry.reportQueueAttempts >= MAX_QUEUE_ATTEMPTS) {
+                // The source message is gone; stop retrying forever.
+                entry.reportMessageId = "source_missing";
+                delete entry.reportQueuedAt;
+                if (logger) logger.info(`Gave up queued report photo upload=${entry.uploadId || "unknown"} message=${messageId || "unknown"} after ${entry.reportQueueAttempts} attempts`);
+              }
             }
             continue;
           }
@@ -2905,6 +2917,9 @@ var require_upload_duplicate_guard = __commonJS({
         if (!entry || !entry.sourceRoomIsDirect || !entry.uploadId || !entry.messageId) continue;
         if (Number(entry.uploadedAt || entry.postProcessedAt || 0) < recentCutoff) continue;
         const reportMessageId = String(entry.reportMessageId || "");
+        // Terminal sentinels are not message ids; looking them up would report a
+        // "missing" forward and re-run OCR/AI on every update.
+        if (reportMessageId === "blocked_not_work_photo" || reportMessageId === "source_missing") continue;
         const staleStatus = reportMessageId === "duplicate" || reportMessageId === "blocked" || reportMessageId === "failed";
         let staleMissingMessage = false;
         if (reportMessageId && reportMessageId !== "publishing" && !staleStatus) {
@@ -3029,6 +3044,9 @@ var require_upload_duplicate_guard = __commonJS({
     }
     function createArchiveDownloadUrl(entry, config, expiresSeconds = 3600) {
       if (entry && entry.archiveUploadId && entry.archiveUrl) return entry.archiveUrl;
+      // Receipts archived inside Rocket.Chat carry a "rocket:<uploadId>" key; a
+      // signed object-storage URL for such a key points at a non-existent object.
+      if (entry && String(entry.archiveKey || "").indexOf("rocket:") === 0) return String(entry.archiveUrl || "");
       if (!entry || !entry.archiveKey || !archiveConfigured(config)) return "";
       return createArchiveSignedUrl("GET", entry.archiveBucket || config.archiveBucket, entry.archiveKey, config, expiresSeconds);
     }
@@ -5361,7 +5379,7 @@ var require_upload_duplicate_guard = __commonJS({
       const document = /чек\s+(?:по\s+)?операци[ии]|справка\s+по\s+операции|квитанц|электронн(?:ый|ая)\s+чек|receipt|payment\s+receipt|подтверждение\s+(?:операции|платежа|перевода)|детали\s+(?:операции|платежа|перевода)/i.test(source);
       const bank = /сбер\s*банк|сбербанк|sber(?:bank)?|т[-\s]?банк|тинькофф|t[-\s]?bank|tinkoff|втб|vtb|альфа(?:[-\s]?банк)?|alfa|alpha\s*bank|газпромбанк|gazprombank|райффайзен|raiffeisen|росбанк|rosbank|открытие|open\s*bank|ozon\s*банк|ozonbank|озон\s*банк|озонбанк|псб|промсвязьбанк|promsvyaz|мкб|московский\s+кредитный\s+банк|mts\s*bank|мтс\s*банк|почта\s*банк|post\s*bank|совкомбанк|sovcombank|халва|россельхозбанк|рсхб|rshb|ак\s*барс|ak\s*bars|уралсиб|uralsib|ренессанс\s*банк|renaissance|русский\s+стандарт|russian\s+standard|дом\.?\s*рф|dom\.?\s*rf|юmoney|юмoney|юмани|yoomoney|банк\s+(?:получателя|получател|списания)/i.test(source);
       const operation = /(?:тип|вид)\s+операции|операци[ия]|плат[её]ж|перевод|покупка|оплата|сбп|sbp|qr[-\s]?код|куар[-\s]?код|плати\s*qr|плати\s+куар/i.test(source);
-      const money = /(?:^|[^а-яa-z])(?:итого|сумма|к\s+оплате|amount|total)(?:[^а-яa-z]|$)|\d[\d\s.,']{0,12}\s*(?:₽|р\.?|руб\.?|rub|rur)\b/i.test(source);
+      const money = /(?:^|[^а-яa-z])(?:итого|сумма|к\s+оплате|amount|total)(?:[^а-яa-z]|$)|\d[\d\s.,']{0,12}\s*(?:₽|р\.?|руб\.?|rub|rur)(?=$|[^а-яa-z0-9])/i.test(source);
       const party = /получател|отправител|плательщик|назначение\s+платежа|реквизит[ыа]\s+(?:получателя|платежа)|инн|кпп|мсс|mcc|наименование\s+(?:тст|юл|ип)|торгов(?:ая|ой)\s+точк|merchant/i.test(source);
       const status = /статус\s+(?:операции|платежа|перевода)|успешно|исполнен|выполнен|ожидает\s+подтверждения|в\s+обработке|отклонен|отменен/i.test(source);
       const date = /дата\s+(?:и\s+время\s+)?(?:операции|платежа|перевода)|\b\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}\b/i.test(source);
@@ -5387,7 +5405,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (!source) return false;
       const directUi = /instagram|инстаграм|direct|директ|сообщени[ея]|аккаунт\s+не\s+может\s+получать|не\s+может\s+получать\s+ваши|камера|отправить\s+сообщение/i.test(source);
       const sentState = /отправлено|просмотрено|доставлено|sent|seen|viewed|delivered/i.test(source);
-      const timeAgo = /\b\d+\s*(?:ч|час|часа|часов|h|hr|hrs)\.?\s+назад\b|\b\d+\s*(?:мин|м|min)\.?\s+назад\b/i.test(source);
+      const timeAgo = /\b\d+\s*(?:ч|час|часа|часов|h|hr|hrs)\.?\s+назад(?=$|[^а-яa-z0-9])|\b\d+\s*(?:мин|м|min)\.?\s+назад(?=$|[^а-яa-z0-9])/i.test(source);
       const repeatedStates = (source.match(/отправлено|просмотрено|sent|seen|viewed|delivered/g) || []).length >= 2;
       const accountList = (source.match(/[a-zа-я0-9_.]{3,}\s+(?:отправлено|просмотрено|sent|seen|viewed|delivered)/g) || []).length >= 2;
       return Boolean(
@@ -5442,8 +5460,15 @@ var require_upload_duplicate_guard = __commonJS({
       const currentWorkday = workdayForTimestamp(now, config);
       return Boolean(messageWorkday && currentWorkday && messageWorkday < currentWorkday);
     }
+    function effectiveWorkdayCutoffHour(config) {
+      // A blank or zero setting keeps the historical 04:00 cutoff. Reports use
+      // the same value through TarsReportApp.reportWorkday().
+      return Math.min(12, Math.max(0, Number(config && config.cutoffHour) || 4));
+    }
     function workdayForTimestamp(timestamp, config) {
-      const cutoffHour = Math.min(12, Math.max(0, Number(config.cutoffHour) || 4));
+      // Same formula as effectiveWorkdayCutoffHour(); kept inline so the helper
+      // stays self-contained for the standalone cutoff tests.
+      const cutoffHour = Math.min(12, Math.max(0, Number(config && config.cutoffHour) || 4));
       const shifted = new Date(Number(timestamp || Date.now()) - cutoffHour * 60 * 60 * 1e3);
       const parts = new Intl.DateTimeFormat("en-CA", {
         timeZone: config.timeZone || "Europe/Astrakhan",
@@ -5761,9 +5786,10 @@ var require_upload_duplicate_guard = __commonJS({
     }
     const strictReceiptValidationCache = /* @__PURE__ */ new Map();
     async function validateReceiptStrict(file, content, http, config, logger, validationContext, diagnostic) {
-      // OCR is deliberately executed after Rocket.Chat has finished the file
-      // upload. The pre-upload hook stays local and fast, otherwise the mobile
-      // client can time out while it is still showing "Upload in progress".
+      // The pre-upload hook runs one strict pass of this check for receipt rooms
+      // with short OCR/AI timeouts; the full pipeline (identity checks, archive)
+      // runs after Rocket.Chat has finished the upload so the mobile client is
+      // not kept on "Upload in progress" for long.
       // One complete OCR result remains strict: missing/old date, missing
       // amount and bad status are never confirmed or copied to the archive.
       const stageContext = validationContext || receiptStageContext(file, content, config);
@@ -6268,6 +6294,7 @@ var require_upload_duplicate_guard = __commonJS({
           showThreadMessages: true
         });
         if (!messages || !messages.length) break;
+        let deletedOnPage = 0;
         for (const oldMessage of messages) {
           const createdAt = oldMessage && oldMessage.createdAt ? new Date(oldMessage.createdAt).getTime() : 0;
           if (!createdAt || createdAt + RECEIPT_ARCHIVE_DELAY_MS > now) continue;
@@ -6330,13 +6357,14 @@ var require_upload_duplicate_guard = __commonJS({
               deletedMessageIds[oldMessageId] = true;
               changed = true;
               deleted += 1;
+              deletedOnPage += 1;
               break;
             } catch (error) {
               if (logger) logger.warn(`Could not backfill archive/delete receipt message ${oldMessageId || "unknown"}: ${error && error.message || error}`);
             }
           }
         }
-        skip += messages.length;
+        skip += messages.length - deletedOnPage;
         if (messages.length < 100) break;
       }
       if (changed) await writeIndex(persistence, PROTECTED_ROOMS.kassa.index, index);
@@ -6537,9 +6565,10 @@ var require_upload_duplicate_guard = __commonJS({
       }
       let protectedRoom = protectedRoomForRoom(room);
       if (!protectedRoom) return;
-      // Keep this hook fast. Rocket.Chat mobile can abort an upload while an
-      // external OCR request is still running. Exact duplicates are rejected
-      // here; OCR, receipt-identity checks and archiving run after publication.
+      // Keep this hook short. Rocket.Chat mobile can abort an upload while an
+      // external request is still running. Exact duplicates are rejected here and
+      // receipts get one strict OCR/AI pass with short timeouts; identity checks
+      // and archiving run after publication.
       const exact = exactHash(content);
       const visual = visualHash(file, content);
       const index = await readIndex(read, protectedRoom.index);
@@ -7915,14 +7944,16 @@ var require_upload_duplicate_guard = __commonJS({
           for (const messageFile of files) {
             if (!messageFile || !/^image\//i.test(String(messageFile.type || ""))) continue;
             try {
-        const upload = await read.getUploadReader().getById(messageFile._id);
-        const content = await read.getUploadReader().getBufferById(messageFile._id);
+              const seedFileId = messageFile._id || messageFile.id;
+              if (!seedFileId) continue;
+              const upload = await read.getUploadReader().getById(seedFileId);
+              const content = await read.getUploadReader().getBufferById(seedFileId);
               const exact = exactHash(content);
               if (photos.some((entry) => entry.exact === exact)) continue;
               photos.push({
                 exact,
                 visual: visualHash(
-                  { name: messageFile.name || upload.name, type: messageFile.type || upload.type },
+                  { name: messageFile.name || upload && upload.name, type: messageFile.type || upload && upload.type },
                   content
                 ),
                 uploadedAt: message.createdAt ? new Date(message.createdAt).getTime() : Date.now(),
@@ -7948,6 +7979,7 @@ var require_upload_duplicate_guard = __commonJS({
     }
     module2.exports = {
       exactHash,
+      effectiveWorkdayCutoffHour,
       expectedReceiptDate,
       visualHash,
       hammingDistance,
@@ -8360,10 +8392,15 @@ var C = class extends j.App {
       }
     }, {
       id: "forward-pending-report-photos",
-      processor: this.forwardPendingReportPhotosJob
+      processor: async (jobContext, read, modify, http, persistence) => this.forwardPendingReportPhotosJob(jobContext, read, modify, http, persistence),
+      startupSetting: {
+        type: J.StartupType.RECURRING,
+        interval: "5 minutes",
+        skipImmediate: true
+      }
     }, {
       id: "forward-pending-report-photos-now",
-      processor: this.forwardPendingReportPhotosJob
+      processor: async (jobContext, read, modify, http, persistence) => this.forwardPendingReportPhotosJob(jobContext, read, modify, http, persistence)
     }]);
     e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.api.provideApi({
       visibility: A.ApiVisibility.PUBLIC,
@@ -8387,7 +8424,8 @@ var C = class extends j.App {
   async onUpdate(e, n, t, s, r) {
     this.getLogger().info("TARS updated: fast report form package");
     try {
-      await r.getScheduler().cancelJob("forward-pending-report-photos");
+      // "forward-pending-report-photos" is a recurring startup job now and must
+      // not be cancelled here; only the legacy one-shot id is cleaned up.
       await r.getScheduler().cancelJob("forward-pending-report-photos-now");
     } catch (schedulerError) {
       this.getLogger().warn(`Could not cancel legacy report photo jobs: ${schedulerError && schedulerError.message || schedulerError}`);
@@ -8426,7 +8464,8 @@ var C = class extends j.App {
         this.getLogger().warn(`POST_ROOM_HYDRATE_CHECK_FAILED room=${String(eventRoom.id)} error=${roomError && roomError.message || roomError}`);
       }
     }
-    let c = !!this.parseMasterChatText(e && e.text) || !!this.parseLatenessText(e && e.text) || G.isPersonalTarsRoom(eventRoom);
+    const transferSumEvent = { ...e, room: eventRoom };
+    let c = !!this.parseMasterChatText(e && e.text) || !!this.parseLatenessText(e && e.text) || G.isPersonalTarsRoom(eventRoom) || G.isMasterTransferSumRequest(transferSumEvent) || G.isTodayTransferSumRequest(transferSumEvent);
     if (!c) return false;
     let r = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();
     return !G.isTarsAppMessage(e, r);
@@ -8729,7 +8768,7 @@ var C = class extends j.App {
     const cutoffSetting = await n.getValueById("receipt_workday_cutoff");
     const archiveEnabledSetting = await n.getValueById("receipt_archive_enabled");
     const imageClassificationV1ShadowEnabledSetting = await n.getValueById("image_classification_v1_shadow_enabled");
-    return {
+    const config = {
       apiKey: String(await n.getValueById("yandex_ocr_api_key") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       folderId: String(await n.getValueById("yandex_ocr_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
@@ -8752,6 +8791,10 @@ var C = class extends j.App {
       archiveAccessKey: String(await n.getValueById("receipt_archive_access_key") || "").trim(),
       archiveSecretKey: String(await n.getValueById("receipt_archive_secret_key") || "").trim()
     };
+    // Reports and receipts must agree on what "today" is.
+    this.workdayCutoffHour = G.effectiveWorkdayCutoffHour(config);
+    this.workdayTimeZone = config.timeZone || "Europe/Astrakhan";
+    return config;
   }
   async handleReceiptArchiveCommand(e, n, t, s, r, a = []) {
     if (!e || !n || !s || !r) return;
@@ -9501,8 +9544,8 @@ var C = class extends j.App {
       if (expenseRaw) {
         expense = this.parsePositiveNumber(expenseRaw);
         expense === void 0 && (d[`${l.id}-expense`] = "Расход должен быть цифрами");
-      } else if (reportType === "female" && l.expense) {
-        let autoExpense = this.defaultFemaleExpense(p, w);
+      } else if (l.expense) {
+        let autoExpense = reportType === "female" ? this.defaultFemaleExpense(p, w) : reportType === "male" ? this.defaultMaleExpense(p, w) : null;
         expense = autoExpense === null ? 0 : autoExpense;
       }
       (R === void 0 || R <= 0) && (d[`${l.id}-amount`] = "\u0423\u043A\u0430\u0436\u0438\u0442\u0435 \u0441\u0443\u043C\u043C\u0443 \u0431\u043E\u043B\u044C\u0448\u0435 \u043D\u0443\u043B\u044F"), (w === void 0 || w <= 0 || !Number.isInteger(w)) && (d[`${l.id}-quantity`] = "\u041A\u043E\u043B\u0438\u0447\u0435\u0441\u0442\u0432\u043E \u0434\u043E\u043B\u0436\u043D\u043E \u0431\u044B\u0442\u044C \u0446\u0435\u043B\u044B\u043C \u0447\u0438\u0441\u043B\u043E\u043C"), l.customName && !p && (d[`${l.id}-name`] = "\u041D\u0430\u043F\u0438\u0448\u0438\u0442\u0435 \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u0435 \u0443\u0441\u043B\u0443\u0433\u0438"), R !== void 0 && R > 0 && w !== void 0 && w > 0 && Number.isInteger(w) && p && expense !== void 0 && m.push({
@@ -9518,11 +9561,12 @@ var C = class extends j.App {
     let u = this.getValue(c, "cash-amount"), I = this.getValue(c, "transfers-amount"), cashMissing = String(u || "").trim() === "", transfersMissing = String(I || "").trim() === "", f = cashMissing ? void 0 : this.parsePositiveNumber(u), h = transfersMissing ? void 0 : this.parsePositiveNumber(I);
     if (cashMissing && (d["cash-amount"] = "Заполните наличные. Если нет — поставьте 0"), transfersMissing && (d["transfers-amount"] = "Заполните чеки / переводы. Если нет — поставьте 0"), f === void 0 && !cashMissing && (d["cash-amount"] = "Введите сумму наличных цифрами"), h === void 0 && !transfersMissing && (d["transfers-amount"] = "Введите сумму чеков / переводов цифрами"), Object.keys(d).length > 0)
       return e.getInteractionResponder().viewErrorResponse({ viewId: o, errors: d });
+    const firstRowErrorBlock = `${modalRows[0] && modalRows[0].id || "haircut"}-amount`;
     if (m.length === 0)
       return e.getInteractionResponder().viewErrorResponse({
         viewId: o,
         errors: {
-          "haircut-amount": "\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u0435 \u0445\u043E\u0442\u044F \u0431\u044B \u043E\u0434\u043D\u0443 \u0441\u0442\u0440\u043E\u043A\u0443"
+          [firstRowErrorBlock]: "\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u0435 \u0445\u043E\u0442\u044F \u0431\u044B \u043E\u0434\u043D\u0443 \u0441\u0442\u0440\u043E\u043A\u0443"
         }
       });
     let O = viewPayload, g = await n.getRoomReader().getById(O);
@@ -9535,7 +9579,7 @@ var C = class extends j.App {
       }
       const workday = this.reportWorkday(), association = this.reportAssociation(a.user.id, reportType, workday), previous = await n.getPersistenceReader().readByAssociation(association), latest = (previous || []).filter((entry) => entry && entry.userId === a.user.id && entry.reportType === reportType && entry.workday === workday).sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))[0], personalRoom = this.isPersonalReportRoom(g) ? g : void 0, publicRoom = await this.getPublicReportRoom(n), appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser(), transferVerification = await G.confirmedTransferSummaryForUser(n, i, a.user.id, workday, void 0, void 0, personalRoom && personalRoom.id || ""), mailingProof = await this.mailingProofStatus(n, a.user, workday), reportPhoto = await this.reportPhotoStatus(n, a.user, workday);
       const penalties = await this.latenessSummary(n, a.user.id, workday);
-      if (!personalRoom) return e.getInteractionResponder().viewErrorResponse({ viewId: o, errors: { "haircut-amount": "Отчёт теперь отправляется только из личного чата TARS" } });
+      if (!personalRoom) return e.getInteractionResponder().viewErrorResponse({ viewId: o, errors: { [firstRowErrorBlock]: "Отчёт теперь отправляется только из личного чата TARS" } });
       let messageId = latest && latest.messageId || "", publicMessageId = latest && latest.publicMessageId || "", ownerSummaryMessageId = latest && latest.ownerSummaryMessageId || "", preliminaryMessageId = latest && latest.preliminaryMessageId || "";
       const scheduleStatus = await this.masterScheduleStatus(n, a.user, workday), firstSubmittedAt = latest && latest.firstSubmittedAt ? Number(latest.firstSubmittedAt) : Date.now(), timeCorrection = this.reportTimeCorrection(firstSubmittedAt, scheduleStatus);
       if (latest && latest.roomId && latest.roomId !== personalRoom.id) messageId = "";
@@ -10063,7 +10107,7 @@ var C = class extends j.App {
       await n.removeByAssociation(a);
       for (const I of d) await n.createWithAssociation(I, a);
     }
-    if (u && !m) {
+    if (u && !m && r && r.roomFound !== false) {
       await n.createWithAssociation({
         type: "lateness",
         autoPenalty: true,
@@ -10283,7 +10327,7 @@ var C = class extends j.App {
       return;
     }
     const I = (a || []).map((P) => String(P || "").trim()).filter(Boolean);
-    const f = I.find((P) => /^@?[\w.\-а-яё]+$/i.test(P) && !/^(off|work|on|выходной|рабочий)$/i.test(P));
+    const f = I.find((P) => /^@?[\w.\-а-яё]+$/i.test(P) && !/^(off|work|on|выходной|рабочий)$/i.test(P) && !/^[\d.\-\/]+$/.test(P) && !this.parseScheduleDate(P));
     const h = I.find((P) => /^(off|выходной)$/i.test(P)) ? "off" : I.find((P) => /^(work|on|рабочий)$/i.test(P)) ? "work" : "";
     const O = I.map((P) => this.parseScheduleDate(P)).find(Boolean) || this.reportWorkday();
     if (!f || !h) {
@@ -10362,9 +10406,20 @@ var C = class extends j.App {
     for (const n of ["руб", "рублей", "р", "мин", "минута", "минут", "минуты", "штраф", "опоздание", "опоздания", "снять", "убрать", "отменить", "отмена", "не", "нет", "с", "в", "за", "по", "код", "отсутствие", "отсутствии", "отчет", "отчёт", "отчета", "отчёта", "рабочее", "рабочего", "клиента", "клиент", "клиентом", "должностных", "неправильная", "неправильный", "несоблюдение", "невыполнение", "неинформирование", "изменение", "корпоративных", "рабочее", "рабочее", "время"]) e[this.normalizePersonLookup(n)] = true;
     return e;
   }
-  resolvePenaltyDetails(e, n, t) {
-    const s = String(e || "").toLowerCase().replace(/ё/g, "е"), r = this.penaltyRules();
-    let a = r.find((o) => (o.words || []).some((c) => s.indexOf(String(c).toLowerCase().replace(/ё/g, "е")) !== -1));
+  penaltyTextTokens(e) {
+    return String(e || "").toLowerCase().replace(/ё/g, "е").split(/[\s,.;:!?()"«»/]+/).map((token) => token.replace(/^@/, "")).filter(Boolean);
+  }
+  resolvePenaltyDetails(e, n, t, excludeQuery = "") {
+    // Penalty words are matched against whole tokens (as a prefix) with the
+    // employee's login/name removed first. A substring search over the raw text
+    // turned "Штраф Матвей 10" into "мат" and "Литвинова" into "тв".
+    const excluded = {};
+    for (const token of this.penaltyTextTokens(excludeQuery)) excluded[token] = true;
+    const tokens = this.penaltyTextTokens(e).filter((token) => !excluded[token]), r = this.penaltyRules();
+    let a = r.find((o) => (o.words || []).some((c) => {
+      const word = String(c).toLowerCase().replace(/ё/g, "е");
+      return Boolean(word) && tokens.some((token) => token === word || token.indexOf(word) === 0);
+    }));
     if (!a) a = r.find((o) => o.kind === "lateness");
     const o = Math.max(0, Math.floor(Number(n) || 0)), c = Math.max(0, Math.floor(Number(t) || 0));
     if (a.kind === "lateness") return { kind: a.kind, title: a.title, minutes: o, amount: this.latenessAmount(o) };
@@ -10433,13 +10488,15 @@ var C = class extends j.App {
     let r = n.replace(/^(опоздани[ея]|штраф)(?:\s+|$)/i, "").replace(/^(снять|убрать|отменить)\s+(опоздание|штраф)(?:\s+|$)/i, "");
     const a = r.split(/\s+/).filter(Boolean), o = a.map((d) => this.parseScheduleDate(d)).find(Boolean) || this.reportWorkday(), c = a.find((d) => /^\d+$/.test(d)), d = this.penaltyWordSet();
     r = a.filter((m) => !this.parseScheduleDate(m) && !/^\d+$/.test(m) && !d[this.normalizePersonLookup(m)]).join(" ").trim();
-    return { query: r, minutes: c ? Number(c) : 0, workday: o, clearPenalty: s, penalty: this.resolvePenaltyDetails(n, c ? Number(c) : 0, c ? Number(c) : 0) };
+    return { query: r, minutes: c ? Number(c) : 0, workday: o, clearPenalty: s, penalty: this.resolvePenaltyDetails(n, c ? Number(c) : 0, c ? Number(c) : 0, r) };
   }
   async getOrCreateDirectRoom(e, n, t, s) {
     if (!e || !n || !t || !s || !t.username || !s.username) return null;
     const r = [s.username].filter(Boolean);
     try {
-      const a = await e.getRoomReader().getDirectByUsernames(r);
+      // Rocket.Chat matches the exact member set; a single username only finds
+      // the user's self-DM.
+      const a = await e.getRoomReader().getDirectByUsernames([t.username, s.username].filter(Boolean));
       if (a) return a;
     } catch (a) {
       this.getLogger().warn(`Could not find direct room for ${r.join(",")}: ${a && a.message || a}`);
@@ -10521,10 +10578,22 @@ var C = class extends j.App {
     }
     if (t && this.isOwnPersonalReportRoom(n, t)) return t;
     try {
+      const excluded = { tars: true, teimur: true, shura: true };
+      try {
+        const config = await this.receiptOcrConfig(e);
+        for (const name of [config.ownerUsername, config.adminUsername]) {
+          const clean = String(name || "").replace(/^@/, "").trim().toLowerCase();
+          if (clean) excluded[clean] = true;
+        }
+        const appUser = await e.getUserReader().getAppUser();
+        const appName = String(appUser && appUser.username || "").toLowerCase();
+        if (appName) excluded[appName] = true;
+      } catch (_3) {
+      }
       const r = await e.getRoomReader().getMembers(n.id);
       const a = (r || []).filter((o) => {
         const c = String(o && o.username || "").replace(/^@/, "").trim().toLowerCase();
-        return c && c !== "tars" && c !== "teimur" && c !== "shura";
+        return c && !excluded[c];
       });
       if (a.length === 1) return a[0];
     } catch (_2) {
@@ -10682,7 +10751,7 @@ var C = class extends j.App {
       await c("Формат: /shtraf @логин тип [минуты/сумма] [дата]. Пример: /shtraf @narek опоздание 12. Снять штрафы: /shtraf @narek 0");
       return;
     }
-    return await this.processLateness(e, n, t, s, r, f.replace(/^@/, ""), h || 0, O, clearPenalty, c, sendRoom, o, this.resolvePenaltyDetails(I.join(" "), h || 0, h || 0));
+    return await this.processLateness(e, n, t, s, r, f.replace(/^@/, ""), h || 0, O, clearPenalty, c, sendRoom, o, this.resolvePenaltyDetails(I.join(" "), h || 0, h || 0, f));
   }
   async handleLatenessTextMessage(e, n, t, s) {
     const r = this.parseLatenessText(e && e.text);
@@ -10808,10 +10877,16 @@ var C = class extends j.App {
       "cash-report-launcher:v1"
     );
   }
+  reportWorkdayCutoffHour() {
+    return Number.isFinite(this.workdayCutoffHour) ? this.workdayCutoffHour : 4;
+  }
+  reportTimeZone() {
+    return this.workdayTimeZone || "Europe/Astrakhan";
+  }
   reportWorkday(e = new Date()) {
-    e = new Date(e.getTime() - 4 * 60 * 60 * 1e3);
+    e = new Date(e.getTime() - this.reportWorkdayCutoffHour() * 60 * 60 * 1e3);
     let n = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/Astrakhan",
+      timeZone: this.reportTimeZone(),
       year: "numeric",
       month: "2-digit",
       day: "2-digit"
@@ -10823,7 +10898,7 @@ var C = class extends j.App {
   }
   reportLocalHour(e = new Date()) {
     const n = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/Astrakhan",
+      timeZone: this.reportTimeZone(),
       hour: "2-digit",
       hour12: false
     }).formatToParts(e), t = n.find((s) => s.type === "hour");
@@ -10831,7 +10906,7 @@ var C = class extends j.App {
   }
   reportLocalMinutes(e = new Date()) {
     const n = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Europe/Astrakhan",
+      timeZone: this.reportTimeZone(),
       hour: "2-digit",
       minute: "2-digit",
       hour12: false
@@ -11613,7 +11688,8 @@ var C = class extends j.App {
   async sendReport(e, n, t, s, r, a, p = "male", i = "", transferVerification = null, reportOwner = null, mailings = 0, mailingProof = null, timeCorrection = null, penalties = null, finalAnalysis = true) {
     const effectiveMailingProof = finalAnalysis ? mailingProof : { roomFound: true, count: 10 };
     let payroll = this.payrollRule(p, s, mailings, effectiveMailingProof), correction = timeCorrection || { applied: false, amount: 0, label: "👍 до 21:00" }, correctionAmount = correction && correction.applied ? Math.min(300, Number(correction.amount) || 300) : 0, o = s.filter((i) => i.kind === "service").reduce((i, p) => i + p.amount, 0), x = s.filter((i) => i.kind === "service").reduce((i, p) => i + (p.expense || 0), 0), v = o - x, c = s.filter((i) => i.kind === "sale").reduce((i, p) => i + p.amount, 0), tipRows = s.filter((i) => i.kind === "tip"), tipTotal = tipRows.reduce((i, p) => i + p.amount, 0), tipDeduction = tipRows.reduce((i, p) => i + (p.expense || 0), 0), tipSalary = tipRows.reduce((i, p) => i + (p.netAmount || 0), 0), d = o + c + tipTotal, baseSalary = v * payroll.serviceRate + c + tipSalary, m = Math.max(0, baseSalary - correctionAmount), penaltyTotal = Math.max(0, Number(penalties && penalties.total) || 0), penaltyCount = Math.max(0, Number(penalties && penalties.count) || 0), salaryPayable = Math.max(0, m - penaltyTotal), verified = !!transferVerification && Number.isFinite(Number(transferVerification.total)), pendingReceiptCount = Math.max(0, Number(transferVerification && transferVerification.pendingReview) || 0), pendingReceiptReview = pendingReceiptCount > 0, confirmedTransfers = verified ? Number(transferVerification.total) : a, transferDifference = confirmedTransfers - a, u = r + confirmedTransfers, I = u - d, shortage = I < -0.005, surplus = I > 0.005, f = (i) => this.formatRubles(i).replace(" \u20BD", ""), h = (i, p, R = false) => {
-      let w = i.length > p ? i.slice(0, p) : i;
+      // Right-aligned cells hold money and must never be cut ("12 000" -> "12 00").
+      let w = R || i.length <= p ? i : i.slice(0, p);
       return R ? w.padStart(p) : w.padEnd(p);
     }, shortServiceLabel = (label) => {
       const raw = String(label || "").trim(), text = raw.toLowerCase().replace(/ё/g, "е");
@@ -11897,7 +11973,7 @@ var S = class extends A.ApiEndpoint {
         "Ссылка создана не для этого мастера. Откройте свежую нижнюю кнопку в своём чате."
       );
     }
-    let u = m.reportType === "female" ? "female" : m.reportType === "brow" ? "brow" : m.reportType === "manicure" ? "manicure" : "male", I = typeof m.workday == "string" && /^\d{4}-\d{2}-\d{2}$/.test(m.workday) ? m.workday : this.reportApp.reportWorkday(), f = this.reportApp.reportAssociation(m.userId, u, I), h = await t.getPersistenceReader().readByAssociation(f), O = h.filter((R) => R && R.userId === m.userId && R.reportType === u && R.workday === I).sort((R, Q) => Number(Q.updatedAt || 0) - Number(R.updatedAt || 0))[0], P = O && O.formData ? O.formData : null, proofUser = void 0, proofStatus = { count: 0 }, mailingProof = { roomFound: true, count: 0 };
+    let u = m.reportType === "female" ? "female" : m.reportType === "brow" ? "brow" : m.reportType === "manicure" ? "manicure" : "male", I = this.reportApp.reportWorkday(), f = this.reportApp.reportAssociation(m.userId, u, I), h = await t.getPersistenceReader().readByAssociation(f), O = h.filter((R) => R && R.userId === m.userId && R.reportType === u && R.workday === I).sort((R, Q) => Number(Q.updatedAt || 0) - Number(R.updatedAt || 0))[0], P = O && O.formData ? O.formData : null, proofUser = void 0, proofStatus = { count: 0 }, mailingProof = { roomFound: true, count: 0 };
     try {
       proofUser = await t.getUserReader().getById(m.userId);
     } catch (proofUserError) {
@@ -12039,7 +12115,7 @@ var S = class extends A.ApiEndpoint {
         return void 0;
       }
     };
-    let R = await safeUserById(u.userId) || await safeUserByUsername(u.username), P = await safeRoomById(u.sourceRoomId, "source"), O = P && this.reportApp.isPersonalReportRoom(P) ? P : void 0, B = await this.reportApp.getPublicReportRoom(t), L = await t.getUserReader().getByUsername("tars") || await t.getUserReader().getAppUser(), w = typeof u.workday == "string" && /^\d{4}-\d{2}-\d{2}$/.test(u.workday) ? u.workday : this.reportApp.reportWorkday(), ownerId = R && R.id || u.userId, E = this.reportApp.reportAssociation(ownerId, I, w), C = await t.getPersistenceReader().readByAssociation(E), A = C.filter((z) => z && z.userId === ownerId && z.reportType === I && z.workday === w).sort((z, latest) => Number(latest.updatedAt || 0) - Number(z.updatedAt || 0))[0], K = A && typeof A.messageId == "string" ? A.messageId : "", M = "", N = A && typeof A.publicMessageId == "string" ? A.publicMessageId : "", ownerSummaryMessageId = A && typeof A.ownerSummaryMessageId == "string" ? A.ownerSummaryMessageId : "", preliminaryMessageId = A && typeof A.preliminaryMessageId == "string" ? A.preliminaryMessageId : "";
+    let R = await safeUserById(u.userId) || await safeUserByUsername(u.username), P = await safeRoomById(u.sourceRoomId, "source"), O = P && this.reportApp.isPersonalReportRoom(P) ? P : void 0, B = await this.reportApp.getPublicReportRoom(t), L = await t.getUserReader().getByUsername("tars") || await t.getUserReader().getAppUser(), w = this.reportApp.reportWorkday(), ownerId = R && R.id || u.userId, E = this.reportApp.reportAssociation(ownerId, I, w), C = await t.getPersistenceReader().readByAssociation(E), A = C.filter((z) => z && z.userId === ownerId && z.reportType === I && z.workday === w).sort((z, latest) => Number(latest.updatedAt || 0) - Number(z.updatedAt || 0))[0], K = A && typeof A.messageId == "string" ? A.messageId : "", M = "", N = A && typeof A.publicMessageId == "string" ? A.publicMessageId : "", ownerSummaryMessageId = A && typeof A.ownerSummaryMessageId == "string" ? A.ownerSummaryMessageId : "", preliminaryMessageId = A && typeof A.preliminaryMessageId == "string" ? A.preliminaryMessageId : "";
     if (!O || !R)
       return this.response(
         T.HttpStatusCode.NOT_FOUND,
