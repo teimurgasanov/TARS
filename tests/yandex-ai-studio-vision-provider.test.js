@@ -30,6 +30,22 @@ function responseFor(value, statusCode = 200) {
   };
 }
 
+function requestReceiptVisionCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0) {
+  return api.requestOpenAiReceiptCheck(
+    file,
+    content,
+    http,
+    config,
+    requiredDate,
+    logger,
+    retryAttempt,
+    false,
+    false,
+    undefined,
+    "receipt"
+  );
+}
+
 const imageClassification = {
   schema_version: "personal-image-classification-v1",
   kind: "work_photo",
@@ -97,21 +113,21 @@ const receipt = {
 };
 
 async function run() {
-  const yandex = api.visionProviderForConfig(yandexConfig, "gpt-5.6-sol");
+  const yandex = api.receiptVisionProviderForConfig(yandexConfig, "gpt-5.6-sol");
   assert.strictEqual(yandex.id, "yandex_ai_studio");
   assert.strictEqual(yandex.url, YANDEX_URL);
   assert.strictEqual(yandex.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
   assert.strictEqual(yandex.headers.Authorization, "Api-Key yandex-test-secret");
   assert.strictEqual(yandex.includeImageDetail, false);
 
-  const openai = api.visionProviderForConfig({ openaiApiKey: "openai-test-secret" }, "gpt-5.6-sol");
+  const openai = api.receiptVisionProviderForConfig({ openaiApiKey: "openai-test-secret" }, "gpt-5.6-sol");
   assert.strictEqual(openai.id, "openai");
   assert.strictEqual(openai.url, "https://api.openai.com/v1/responses");
   assert.strictEqual(openai.model, "gpt-5.6-sol");
   assert.strictEqual(openai.headers.Authorization, "Bearer openai-test-secret");
   assert.strictEqual(openai.includeImageDetail, true);
 
-  const incompleteYandex = api.visionProviderForConfig({
+  const incompleteYandex = api.receiptVisionProviderForConfig({
     yandexAiStudioApiKey: "yandex-test-secret",
     openaiApiKey: "openai-test-secret"
   }, "gpt-4.1-mini");
@@ -159,7 +175,7 @@ async function run() {
   );
   assert.strictEqual(dedicated, "work");
 
-  const receiptCandidate = await api.requestOpenAiReceiptCheck(
+  const receiptCandidate = await requestReceiptVisionCheck(
     { name: "receipt.png", type: "image/png" },
     Buffer.from([51, 52, 53]),
     http,
@@ -179,18 +195,37 @@ async function run() {
   assert(receiptCall.request.data.text.format.schema.required.includes("date"));
 
   assert.strictEqual(calls.length, 4, "each isolated Vision path must make one provider call");
-  for (const call of calls) {
-    assert.strictEqual(call.url, YANDEX_URL);
-    assert.strictEqual(call.request.headers.Authorization, "Api-Key yandex-test-secret");
-    assert.strictEqual(call.request.data.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
-    assert.strictEqual(call.request.data.store, false);
+  for (const call of calls.slice(0, 3)) {
+    assert.strictEqual(call.url, "https://api.openai.com/v1/responses", "non-receipt Vision must preserve the base OpenAI provider");
+    assert.strictEqual(call.request.headers.Authorization, "Bearer openai-test-secret");
     const image = call.request.data.input[0].content.find((part) => part.type === "input_image");
     assert(image && image.image_url.startsWith("data:image/png;base64,"));
-    assert.strictEqual(Object.prototype.hasOwnProperty.call(image, "detail"), false, "Yandex image input must use its compatible shape");
+    assert.strictEqual(image.detail, "high", "non-receipt OpenAI image input must preserve base detail=high");
   }
+  assert.strictEqual(receiptCall.url, YANDEX_URL);
+  assert.strictEqual(receiptCall.request.headers.Authorization, "Api-Key yandex-test-secret");
+  assert.strictEqual(receiptCall.request.data.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
+  assert.strictEqual(receiptCall.request.data.store, false);
+  const receiptImage = receiptCall.request.data.input[0].content.find((part) => part.type === "input_image");
+  assert(receiptImage && receiptImage.image_url.startsWith("data:image/png;base64,"));
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(receiptImage, "detail"), false, "Yandex receipt image input must use its compatible shape");
+
+  const personalGuardCalls = [];
+  const personalGuardCandidate = await api.requestOpenAiReceiptCheck(
+    { name: "personal-guard.png", type: "image/png" },
+    Buffer.from([54, 55, 56]),
+    { post: async (url, request) => {
+      personalGuardCalls.push({ url, request });
+      return responseFor(receipt);
+    } },
+    yandexConfig,
+    "2026-09-03"
+  );
+  assert.strictEqual(personalGuardCandidate.receiptAmount, 1300);
+  assert.deepStrictEqual(personalGuardCalls.map((call) => call.url), ["https://api.openai.com/v1/responses"], "personal-image receipt guard must never select Yandex");
 
   const fallbackCalls = [];
-  const fallbackCandidate = await api.requestOpenAiReceiptCheck(
+  const fallbackCandidate = await requestReceiptVisionCheck(
     { name: "fallback.png", type: "image/png" },
     Buffer.from([61, 62, 63]),
     {
@@ -213,7 +248,7 @@ async function run() {
   assert.strictEqual(fallbackCalls[2].request.data.max_output_tokens, 800, "OpenAI fallback keeps the existing bounded output budget");
 
   const schemaFallbackCalls = [];
-  const schemaFallbackCandidate = await api.requestOpenAiReceiptCheck(
+  const schemaFallbackCandidate = await requestReceiptVisionCheck(
     { name: "schema-fallback.png", type: "image/png" },
     Buffer.from([64, 65, 66]),
     {
@@ -230,7 +265,7 @@ async function run() {
   assert.deepStrictEqual(schemaFallbackCalls.map((call) => call.url), [YANDEX_URL, YANDEX_URL, "https://api.openai.com/v1/responses"], "schema-mismatched Yandex output must retry Yandex once before OpenAI fallback");
 
   const transportFallbackCalls = [];
-  const transportFallbackCandidate = await api.requestOpenAiReceiptCheck(
+  const transportFallbackCandidate = await requestReceiptVisionCheck(
     { name: "transport-fallback.png", type: "image/png" },
     Buffer.from([71, 72, 73]),
     {
@@ -248,7 +283,7 @@ async function run() {
   assert.deepStrictEqual(transportFallbackCalls.map((call) => call.url), [YANDEX_URL, "https://api.openai.com/v1/responses"], "exhausted Yandex transport retry must fall back once to OpenAI");
 
   const noOpenAiCalls = [];
-  const noOpenAiCandidate = await api.requestOpenAiReceiptCheck(
+  const noOpenAiCandidate = await requestReceiptVisionCheck(
     { name: "no-openai.png", type: "image/png" },
     Buffer.from([81, 82, 83]),
     { post: async (url) => {
@@ -263,7 +298,7 @@ async function run() {
   assert.deepStrictEqual(noOpenAiCalls, [YANDEX_URL, YANDEX_URL]);
 
   const deniedFallbackCalls = [];
-  const deniedFallbackCandidate = await api.requestOpenAiReceiptCheck(
+  const deniedFallbackCandidate = await requestReceiptVisionCheck(
     { name: "denied-fallback.png", type: "image/png" },
     Buffer.from([91, 92, 93]),
     { post: async (url) => {
@@ -291,6 +326,35 @@ async function run() {
   assert.strictEqual(config.openaiApiKey, "runtime-openai-key");
 
   const source = fs.readFileSync("TarsReportApp.js", "utf8");
+  const sourceSection = (startMarker, endMarker) => {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start + startMarker.length);
+    assert(start >= 0 && end > start, `source section not found: ${startMarker}`);
+    return source.slice(start, end);
+  };
+  const nonReceiptVisionSections = [
+    ["async function requestOpenAiImageClassificationUncached", "const imageClassificationCache"],
+    ["async function requestOpenAiWorkPhotoCheckUncached", "const workPhotoCheckCache"],
+    ["async function shouldForwardConfirmedWorkPhoto", "async function detectPersonalMailingProof"],
+    ["async function isBlockedPersonalPhotoImage", "const personalImageKindCache"],
+    ["async function requestPrimaryImageTypeVision", "async function primaryVisionDecisionForImage"],
+    ["async function primaryVisionDecisionForImage", "function logReceiptStage"],
+    ["async function personalImageKindForPreUploadUncached", "async function personalImageKindForPreUpload"],
+    ["async function personalImageKindForPreUpload", "async function primaryVisionDecisionForPersonalMessage"],
+  ];
+  for (const [startMarker, endMarker] of nonReceiptVisionSections) {
+    const section = sourceSection(startMarker, endMarker);
+    assert(!section.includes("receiptVisionProviderForConfig"), `${startMarker} must not use the receipt/Yandex provider selector`);
+    assert(!section.includes("receiptVisionProviderConfigured"), `${startMarker} must not use receipt/Yandex provider availability`);
+    assert(!section.includes("receiptVisionProviderCacheKey"), `${startMarker} must not use receipt/Yandex provider cache identity`);
+    assert(!section.includes("receiptVisionImageInput"), `${startMarker} must not use receipt/Yandex image request shaping`);
+    assert(!section.includes("yandexAiStudioApiKey"), `${startMarker} must not read Yandex AI Studio credentials`);
+    assert(!section.includes("YANDEX_AI_STUDIO_RESPONSES_URL"), `${startMarker} must not call Yandex AI Studio`);
+  }
+  const receiptCheckSource = sourceSection("async function requestOpenAiReceiptCheck", "function normalizedDate");
+  assert.match(receiptCheckSource, /receiptProviderAllowed = diagnosticRole === "receipt" \|\| diagnosticRole === "receipt_dispute"/, "Yandex selection must be explicitly receipt-scoped");
+  assert.match(receiptCheckSource, /receiptProviderAllowed \? receiptVisionProviderForConfig\(config, openAiModel\) : openAiVisionProviderForConfig\(config, openAiModel\)/, "non-receipt callers must retain OpenAI-only provider selection");
+  assert(sourceSection("async function requestOpenAiReceiptVisionEngineV1", "function normalizeOpenAiStatus").includes("receiptVisionProviderForConfig"), "Receipt Vision Engine must retain the Yandex-first receipt selector");
   for (const id of ["yandex_ai_studio_api_key", "yandex_ai_studio_folder_id", "yandex_ai_studio_model"]) {
     const start = source.indexOf(`id: "${id}"`);
     const end = source.indexOf("});", start);
