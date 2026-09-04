@@ -75,6 +75,7 @@ function requestKind(options) {
 async function runScenario(scenario) {
   const guard = loadTrackedAppWithGuard().__testGuard;
   const calls = [];
+  const requests = [];
   const logs = [];
   const originalNow = Date.now;
   const originalSetTimeout = global.setTimeout;
@@ -91,9 +92,17 @@ async function runScenario(scenario) {
       }
       const kind = requestKind(options);
       calls.push(kind);
-      const result = kind === "engine" ? scenario.engine : kind === "date-focus" ? scenario.dateFocus : kind === "amount-focus" ? scenario.amountFocus : scenario.primary || primaryResult(scenario.ocrDate, scenario.ocrAmount);
+      requests.push({ kind, format: options.data.text.format });
+      let result = kind === "engine" ? scenario.engine : kind === "date-focus" ? scenario.dateFocus : kind === "amount-focus" ? scenario.amountFocus : scenario.primary || primaryResult(scenario.ocrDate, scenario.ocrAmount);
       if (result === "timeout") throw new Error("request timeout");
       if (result === "invalid") return { statusCode: 200, data: { output_text: "not-json" } };
+      if ((kind === "date-focus" || kind === "amount-focus") && options.data.text.format.schema.properties.operation_date) {
+        result = engineResult(result.date, result.amount, result.confidence);
+        result.operation_time = result.time || "18:24";
+        result.amount_label = result.amount_label || "Сумма операции";
+        result.currency = result.currency || (result.amount === null ? "unknown" : "RUB");
+        result.ambiguity_reason = result.ambiguity_reason || null;
+      }
       return { statusCode: 200, data: { output_text: JSON.stringify(result) } };
     }
   };
@@ -115,7 +124,7 @@ async function runScenario(scenario) {
       },
       { info(value) { logs.push(String(value)); }, warn(value) { logs.push(String(value)); } }
     );
-    return { result, calls, logs };
+    return { result, calls, logs, requests };
   } finally {
     Date.now = originalNow;
     global.setTimeout = originalSetTimeout;
@@ -158,6 +167,16 @@ async function runScenario(scenario) {
     requiredDate
   );
   assert.strictEqual(lowConfidenceFocusedAmount.receiptAmount, undefined, "a low-confidence focused pass must not guess an amount");
+  const yandexCompatibleFocusedAmount = guard.receiptFieldFocusCandidateFromEngineJson(
+    engineResult(requiredDate, 600),
+    requiredDate,
+    true,
+    false,
+    true
+  );
+  assert.strictEqual(yandexCompatibleFocusedAmount.receiptAmount, 600, "Yandex engine-compatible field response must project only the focused amount");
+  assert.strictEqual(yandexCompatibleFocusedAmount.receiptDate, undefined, "amount focus must not reuse a date from the compatibility contract");
+  assert.strictEqual(yandexCompatibleFocusedAmount.containerRejection, "", "engine-compatible field projection must not create a classification veto");
 
   const fail1Resolved = await runScenario({
     engine: engineResult("2024-09-03", 800),
@@ -199,6 +218,10 @@ async function runScenario(scenario) {
   assert.strictEqual(amountResolvedToQwen.result.ok, true);
   assert.strictEqual(amountResolvedToQwen.result.receiptAmount, 600);
   assert.strictEqual(amountResolvedToQwen.calls.filter((value) => value === "amount-focus").length, 1);
+  const yandexAmountFocusRequest = amountResolvedToQwen.requests.find((entry) => entry.kind === "amount-focus");
+  assert(yandexAmountFocusRequest, "a focused amount request must be observable");
+  assert.strictEqual(yandexAmountFocusRequest.format.name, "tars_receipt_field_focus_yandex_v1");
+  assert.deepStrictEqual(yandexAmountFocusRequest.format.schema, guard.RECEIPT_VISION_ENGINE_SCHEMA, "Yandex focused extraction must use its proven strict schema");
 
   const amountResolvedToOcr = await runScenario({
     engine: engineResult(requiredDate, 1300),
@@ -230,12 +253,23 @@ async function runScenario(scenario) {
   assert.match(legacyAmountConflict.result.reason, /СУММЫ ЧЕКА НЕ СОВПАЛИ/);
   assert.strictEqual(legacyAmountConflict.result.receiptAmount, undefined, "legacy conflict must not expose the first OCR candidate as a confirmed amount");
 
+  const unavailableVisionAmount = await runScenario({
+    engine: "invalid",
+    ocrDate: requiredDate,
+    ocrAmount: 2600,
+    primary: "invalid",
+    amountFocus: "invalid"
+  });
+  assert.strictEqual(unavailableVisionAmount.result.ok, false);
+  assert.match(unavailableVisionAmount.result.reason, /СУММА ЧЕКА НЕ РАСПОЗНАНА/);
+  assert.strictEqual(unavailableVisionAmount.result.receiptAmount, undefined, "an unconfirmed OCR candidate must not leak through amount-missing control output");
+
   const fail3FocusedRecovery = await runScenario({
     engine: "invalid",
     ocrDate: requiredDate,
     ocrAmount: null,
     primary: primaryResult(requiredDate, null),
-    amountFocus: focusedResult(requiredDate, null, {
+    amountFocus: focusedResult(requiredDate, 1900, {
       amount_text: "1 900 руб.",
       amount_label: "Итого",
       currency: "RUB",

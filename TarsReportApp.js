@@ -5245,6 +5245,23 @@ var require_upload_duplicate_guard = __commonJS({
         receiptFieldOnly: true
       };
     }
+    function receiptFieldFocusCandidateFromEngineJson(json, requiredDate, focusAmount, focusDate, preserveDateYear = false) {
+      const parsed = parseReceiptVisionEngineV1(json);
+      if (!parsed) return void 0;
+      // Yandex Qwen is more reliable with the already-supported Receipt Vision
+      // Engine contract. Project that response back to the single disputed
+      // field so classification/status fields can never create a routing veto.
+      return receiptFieldFocusCandidateFromJson({
+        date: focusDate ? parsed.operationDate || null : null,
+        time: focusDate ? parsed.operationTime || null : null,
+        amount: focusAmount && isValidReceiptAmount(parsed.amount) ? parsed.amount : null,
+        amount_text: null,
+        amount_label: focusAmount ? parsed.amountLabel || null : null,
+        currency: focusAmount ? parsed.currency : "unknown",
+        confidence: parsed.confidence,
+        ambiguity_reason: parsed.ambiguityReason || null
+      }, requiredDate, preserveDateYear);
+    }
     function aiCandidateStronglyAcceptsReceipt(candidate, requiredDate) {
       if (!candidate || !candidate.aiReceipt) return false;
       if (candidate.containerRejection || receiptStatusBlocks(candidate.statusRejection)) return false;
@@ -5327,6 +5344,7 @@ var require_upload_duplicate_guard = __commonJS({
       const receiptProviderAllowed = diagnosticRole === "receipt" || diagnosticRole === "receipt_dispute";
       const provider = providerOverride || (receiptProviderAllowed ? receiptVisionProviderForConfig(config, openAiModel) : openAiVisionProviderForConfig(config, openAiModel));
       if (!provider) return void 0;
+      const yandexFieldFocusEngineContract = fieldFocus && provider.id === "yandex_ai_studio";
       const fallbackProvider = provider.id === "yandex_ai_studio" && !providerFallbackAttempted ? openAiVisionProviderForConfig(config, openAiModel) : void 0;
       const useFallbackProvider = async (reason) => {
         if (!fallbackProvider) return void 0;
@@ -5369,9 +5387,9 @@ var require_upload_duplicate_guard = __commonJS({
             text: {
               format: {
                 type: "json_schema",
-                name: diagnosticRole === "primary" && !fieldFocus ? "tars_receipt_primary_vision_v1" : fieldFocus ? "tars_receipt_field_focus_v1" : "tars_receipt_fields_v1",
+                name: diagnosticRole === "primary" && !fieldFocus ? "tars_receipt_primary_vision_v1" : yandexFieldFocusEngineContract ? "tars_receipt_field_focus_yandex_v1" : fieldFocus ? "tars_receipt_field_focus_v1" : "tars_receipt_fields_v1",
                 strict: true,
-                schema: diagnosticRole === "primary" && !fieldFocus ? RECEIPT_PRIMARY_VISION_SCHEMA : fieldFocus ? RECEIPT_FIELD_FOCUS_SCHEMA : RECEIPT_VISION_SCHEMA
+                schema: diagnosticRole === "primary" && !fieldFocus ? RECEIPT_PRIMARY_VISION_SCHEMA : yandexFieldFocusEngineContract ? RECEIPT_VISION_ENGINE_SCHEMA : fieldFocus ? RECEIPT_FIELD_FOCUS_SCHEMA : RECEIPT_VISION_SCHEMA
               }
             },
             // Qwen 3.6 uses reasoning mode by default in Yandex AI Studio.
@@ -5412,8 +5430,9 @@ var require_upload_duplicate_guard = __commonJS({
       }
       const outputText = openAiReceiptOutputText(payload);
       const parsed = parseReceiptJson(outputText);
-      const parserState = diagnosticRole === "primary" ? openAiPrimaryVisionParserState(outputText, parsed) : fieldFocus ? receiptFieldFocusParserState(outputText, parsed) : openAiReceiptParserState(outputText, parsed);
-      const candidate = fieldFocus ? parserState === "parsed" ? receiptFieldFocusCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute") : void 0 : openAiReceiptCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute");
+      const yandexEngineFocusedCandidate = yandexFieldFocusEngineContract ? receiptFieldFocusCandidateFromEngineJson(parsed, requiredDate, focusAmount, focusDate, diagnosticRole === "receipt_dispute") : void 0;
+      const parserState = diagnosticRole === "primary" ? openAiPrimaryVisionParserState(outputText, parsed) : fieldFocus ? yandexFieldFocusEngineContract ? yandexEngineFocusedCandidate ? "parsed" : receiptFieldFocusParserState(outputText, parsed) : receiptFieldFocusParserState(outputText, parsed) : openAiReceiptParserState(outputText, parsed);
+      const candidate = fieldFocus ? parserState === "parsed" ? yandexEngineFocusedCandidate || receiptFieldFocusCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute") : void 0 : openAiReceiptCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute");
       if (candidate) {
         if (!fieldFocus) {
           const transcribedAmount = normalizeReceiptAmount(parsed && parsed.amount_text);
@@ -6896,8 +6915,8 @@ var require_upload_duplicate_guard = __commonJS({
           ok: false,
           reason: "🚫 СУММА ЧЕКА НЕ РАСПОЗНАНА",
           receiptDate: correctDate.receiptDate,
-          receiptAmount: correctDate.receiptAmount,
-          receiptIdentity: extractReceiptIdentity(correctDate.text, correctDate.receiptDate, correctDate.receiptAmount)
+          receiptAmount: void 0,
+          receiptIdentity: extractReceiptIdentity(correctDate.text, correctDate.receiptDate, void 0)
         });
         const dated = candidates.find((candidate) => candidate.receiptDate);
         if (dated) return returnDateMismatch(dated);
@@ -9158,6 +9177,7 @@ var require_upload_duplicate_guard = __commonJS({
       normalizeReceiptAmount,
       receiptFieldFocusParserState,
       receiptFieldFocusCandidateFromJson,
+      receiptFieldFocusCandidateFromEngineJson,
       receiptFieldTelemetryPayload,
       receiptVisionAuthorityDisagreement,
       resolveReceiptVisionField,
