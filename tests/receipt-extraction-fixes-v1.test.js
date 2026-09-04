@@ -264,6 +264,16 @@ async function runScenario(scenario) {
   assert.match(unavailableVisionAmount.result.reason, /СУММА ЧЕКА НЕ РАСПОЗНАНА/);
   assert.strictEqual(unavailableVisionAmount.result.receiptAmount, undefined, "an unconfirmed OCR candidate must not leak through amount-missing control output");
 
+  const qwenFieldsConfirmedByOcr = await runScenario({
+    engine: { ...engineResult(requiredDate, 1200), status: "unknown" },
+    ocrDate: requiredDate,
+    ocrAmount: 1200,
+    primary: "invalid",
+    amountFocus: "invalid"
+  });
+  assert.strictEqual(qwenFieldsConfirmedByOcr.result.ok, true, "matching high-confidence Qwen fields and OCR must not become a false amount_conflict");
+  assert.strictEqual(qwenFieldsConfirmedByOcr.result.receiptAmount, 1200);
+
   const fail3FocusedRecovery = await runScenario({
     engine: "invalid",
     ocrDate: requiredDate,

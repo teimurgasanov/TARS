@@ -112,6 +112,19 @@ const receipt = {
   bank: "TEST BANK"
 };
 
+const receiptEngine = {
+  is_receipt: true,
+  bank_or_provider: "TEST BANK",
+  operation_date: "2026-09-03",
+  operation_time: "18:20",
+  amount: 1300,
+  currency: "RUB",
+  status: "success",
+  amount_label: "Сумма операции",
+  confidence: 0.97,
+  ambiguity_reason: null
+};
+
 async function run() {
   const yandex = api.receiptVisionProviderForConfig(yandexConfig, "gpt-5.6-sol");
   assert.strictEqual(yandex.id, "yandex_ai_studio");
@@ -184,6 +197,7 @@ async function run() {
   );
   assert.strictEqual(receiptCandidate.receiptDate, "2026-09-03");
   assert.strictEqual(receiptCandidate.receiptAmount, 1300);
+  assert.match(receiptCandidate.receiptAmountSource, /^yandex_ai_studio:/, "Yandex results must not be mislabeled as OpenAI evidence");
 
   const receiptCall = calls[calls.length - 1];
   assert.strictEqual(receiptCall.request.data.text.format.type, "json_schema");
@@ -209,6 +223,25 @@ async function run() {
   const receiptImage = receiptCall.request.data.input[0].content.find((part) => part.type === "input_image");
   assert(receiptImage && receiptImage.image_url.startsWith("data:image/png;base64,"));
   assert.strictEqual(Object.prototype.hasOwnProperty.call(receiptImage, "detail"), false, "Yandex receipt image input must use its compatible shape");
+
+  const engineRecoveryCalls = [];
+  const recoveredEngine = await api.requestOpenAiReceiptVisionEngineV1(
+    { name: "engine-recovery.png", type: "image/png" },
+    Buffer.from([57, 58, 59]),
+    { post: async (url, request) => {
+      engineRecoveryCalls.push({ url, request });
+      if (engineRecoveryCalls.length === 1) {
+        return { statusCode: 200, data: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, output: [] } };
+      }
+      return responseFor(receiptEngine);
+    } },
+    yandexConfig,
+    { warn: () => {} }
+  );
+  assert.strictEqual(recoveredEngine.amount, 1300, "one bounded Yandex recovery attempt must rescue an incomplete structured response");
+  assert.deepStrictEqual(engineRecoveryCalls.map((call) => call.url), [YANDEX_URL, YANDEX_URL], "Yandex recovery must run before the unavailable OpenAI fallback");
+  assert.deepStrictEqual(engineRecoveryCalls.map((call) => call.request.data.max_output_tokens), [4096, 8192]);
+  assert.strictEqual(api.receiptVisionResponseIssue({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }, "", undefined), "incomplete_max_output_tokens");
 
   const personalGuardCalls = [];
   const personalGuardCandidate = await api.requestOpenAiReceiptCheck(
@@ -243,6 +276,7 @@ async function run() {
   );
   assert.strictEqual(fallbackCandidate.receiptAmount, 1300);
   assert.deepStrictEqual(fallbackCalls.map((call) => call.url), [YANDEX_URL, YANDEX_URL, "https://api.openai.com/v1/responses"], "malformed Yandex output must retry Yandex once before OpenAI fallback");
+  assert.deepStrictEqual(fallbackCalls.slice(0, 2).map((call) => call.request.data.max_output_tokens), [4096, 8192], "the bounded retry must use the recovery output budget");
   assert.strictEqual(fallbackCalls[2].request.headers.Authorization, "Bearer openai-test-secret");
   assert.strictEqual(fallbackCalls[2].request.data.text.format.name, "tars_receipt_fields_v1");
   assert.strictEqual(fallbackCalls[2].request.data.max_output_tokens, 800, "OpenAI fallback keeps the existing bounded output budget");

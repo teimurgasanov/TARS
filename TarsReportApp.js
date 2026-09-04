@@ -2010,6 +2010,8 @@ var require_upload_duplicate_guard = __commonJS({
     };
     const YANDEX_AI_STUDIO_RESPONSES_URL = "https://ai.api.cloud.yandex.net/v1/responses";
     const YANDEX_AI_STUDIO_DEFAULT_MODEL = "qwen3.6-35b-a3b";
+    const YANDEX_RECEIPT_INITIAL_OUTPUT_TOKENS = 4096;
+    const YANDEX_RECEIPT_RECOVERY_OUTPUT_TOKENS = 8192;
     function normalizedYandexAiStudioModel(value) {
       const model = String(value || YANDEX_AI_STUDIO_DEFAULT_MODEL).trim().replace(/^gpt:\/\/[^/]+\//, "").replace(/\/latest$/, "");
       return /^[A-Za-z0-9._-]{1,120}$/.test(model) ? model : YANDEX_AI_STUDIO_DEFAULT_MODEL;
@@ -5065,6 +5067,32 @@ var require_upload_duplicate_guard = __commonJS({
         receiptVisionAmountLabelSupportsTotal(result.amountLabel)
       );
     }
+    function receiptVisionEngineHasReliableFields(result) {
+      return Boolean(
+        result &&
+        result.isReceipt === true &&
+        result.confidence >= RECEIPT_VISION_ENGINE_MIN_CONFIDENCE &&
+        /^20\d{2}-\d{2}-\d{2}$/.test(String(result.operationDate || "")) &&
+        isValidReceiptAmount(result.amount) &&
+        result.currency === "RUB" &&
+        !result.ambiguityReason &&
+        receiptVisionAmountLabelSupportsTotal(result.amountLabel)
+      );
+    }
+    function yandexReceiptOutputTokenBudget(provider, attempt, openAiBudget = 800) {
+      if (!provider || provider.id !== "yandex_ai_studio") return openAiBudget;
+      return attempt > 0 ? YANDEX_RECEIPT_RECOVERY_OUTPUT_TOKENS : YANDEX_RECEIPT_INITIAL_OUTPUT_TOKENS;
+    }
+    function receiptVisionResponseIssue(payload, outputText, parsed) {
+      if (parsed) return "none";
+      const status = String(payload && payload.status || "").toLowerCase();
+      const incompleteReason = String(payload && payload.incomplete_details && payload.incomplete_details.reason || "").toLowerCase();
+      if (status === "incomplete" && incompleteReason === "max_output_tokens") return "incomplete_max_output_tokens";
+      if (status === "incomplete") return "incomplete";
+      if (status === "failed") return "failed";
+      if (!String(outputText || "").trim()) return "no_output_text";
+      return parseReceiptJson(outputText) ? "schema_mismatch" : "no_json";
+    }
     function receiptVisionEngineIsAuthoritativeNonReceipt(result) {
       return Boolean(
         result &&
@@ -5113,9 +5141,9 @@ var require_upload_duplicate_guard = __commonJS({
               ]
             }],
             text: { format: { type: "json_schema", name: "receipt_vision_engine_v1", strict: true, schema: RECEIPT_VISION_ENGINE_SCHEMA } },
-            max_output_tokens: provider.id === "yandex_ai_studio" ? 4096 : 320
+            max_output_tokens: yandexReceiptOutputTokenBudget(provider, attempt, 320)
           },
-          timeout: 14e3
+          timeout: provider.id === "yandex_ai_studio" && attempt > 0 ? 22e3 : 14e3
         });
       } catch (error) {
         const timeout = /(?:timeout|timed\s*out|etimedout)/i.test(String(error && (error.code || error.message) || error || ""));
@@ -5146,7 +5174,14 @@ var require_upload_duplicate_guard = __commonJS({
           return void 0;
         }
       }
-      const parsed = parseReceiptVisionEngineV1(openAiReceiptOutputText(payload));
+      const outputText = openAiReceiptOutputText(payload);
+      const parsed = parseReceiptVisionEngineV1(outputText);
+      if (!parsed && provider.id === "yandex_ai_studio" && attempt < 1) {
+        const issue = receiptVisionResponseIssue(payload, outputText, parsed);
+        if (logger) logger.warn(`RECEIPT_VISION_ENGINE_V1 provider_retry=yandex_ai_studio reason=${issue}`);
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt + 1, provider, providerFallbackAttempted);
+      }
       if (!parsed && fallbackProvider) return useFallbackProvider("invalid_response");
       return parsed ? { ...parsed, providerId: provider.id } : void 0;
     }
@@ -5342,7 +5377,8 @@ var require_upload_duplicate_guard = __commonJS({
       }
       const confirmed = groups.filter((group) => {
         const openAiCount = Object.keys(group.openAiSources).length;
-        return openAiCount >= 1 && group.hasYandex || allowOpenAiPair && !hasAnyYandexCandidate && openAiCount >= 2;
+        const visionCount = Object.keys(group.sources).filter((source) => /^(?:openai|yandex_ai_studio):/i.test(source)).length;
+        return visionCount >= 1 && group.hasYandex || allowOpenAiPair && !hasAnyYandexCandidate && openAiCount >= 2;
       });
       return confirmed.length === 1 ? confirmed[0].amount : void 0;
     }
@@ -5417,9 +5453,9 @@ var require_upload_duplicate_guard = __commonJS({
             // with HTTP 2xx but no final structured JSON. Keep the OpenAI
             // budget unchanged and reserve enough room only for Yandex to
             // emit the strict receipt object after its visual analysis.
-            max_output_tokens: provider.id === "yandex_ai_studio" ? 4096 : 800
+            max_output_tokens: yandexReceiptOutputTokenBudget(provider, retryAttempt)
           },
-          timeout: 14e3
+          timeout: provider.id === "yandex_ai_studio" && retryAttempt > 0 ? 22e3 : 14e3
         });
       } catch (networkError) {
         if (retryAttempt < 1) {
@@ -5457,7 +5493,7 @@ var require_upload_duplicate_guard = __commonJS({
           const transcribedAmount = normalizeReceiptAmount(parsed && parsed.amount_text);
           if (isValidReceiptAmount(transcribedAmount)) candidate.receiptAmount = transcribedAmount;
         }
-        candidate.receiptAmountSource = `openai:${model}`;
+        candidate.receiptAmountSource = `${provider.id}:${model}`;
         candidate.receiptProvider = provider.id;
         candidate.receiptPass = focusDate ? "date_focus" : focusAmount ? "amount_focus" : "primary";
         if (diagnosticRole === "primary") candidate.primaryVisionDecision = primaryVisionDecisionFromCandidate(candidate, parserState);
@@ -5465,6 +5501,8 @@ var require_upload_duplicate_guard = __commonJS({
       captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, "2xx", parserState, parsed, candidate);
       // Retry one incomplete Yandex 2xx response before using another provider.
       if (provider.id === "yandex_ai_studio" && parserState !== "parsed" && retryAttempt < 1) {
+        const issue = receiptVisionResponseIssue(payload, outputText, candidate);
+        if (logger) logger.warn(`RECEIPT_PROVIDER_RETRY provider=yandex_ai_studio reason=${issue}`);
         await new Promise((resolve) => setTimeout(resolve, 900));
         return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole, provider, providerFallbackAttempted);
       }
@@ -6752,6 +6790,35 @@ var require_upload_duplicate_guard = __commonJS({
             };
             candidates.push(receiptVisionAuthority);
             legacyVisionResults.push(shadowObservation(receiptVisionAuthority, "receipt_vision_engine_v1"));
+          } else if (receiptVisionEngineHasReliableFields(visionResult)) {
+            // A high-confidence field read may still be non-authoritative when
+            // the provider cannot confirm operation status. Keep it as
+            // field-only evidence: it cannot accept a receipt by itself, but
+            // matching OCR can independently confirm its date and amount.
+            const receiptVisionFieldEvidence = {
+              text: JSON.stringify({
+                is_receipt: true,
+                operation_date: visionResult.operationDate,
+                amount: visionResult.amount,
+                currency: visionResult.currency,
+                status: visionResult.status,
+                amount_label: visionResult.amountLabel,
+                confidence: visionResult.confidence,
+                ambiguity_reason: null
+              }),
+              receiptDate: visionResult.operationDate,
+              receiptTime: visionResult.operationTime,
+              receiptAmount: visionResult.amount,
+              receiptAmountSource: `${receiptVisionProviderCacheKey(config, config.openaiReceiptModel)}:receipt_vision_engine_fields`,
+              receiptProvider: visionResult.providerId || "unknown",
+              receiptConfidence: visionResult.confidence,
+              statusRejection: visionResult.status === "failed" ? "🚫 ЧЕК НЕ ПРОШЁЛ ПРОВЕРКУ" : "",
+              containerRejection: "",
+              aiReceipt: true,
+              receiptFieldOnly: true
+            };
+            candidates.push(receiptVisionFieldEvidence);
+            legacyVisionResults.push(shadowObservation(receiptVisionFieldEvidence, "receipt_vision_engine_fields"));
           } else if (receiptVisionEngineIsAuthoritativeNonReceipt(visionResult)) {
             receiptVisionNonReceiptAuthority = true;
           }
@@ -9196,7 +9263,9 @@ var require_upload_duplicate_guard = __commonJS({
       parseReceiptVisionEngineV1,
       receiptVisionAmountLabelSupportsTotal,
       receiptVisionEngineIsAuthoritative,
+      receiptVisionEngineHasReliableFields,
       receiptVisionEngineIsAuthoritativeNonReceipt,
+      receiptVisionResponseIssue,
       requestOpenAiReceiptVisionEngineV1,
       normalizeReceiptAmount,
       receiptFieldFocusParserState,
