@@ -1,0 +1,202 @@
+name: Claude - Redacted Rocket.Chat Diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      lookback_minutes:
+        description: "How many recent minutes of TARS app logs to analyze"
+        required: true
+        default: "60"
+        type: choice
+        options:
+          - "15"
+          - "60"
+          - "240"
+      confirm:
+        description: "Type ANALYZE to run the read-only diagnostic"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tars-claude-rocketchat-diagnostics
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    name: Read-only redacted error analysis
+    if: inputs.confirm == 'ANALYZE'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Verify sanitizer privacy contract
+        run: node .github/scripts/sanitize-rocketchat-app-logs.js --self-test
+
+      - name: Validate read-only diagnostic secrets
+        shell: bash
+        env:
+          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
+          ROCKETCHAT_USER: ${{ secrets.ROCKETCHAT_USER }}
+          ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$ROCKETCHAT_URL" || { echo "ROCKETCHAT_URL is missing"; exit 1; }
+          test -n "$ROCKETCHAT_USER" || { echo "ROCKETCHAT_USER is missing"; exit 1; }
+          test -n "$ROCKETCHAT_PASSWORD" || { echo "ROCKETCHAT_PASSWORD is missing"; exit 1; }
+          test -n "$ANTHROPIC_API_KEY" || { echo "ANTHROPIC_API_KEY is missing"; exit 1; }
+          case "$ROCKETCHAT_URL" in https://*) ;; *) echo "ROCKETCHAT_URL must use https://"; exit 1 ;; esac
+
+      - name: Fetch TARS app logs read-only and redact locally
+        id: collect
+        shell: bash
+        env:
+          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
+          ROCKETCHAT_USER: ${{ secrets.ROCKETCHAT_USER }}
+          ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
+          LOOKBACK_MINUTES: ${{ inputs.lookback_minutes }}
+        run: |
+          set -euo pipefail
+          set +x
+          AUTH_TOKEN=""
+          USER_ID=""
+          SESSION_OPEN=0
+          RAW_LOGS="$(mktemp "$RUNNER_TEMP/tars-app-logs.XXXXXX")"
+          LOGIN_RESPONSE="$(mktemp "$RUNNER_TEMP/tars-login.XXXXXX")"
+          LOGOUT_RESPONSE="$(mktemp "$RUNNER_TEMP/tars-logout.XXXXXX")"
+          REDACTED_DIR="$GITHUB_WORKSPACE/.claude-diagnostics"
+          REDACTED_LOGS="$REDACTED_DIR/redacted-app-errors.json"
+
+          cleanup() {
+            original_status=$?
+            trap - EXIT
+            set +e
+            if [ "$SESSION_OPEN" -eq 1 ] && [ -n "$AUTH_TOKEN" ] && [ -n "$USER_ID" ]; then
+              curl --silent --show-error --output "$LOGOUT_RESPONSE" \
+                -X POST \
+                -H "X-Auth-Token: $AUTH_TOKEN" \
+                -H "X-User-Id: $USER_ID" \
+                "$ROCKETCHAT_URL/api/v1/logout" >/dev/null
+            fi
+            AUTH_TOKEN=""
+            USER_ID=""
+            rm -f "$RAW_LOGS" "$LOGIN_RESPONSE" "$LOGOUT_RESPONSE"
+            exit "$original_status"
+          }
+          trap cleanup EXIT
+
+          curl --fail-with-body --silent --show-error --output "$LOGIN_RESPONSE" \
+            -H 'Content-Type: application/json' \
+            --data "$(python3 - <<'PY'
+          import json, os
+          print(json.dumps({'user': os.environ['ROCKETCHAT_USER'], 'password': os.environ['ROCKETCHAT_PASSWORD']}))
+          PY
+          )" \
+            "$ROCKETCHAT_URL/api/v1/login"
+          AUTH_TOKEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("data",{}).get("authToken",""))' "$LOGIN_RESPONSE")"
+          USER_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("data",{}).get("userId",""))' "$LOGIN_RESPONSE")"
+          test -n "$AUTH_TOKEN" || { echo "Rocket.Chat login returned no token"; exit 1; }
+          test -n "$USER_ID" || { echo "Rocket.Chat login returned no user id"; exit 1; }
+          echo "::add-mask::$AUTH_TOKEN"
+          echo "::add-mask::$USER_ID"
+          SESSION_OPEN=1
+          rm -f "$LOGIN_RESPONSE"
+
+          APP_ID="$(python3 -c 'import json; print(json.load(open("app.json"))["id"])')"
+          HTTP_CODE="$(curl --silent --show-error --output "$RAW_LOGS" --write-out '%{http_code}' \
+            -H "X-Auth-Token: $AUTH_TOKEN" \
+            -H "X-User-Id: $USER_ID" \
+            -H 'Accept: application/json' \
+            "$ROCKETCHAT_URL/api/apps/$APP_ID/logs?offset=0&count=500")"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "Rocket.Chat app-log read failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          mkdir -p "$REDACTED_DIR"
+          node .github/scripts/sanitize-rocketchat-app-logs.js \
+            "$RAW_LOGS" "$REDACTED_LOGS" --lookback-minutes "$LOOKBACK_MINUTES"
+          rm -f "$RAW_LOGS"
+          echo "redacted_path=$REDACTED_LOGS" >> "$GITHUB_OUTPUT"
+          echo "Rocket.Chat authentication: OK"
+          echo "App logs: read-only GET succeeded"
+          echo "Raw logs: deleted before Claude analysis"
+
+      - name: Analyze redacted diagnostic codes with Claude
+        id: claude
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REDACTED_LOGS: ${{ steps.collect.outputs.redacted_path }}
+        run: |
+          set -euo pipefail
+          set +x
+          REQUEST="$(mktemp "$RUNNER_TEMP/claude-request.XXXXXX")"
+          RESPONSE="$(mktemp "$RUNNER_TEMP/claude-response.XXXXXX")"
+          REPORT="$GITHUB_WORKSPACE/.claude-diagnostics/claude-analysis.md"
+          trap 'rm -f "$REQUEST" "$RESPONSE"' EXIT
+
+          python3 - <<'PY' > "$REQUEST"
+          import json, os
+          diagnostic = json.load(open(os.environ['REDACTED_LOGS'], encoding='utf-8'))
+          system = (
+              'You are reviewing privacy-redacted TARS application error codes. '
+              'You have no access to chats, images, OCR text, identifiers, URLs, credentials, or raw provider responses. '
+              'Analyze only the supplied structured codes. Do not infer personal data. '
+              'Return concise Russian Markdown with sections: STATUS, FINDINGS, LIKELY_COMPONENT, NEXT_SAFE_CHECK. '
+              'STATUS must be one of HEALTHY, DEGRADED, FAILED. Do not recommend changing production automatically.'
+          )
+          payload = {
+              'model': 'claude-sonnet-5',
+              'max_tokens': 1200,
+              'system': system,
+              'messages': [{'role': 'user', 'content': json.dumps(diagnostic, ensure_ascii=False)}],
+          }
+          print(json.dumps(payload, ensure_ascii=False))
+          PY
+
+          HTTP_CODE="$(curl --silent --show-error --output "$RESPONSE" --write-out '%{http_code}' \
+            -X POST 'https://api.anthropic.com/v1/messages' \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H 'anthropic-version: 2023-06-01' \
+            -H 'content-type: application/json' \
+            --data-binary "@$REQUEST")"
+          rm -f "$REQUEST"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "Claude diagnostic request failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+          RESPONSE="$RESPONSE" REPORT="$REPORT" python3 - <<'PY'
+          import json, os, re
+          data = json.load(open(os.environ['RESPONSE'], encoding='utf-8'))
+          text = '\n'.join(x.get('text','') for x in data.get('content',[]) if x.get('type') == 'text').strip()
+          if not text:
+              raise SystemExit('Claude returned no diagnostic text')
+          if not re.search(r'^STATUS\s*\n+(?:HEALTHY|DEGRADED|FAILED)\b', text, re.M | re.I):
+              raise SystemExit('Claude response is missing the required STATUS')
+          forbidden = [r'https?://', r'authorization', r'password', r'base64', r'\b\d{10,}\b']
+          if any(re.search(p, text, re.I) for p in forbidden):
+              raise SystemExit('Claude response failed the privacy output check')
+          open(os.environ['REPORT'], 'w', encoding='utf-8').write(text[:6000] + '\n')
+          PY
+          rm -f "$RESPONSE"
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload privacy-safe diagnostic report
+        uses: actions/upload-artifact@v4
+        with:
+          name: tars-claude-redacted-diagnostics-${{ github.run_id }}
+          path: |
+            .claude-diagnostics/redacted-app-errors.json
+            .claude-diagnostics/claude-analysis.md
+          if-no-files-found: error
+          retention-days: 7
