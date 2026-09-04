@@ -151,8 +151,9 @@ jobs:
               'You are reviewing privacy-redacted TARS application error codes. '
               'You have no access to chats, images, OCR text, identifiers, URLs, credentials, or raw provider responses. '
               'Analyze only the supplied structured codes. Do not infer personal data. '
-              'Return concise Russian Markdown with sections: STATUS, FINDINGS, LIKELY_COMPONENT, NEXT_SAFE_CHECK. '
-              'STATUS must be one of HEALTHY, DEGRADED, FAILED. Do not recommend changing production automatically.'
+              'Return concise Russian Markdown. The first line must be exactly STATUS: HEALTHY, STATUS: DEGRADED, '
+              'or STATUS: FAILED. Then add sections FINDINGS, LIKELY_COMPONENT, NEXT_SAFE_CHECK. '
+              'Do not recommend changing production automatically.'
           )
           payload = {
               'model': 'claude-sonnet-5',
@@ -181,7 +182,7 @@ jobs:
           text = '\n'.join(x.get('text','') for x in data.get('content',[]) if x.get('type') == 'text').strip()
           if not text:
               raise SystemExit('Claude returned no diagnostic text')
-          if not re.search(r'^STATUS\s*\n+(?:HEALTHY|DEGRADED|FAILED)\b', text, re.M | re.I):
+          if not re.search(r'^(?:#{1,6}\s*)?STATUS\s*:?\s*(?:\n+\s*)?(?:HEALTHY|DEGRADED|FAILED)\b', text, re.M | re.I):
               raise SystemExit('Claude response is missing the required STATUS')
           forbidden = [r'https?://', r'authorization', r'password', r'base64', r'\b\d{10,}\b']
           if any(re.search(p, text, re.I) for p in forbidden):
