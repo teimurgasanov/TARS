@@ -167,16 +167,10 @@ jobs:
           echo "::add-mask::$USER_ID"
           echo 'Rocket.Chat setting authentication: OK'
 
-          GET_ROUTE="/api/v1/apps/$TARS_APP_ID"
+          GET_ROUTE="/api/apps/$TARS_APP_ID/settings"
           get_code=$(curl --silent --show-error --output "$APP_BODY" --write-out '%{http_code}' \
             -H "X-Auth-Token: $AUTH_TOKEN" -H "X-User-Id: $USER_ID" \
             "$ROCKETCHAT_URL$GET_ROUTE")
-          if [ "$get_code" -lt 200 ] || [ "$get_code" -ge 300 ]; then
-            GET_ROUTE="/apps/$TARS_APP_ID"
-            get_code=$(curl --silent --show-error --output "$APP_BODY" --write-out '%{http_code}' \
-              -H "X-Auth-Token: $AUTH_TOKEN" -H "X-User-Id: $USER_ID" \
-              "$ROCKETCHAT_URL$GET_ROUTE")
-          fi
           test "$get_code" -ge 200
           test "$get_code" -lt 300
 
@@ -210,10 +204,7 @@ jobs:
               -H 'Content-Type: application/json' --data-binary "@$PAYLOAD" \
               "$ROCKETCHAT_URL$route"
           }
-          update_code=$(post_setting "/api/v1/apps/$TARS_APP_ID/settings")
-          if [ "$update_code" = '404' ] || [ "$update_code" = '405' ]; then
-            update_code=$(post_setting "/api/apps/$TARS_APP_ID/settings")
-          fi
+          update_code=$(post_setting "/api/apps/$TARS_APP_ID/settings")
           echo "App settings update HTTP $update_code"
           test "$update_code" -ge 200
           test "$update_code" -lt 300
