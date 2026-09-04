@@ -30,6 +30,7 @@ on:
       - feature/tars-maximum-vision
       - feature/yandex-ai-studio-vision-provider
       - integration/receipt-extraction-fixes-current-develop
+      - fix/receipt-late-report-reconciliation
   pull_request:
   workflow_dispatch:
 
@@ -99,6 +100,8 @@ jobs:
       || github.base_ref == 'feature/yandex-ai-studio-vision-provider'
       || github.head_ref == 'integration/receipt-extraction-fixes-current-develop'
       || github.base_ref == 'integration/receipt-extraction-fixes-current-develop'
+      || github.head_ref == 'fix/receipt-late-report-reconciliation'
+      || github.base_ref == 'fix/receipt-late-report-reconciliation'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
