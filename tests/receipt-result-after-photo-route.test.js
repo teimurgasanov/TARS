@@ -24,6 +24,8 @@ assert.match(block, /FAST_PHOTO_FORWARD_BLOCKED_PRECLASSIFIED_RECEIPT/);
 const publishStart = source.indexOf('async function publishAcceptedReceipt');
 const publishEnd = source.indexOf('async function rememberOrBlockPersonalImageDuplicate', publishStart);
 assert.ok(publishStart >= 0 && publishEnd > publishStart, 'publishAcceptedReceipt block not found');
-assert.match(source.slice(publishStart, publishEnd), /✅ ЧЕК ПРИНЯТ/);
+const publishBlock = source.slice(publishStart, publishEnd);
+assert.match(publishBlock, /✅ ЧЕК ПРИНЯТ/);
+assert.match(publishBlock, /attachReceiptResultToMessage[\s\S]*message\.id/, 'accepted result must be attached to its source receipt message');
 
-console.log('PASS: validated receipt immediately publishes and persists accepted receipt result');
+console.log('PASS: validated receipt publishes and persists a result attached to its source receipt');

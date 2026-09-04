@@ -79,6 +79,22 @@ function runtimeScenario(guard, mode, suffix) {
             ].join("\n");
         return { statusCode: 200, data: { result: { textAnnotation: { fullText: text, blocks: [] } } } };
       }
+      const format = options && options.data && options.data.text && options.data.text.format;
+      if (format && format.name === "receipt_vision_engine_v1") {
+        providerCalls.push("openai:vision-engine");
+        return openAiResponse({
+          is_receipt: true,
+          bank_or_provider: null,
+          operation_date: null,
+          operation_time: null,
+          amount: null,
+          currency: "unknown",
+          status: "unknown",
+          amount_label: null,
+          confidence: 0,
+          ambiguity_reason: "legacy regression scenario"
+        });
+      }
       const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
       if (prompt.includes("строгую классификацию изображения")) {
         dedicatedCalls += 1;
@@ -95,7 +111,21 @@ function runtimeScenario(guard, mode, suffix) {
         });
       }
       receiptCalls += 1;
-      providerCalls.push(prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ") ? "openai:date-focus" : prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:") ? "openai:amount-focus" : "openai:primary");
+      const focusedPass = prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ") ? "date-focus" : prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ") ? "amount-focus" : "";
+      providerCalls.push(focusedPass ? `openai:${focusedPass}` : "openai:primary");
+      if (focusedPass) {
+        const amount = mode === "unknown" ? null : 1200;
+        return openAiResponse({
+          date: mode === "unknown" ? null : observedDate,
+          time: null,
+          amount,
+          amount_text: amount === null ? null : "1200 RUB",
+          amount_label: amount === null ? null : "amount",
+          currency: amount === null ? "unknown" : "RUB",
+          confidence: mode === "unknown" ? 0.2 : 0.98,
+          ambiguity_reason: mode === "unknown" ? "unreadable" : null
+        });
+      }
       if (receiptCalls === 1 || mode === "unknown") {
         return openAiResponse({
           is_receipt: false,
@@ -227,6 +257,7 @@ function runtimeScenario(guard, mode, suffix) {
         setRoom(value) { state.room = value; return this; },
         setText(value) { state.text = value; return this; },
         setBlocks(value) { state.blocks = value; return this; },
+        setThreadId(value) { state.threadId = value; return this; },
         __state: state
       };
     },
@@ -331,7 +362,13 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(rejected.dedicatedCalls(), 2);
   const rejectedStatuses = rejected.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…");
   assert.strictEqual(rejectedStatuses.length, 1, "rejected receipt must publish one processing status");
+  assert.strictEqual(rejectedStatuses[0].threadId, rejected.message.id, "receipt status must be attached to its source upload message");
   assert.ok(rejected.deletedMessages.includes(rejectedStatuses[0].id), "rejected result must clear its processing status");
+  const rejectedDetails = rejected.publishedMessages.find((item) => /^👁️ ЧЕК НА КОНТРОЛЬ/.test(String(item.text || "")));
+  assert.ok(rejectedDetails, "rejected receipt must publish control details");
+  assert.strictEqual(rejectedDetails.threadId, "control-message-control-upload-1", "control details must be attached to the corresponding receipt image");
+  const rejectedAction = rejected.publishedMessages.find((item) => item.text === "Действие с чеком");
+  assert.strictEqual(rejectedAction.threadId, "control-message-control-upload-1", "control action must stay with the corresponding receipt image");
 
   // D. A repeated event for the same rejected message must be idempotent.
   await rejectedGuard.processPersonalMediaV2(
@@ -406,7 +443,11 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(accepted.dedicatedCalls(), 2);
   const acceptedStatuses = accepted.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…");
   assert.strictEqual(acceptedStatuses.length, 1, "accepted receipt must publish one processing status");
+  assert.strictEqual(acceptedStatuses[0].threadId, accepted.message.id, "accepted receipt status must be attached to its source upload message");
   assert.ok(accepted.deletedMessages.includes(acceptedStatuses[0].id), "accepted result must clear its processing status");
+  const acceptedDetails = accepted.publishedMessages.find((item) => /^✅ ЧЕК ПРИНЯТ/.test(String(item.text || "")));
+  assert.ok(acceptedDetails, "accepted receipt must publish its result");
+  assert.strictEqual(acceptedDetails.threadId, accepted.message.id, "accepted result must be attached to the corresponding receipt image");
 
   console.log("PASS: personal fallback routes confirmed rejected receipts once to control without affecting unknown images or accepted totals");
 })().catch((error) => {

@@ -63,10 +63,27 @@ function openAiResult(date, overrides = {}) {
   };
 }
 
+function focusedFields(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const amount = typeof source.amount === "number" ? source.amount : null;
+  return {
+    date: source.date || null,
+    time: null,
+    amount,
+    amount_text: typeof source.amount_text === "string" ? source.amount_text : amount === null ? null : `${amount} RUB`,
+    amount_label: typeof source.amount_label === "string" ? source.amount_label : amount === null ? null : "Сумма операции",
+    currency: amount === null ? "unknown" : "RUB",
+    confidence: 0.98,
+    ambiguity_reason: null
+  };
+}
+
 function openAiPass(options) {
+  const format = options && options.data && options.data.text && options.data.text.format;
+  if (format && format.name === "receipt_vision_engine_v1") return "vision-engine";
   const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
   if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ")) return "date-focus";
-  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:")) return "amount-focus";
+  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ")) return "amount-focus";
   return "primary";
 }
 
@@ -90,7 +107,19 @@ function createHttp(scenario, calls) {
         if (scenario.openAi429Once === pass && attemptCounts[pass] === 1) {
           return { statusCode: 429, data: {} };
         }
-        const value = typeof scenario.openai === "function" ? scenario.openai(pass) : scenario.openai;
+        let value = pass === "vision-engine" ? {
+          is_receipt: true,
+          bank_or_provider: null,
+          operation_date: null,
+          operation_time: null,
+          amount: null,
+          currency: "unknown",
+          status: "unknown",
+          amount_label: null,
+          confidence: 0,
+          ambiguity_reason: "legacy regression scenario"
+        } : typeof scenario.openai === "function" ? scenario.openai(pass) : scenario.openai;
+        if (pass === "date-focus" || pass === "amount-focus") value = focusedFields(value);
         return { statusCode: 200, data: { output_text: JSON.stringify(value) } };
       }
       throw new Error(`unexpected provider URL: ${url}`);
@@ -145,6 +174,7 @@ function assertDateMismatch(result, date) {
   assertDateMismatch(agreedMismatch.result, "2026-08-31");
   assert.strictEqual(agreedMismatch.result.financialDocumentConfirmed, true, "early mismatch must retain evidence required by the rejected-control route");
   assert.deepStrictEqual(agreedMismatch.calls, [
+    "openai:vision-engine",
     "yandex:page",
     "yandex:page-column-sort",
     "yandex:table",
@@ -183,7 +213,7 @@ function assertDateMismatch(result, date) {
     openai: () => openAiResult(requiredDate)
   });
   assert.strictEqual(agreedToday.result.ok, true);
-  assert.deepStrictEqual(agreedToday.calls, ["yandex:page", "openai:primary", "openai:amount-focus"]);
+  assert.deepStrictEqual(agreedToday.calls, ["openai:vision-engine", "yandex:page", "openai:primary", "openai:amount-focus"]);
 
   const retriedPrimary = await runScenario({
     yandex: successfulReceiptText("31.08.2026"),

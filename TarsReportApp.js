@@ -1372,7 +1372,10 @@ var require_upload_duplicate_guard = __commonJS({
               return void 0;
             }
           }
-          const builder = modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("⏳ Чек проверяется…");
+          const builder = attachReceiptResultToMessage(
+            modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("⏳ Чек проверяется…"),
+            message.id
+          );
           const statusMessageId = String(await modify.getCreator().finish(builder) || "");
           if (!statusMessageId) return void 0;
           try {
@@ -1731,6 +1734,11 @@ var require_upload_duplicate_guard = __commonJS({
       const username = String(user && user.username || user && user.name || user && user.id || "master").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "master", mime = String(file && file.type || "").toLowerCase(), extension = mime.indexOf("png") !== -1 ? "png" : mime.indexOf("webp") !== -1 ? "webp" : "jpg";
       return `rejected-receipt-${username}-${String(exact || Date.now()).slice(0, 16)}.${extension}`;
     }
+    function attachReceiptResultToMessage(builder, messageId) {
+      const threadId = String(messageId || "");
+      if (threadId && builder && typeof builder.setThreadId === "function") builder.setThreadId(threadId);
+      return builder;
+    }
     async function createReviewMessageForUpload(upload, filename, mimeType, room, appUser, modify, logger, details) {
       if (!upload || !upload.id || !room || !appUser || !modify || !modify.getCreator) return "";
       const uploadUrl = String(upload.url || ""), reason = String(details && details.reason || "чек не прошёл проверку"), master = details && details.user ? `@${details.user.username || details.user.name || details.user.id}` : "мастер", sourceRoom = details && details.sourceRoom ? details.sourceRoom.displayName || details.sourceRoom.name || details.sourceRoom.slugifiedName || "" : "", amount = details && Number.isFinite(Number(details.receiptAmount)) ? `\nСумма: ${Number(details.receiptAmount)} ₽` : "", date = details && details.receiptDate ? `\nДата: ${details.receiptDate}` : "";
@@ -1750,8 +1758,6 @@ var require_upload_duplicate_guard = __commonJS({
         description: reason
       };
       const text = `👁️ ЧЕК НА КОНТРОЛЬ\nМастер: ${master}${sourceRoom ? `\nОткуда: ${sourceRoom}` : ""}\nПричина: ${reason}${date}${amount}`;
-      const detailsBuilder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text);
-      const detailsMessageId = await modify.getCreator().finish(detailsBuilder);
       const fileBuilder = modify.getCreator().startMessage({
         room,
         sender: appUser,
@@ -1760,6 +1766,11 @@ var require_upload_duplicate_guard = __commonJS({
         attachments: [attachment],
         parseUrls: false
       });
+      const messageId = await modify.getCreator().finish(fileBuilder);
+      const detailsBuilder = attachReceiptResultToMessage(
+        modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text),
+        messageId
+      );
       if (details && details.exact) {
         const blocks = modify.getCreator().getBlockBuilder();
         blocks.addActionsBlock({
@@ -1769,9 +1780,9 @@ var require_upload_duplicate_guard = __commonJS({
             value: String(details.exact)
           })]
         });
-        fileBuilder.setBlocks(blocks);
+        detailsBuilder.setBlocks(blocks);
       }
-      const messageId = await modify.getCreator().finish(fileBuilder);
+      const detailsMessageId = await modify.getCreator().finish(detailsBuilder);
       if (logger) logger.info(`Receipt review reason created in ${RECEIPT_REVIEW_ROOM}: message=${detailsMessageId || "unknown"}`);
       if (logger) logger.info(`Receipt review message created in ${RECEIPT_REVIEW_ROOM}: message=${messageId || "unknown"} upload=${upload.id}`);
       return String(messageId || "");
@@ -1976,6 +1987,81 @@ var require_upload_duplicate_guard = __commonJS({
     const IMAGE_CLASSIFICATION_SCHEMA_VERSION = "personal-image-classification-v1";
     const IMAGE_CLASSIFICATION_MODEL = "gpt-5.4-nano-2026-03-17";
     const PRIMARY_IMAGE_VISION_MODEL = "gpt-5.6-sol";
+    const RECEIPT_VISION_ENGINE_MIN_CONFIDENCE = 0.9;
+    const RECEIPT_VISION_ENGINE_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "is_receipt", "bank_or_provider", "operation_date", "operation_time",
+        "amount", "currency", "status", "amount_label", "confidence",
+        "ambiguity_reason"
+      ],
+      properties: {
+        is_receipt: { type: "boolean" },
+        bank_or_provider: { anyOf: [{ type: "string" }, { type: "null" }] },
+        operation_date: { anyOf: [{ type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }, { type: "null" }] },
+        operation_time: { anyOf: [{ type: "string", pattern: "^[0-9]{2}:[0-9]{2}(?::[0-9]{2})?$" }, { type: "null" }] },
+        amount: { anyOf: [{ type: "number", exclusiveMinimum: 0 }, { type: "null" }] },
+        currency: { type: "string", enum: ["RUB", "unknown"] },
+        status: { type: "string", enum: ["success", "failed", "unknown"] },
+        amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
+        confidence: { type: "number", minimum: 0, maximum: 1 },
+        ambiguity_reason: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
+    const YANDEX_AI_STUDIO_RESPONSES_URL = "https://ai.api.cloud.yandex.net/v1/responses";
+    const YANDEX_AI_STUDIO_DEFAULT_MODEL = "qwen3.6-35b-a3b";
+    function normalizedYandexAiStudioModel(value) {
+      const model = String(value || YANDEX_AI_STUDIO_DEFAULT_MODEL).trim().replace(/^gpt:\/\/[^/]+\//, "").replace(/\/latest$/, "");
+      return /^[A-Za-z0-9._-]{1,120}$/.test(model) ? model : YANDEX_AI_STUDIO_DEFAULT_MODEL;
+    }
+    function receiptVisionProviderForConfig(config, openAiModel) {
+      if (!config) return void 0;
+      const yandexKey = String(config.yandexAiStudioApiKey || "").trim();
+      const folderId = String(config.yandexAiStudioFolderId || "").trim();
+      if (yandexKey && /^[A-Za-z0-9_-]{6,80}$/.test(folderId)) {
+        const modelName = normalizedYandexAiStudioModel(config.yandexAiStudioModel);
+        return {
+          id: "yandex_ai_studio",
+          url: YANDEX_AI_STUDIO_RESPONSES_URL,
+          model: `gpt://${folderId}/${modelName}/latest`,
+          headers: { Authorization: "Api-Key " + yandexKey, "Content-Type": "application/json" },
+          includeImageDetail: false
+        };
+      }
+      const openAiKey = String(config.openaiApiKey || "").trim();
+      if (!openAiKey) return void 0;
+      return {
+        id: "openai",
+        url: "https://api.openai.com/v1/responses",
+        model: String(openAiModel || config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
+        headers: { Authorization: "Bearer " + openAiKey, "Content-Type": "application/json" },
+        includeImageDetail: true
+      };
+    }
+    function openAiVisionProviderForConfig(config, openAiModel) {
+      if (!config) return void 0;
+      const openAiKey = String(config.openaiApiKey || "").trim();
+      if (!openAiKey) return void 0;
+      return {
+        id: "openai",
+        url: "https://api.openai.com/v1/responses",
+        model: String(openAiModel || config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
+        headers: { Authorization: "Bearer " + openAiKey, "Content-Type": "application/json" },
+        includeImageDetail: true
+      };
+    }
+    function receiptVisionProviderConfigured(config) {
+      return Boolean(receiptVisionProviderForConfig(config));
+    }
+    function receiptVisionProviderCacheKey(config, openAiModel) {
+      const provider = receiptVisionProviderForConfig(config, openAiModel);
+      return provider ? `${provider.id}:${provider.model}` : "none";
+    }
+    function receiptVisionImageInput(provider, imageUrl) {
+      if (provider && provider.includeImageDetail) return { type: "input_image", image_url: imageUrl, detail: "high" };
+      return { type: "input_image", image_url: imageUrl };
+    }
     const PRIMARY_IMAGE_VISION_SCHEMA = {
       type: "object",
       additionalProperties: false,
@@ -2025,6 +2111,84 @@ var require_upload_duplicate_guard = __commonJS({
         amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
         status: { type: "string", enum: ["success", "failed", "pending", "unknown"] },
         bank: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
+    const RECEIPT_VISION_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "is_receipt", "has_readable_text", "visual_type", "is_mailing_proof",
+        "service_type", "is_screenshot_of_chat", "date", "amount", "amount_text",
+        "amount_label", "status", "bank"
+      ],
+      properties: {
+        is_receipt: { type: "boolean" },
+        has_readable_text: { type: "boolean" },
+        visual_type: {
+          type: "string",
+          enum: [
+            "bank_receipt", "bank_app_screen", "receipt_on_phone", "qr_payment_receipt",
+            "mailing_proof_screenshot", "hair_work_photo", "nails_work_photo",
+            "brows_lashes_work_photo", "pedicure_work_photo", "work_photo", "salon_photo",
+            "chat_screenshot", "unknown"
+          ]
+        },
+        is_mailing_proof: { type: "boolean" },
+        service_type: { type: "string", enum: ["haircut", "coloring", "manicure", "pedicure", "brows", "lashes", "unknown"] },
+        is_screenshot_of_chat: { type: "boolean" },
+        date: { anyOf: [{ type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }, { type: "null" }] },
+        amount: { anyOf: [{ type: "number" }, { type: "null" }] },
+        amount_text: { anyOf: [{ type: "string" }, { type: "null" }] },
+        amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
+        status: { type: "string", enum: ["success", "failed", "pending", "unknown"] },
+        bank: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
+    const RECEIPT_FIELD_FOCUS_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "date", "time", "amount", "amount_text", "amount_label",
+        "currency", "confidence", "ambiguity_reason"
+      ],
+      properties: {
+        date: { anyOf: [{ type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }, { type: "null" }] },
+        time: { anyOf: [{ type: "string", pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9])?$" }, { type: "null" }] },
+        amount: { anyOf: [{ type: "number" }, { type: "null" }] },
+        amount_text: { anyOf: [{ type: "string" }, { type: "null" }] },
+        amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
+        currency: { type: "string", enum: ["RUB", "unknown"] },
+        confidence: { type: "number", minimum: 0, maximum: 1 },
+        ambiguity_reason: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
+    const RECEIPT_PRIMARY_VISION_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: RECEIPT_VISION_SCHEMA.required.concat([
+        "class", "service_kind", "confidence", "has_payment_ui", "has_receipt_layout",
+        "has_financial_document", "has_qr_payment_document", "has_financial_text",
+        "has_document_layout", "has_visible_client", "has_visible_hair_result",
+        "has_visible_nail_result", "has_visible_brow_lash_result", "has_salon_context",
+        "has_messaging_ui"
+      ]),
+      properties: {
+        ...RECEIPT_VISION_SCHEMA.properties,
+        class: { type: "string", enum: ["receipt", "bank_transfer", "work_photo", "mailing", "document", "unknown"] },
+        service_kind: { type: "string", enum: ["hair", "nails", "pedicure", "brows_lashes", "other", "none"] },
+        confidence: { type: "string", enum: ["high", "medium", "low"] },
+        has_payment_ui: { type: "boolean" },
+        has_receipt_layout: { type: "boolean" },
+        has_financial_document: { type: "boolean" },
+        has_qr_payment_document: { type: "boolean" },
+        has_financial_text: { type: "boolean" },
+        has_document_layout: { type: "boolean" },
+        has_visible_client: { type: "boolean" },
+        has_visible_hair_result: { type: "boolean" },
+        has_visible_nail_result: { type: "boolean" },
+        has_visible_brow_lash_result: { type: "boolean" },
+        has_salon_context: { type: "boolean" },
+        has_messaging_ui: { type: "boolean" }
       }
     };
     const IMAGE_CLASSIFICATION_KINDS = ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other"];
@@ -2968,10 +3132,18 @@ var require_upload_duplicate_guard = __commonJS({
         }
         const reason = String(reviewDetails.reason || "чек не прошёл проверку"), master = user ? `@${user.username || user.name || user.id}` : "мастер", sourceRoom = reviewDetails.sourceRoom ? reviewDetails.sourceRoom.displayName || reviewDetails.sourceRoom.name || reviewDetails.sourceRoom.slugifiedName || "" : "", amount = Number.isFinite(Number(reviewDetails.receiptAmount)) ? `\nСумма: ${Number(reviewDetails.receiptAmount)} ₽` : "", date = reviewDetails.receiptDate ? `\nДата: ${reviewDetails.receiptDate}` : "";
         const text = `👁️ ЧЕК НА КОНТРОЛЬ\nМастер: ${master}${sourceRoom ? `\nОткуда: ${sourceRoom}` : ""}\nПричина: ${reason}${date}${amount}`;
-        const detailsBuilder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text);
+        const reviewMessage = await findArchiveMessageByUploadId(room.id, upload.id, read);
+        const reviewMessageId = String(reviewMessage && reviewMessage.id || "");
+        const detailsBuilder = attachReceiptResultToMessage(
+          modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text),
+          reviewMessageId
+        );
         await modify.getCreator().finish(detailsBuilder);
         if (reviewDetails.exact) {
-          const actionBuilder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText("Действие с чеком");
+          const actionBuilder = attachReceiptResultToMessage(
+            modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText("Действие с чеком"),
+            reviewMessageId
+          );
           const blocks = modify.getCreator().getBlockBuilder();
           blocks.addActionsBlock({
             elements: [blocks.newButtonElement({
@@ -3582,6 +3754,26 @@ var require_upload_duplicate_guard = __commonJS({
       if (!source) return "no_json";
       if (!parsed) return source.indexOf("{") !== -1 ? "parse_error" : "no_json";
       if (typeof parsed !== "object" || Array.isArray(parsed) || typeof parsed.is_receipt !== "boolean" || typeof parsed.visual_type !== "string") return "schema_mismatch";
+      return "parsed";
+    }
+    function receiptFieldFocusParserState(text, parsed) {
+      const source = String(text || "").trim();
+      if (!source) return "no_json";
+      if (!parsed) return source.indexOf("{") !== -1 ? "parse_error" : "no_json";
+      if (typeof parsed !== "object" || Array.isArray(parsed)) return "schema_mismatch";
+      const nullableString = (value) => value === null || typeof value === "string";
+      if (
+        !nullableString(parsed.date) ||
+        !nullableString(parsed.time) ||
+        !(parsed.amount === null || typeof parsed.amount === "number" && Number.isFinite(parsed.amount)) ||
+        !nullableString(parsed.amount_text) ||
+        !nullableString(parsed.amount_label) ||
+        ["RUB", "unknown"].indexOf(parsed.currency) === -1 ||
+        typeof parsed.confidence !== "number" || !Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1 ||
+        !nullableString(parsed.ambiguity_reason)
+      ) return "schema_mismatch";
+      if (parsed.date !== null && !/^20\d{2}-\d{2}-\d{2}$/.test(parsed.date)) return "schema_mismatch";
+      if (parsed.time !== null && !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(parsed.time)) return "schema_mismatch";
       return "parsed";
     }
     function openAiPrimaryVisionParserState(text, parsed) {
@@ -4707,10 +4899,10 @@ var require_upload_duplicate_guard = __commonJS({
       receiptOcrRequestQueue = pending.then(() => void 0, () => void 0);
       return pending;
     }
-    async function requestReceiptOcr(file, content, http, config, model, retryAttempt = 0) {
+    async function requestReceiptOcr(file, content, http, config, model, retryAttempt = 0, priorityContext) {
       let response;
       try {
-        response = await queuedReceiptOcrPost(http, {
+        const requestOptions = {
           headers: {
             Authorization: "Api-Key " + config.apiKey,
             "x-folder-id": config.folderId,
@@ -4723,18 +4915,22 @@ var require_upload_duplicate_guard = __commonJS({
             content: bytesToBase64(content)
           },
           timeout: 9e3
-        });
+        };
+        // Diagnostic replay must never occupy the serialized production OCR
+        // queue. Its HTTP wrapper also aborts cooperatively before each call
+        // whenever a production extraction has obtained priority.
+        response = receiptReplayContext(priorityContext) ? await http.post("https://ocr.api.cloud.yandex.net/ocr/v1/recognizeText", requestOptions) : await queuedReceiptOcrPost(http, requestOptions);
       } catch (networkError) {
         if (retryAttempt < 2) {
           await new Promise((resolve) => setTimeout(resolve, 1200 * (retryAttempt + 1)));
-          return requestReceiptOcr(file, content, http, config, model, retryAttempt + 1);
+          return requestReceiptOcr(file, content, http, config, model, retryAttempt + 1, priorityContext);
         }
         throw networkError;
       }
       if (!response || response.statusCode < 2e2 || response.statusCode >= 3e2) {
         if (response && (response.statusCode >= 500 || response.statusCode === 429) && retryAttempt < 2) {
           await new Promise((resolve) => setTimeout(resolve, 1200 * (retryAttempt + 1)));
-          return requestReceiptOcr(file, content, http, config, model, retryAttempt + 1);
+          return requestReceiptOcr(file, content, http, config, model, retryAttempt + 1, priorityContext);
         }
         throw new Error(`OCR HTTP ${response && response.statusCode || "unknown"} (${model})`);
       }
@@ -4825,6 +5021,166 @@ var require_upload_duplicate_guard = __commonJS({
       if (dotted) return alignReceiptDateToRequiredYear(normalizedDate(dotted[3], dotted[2], dotted[1]), requiredDate);
       return void 0;
     }
+    function receiptVisionEngineNullableString(value, maxLength = 160) {
+      if (value === null) return void 0;
+      if (typeof value !== "string") return null;
+      const normalized = value.trim();
+      if (!normalized || normalized.length > maxLength) return null;
+      return normalized;
+    }
+    function receiptVisionAmountLabelSupportsTotal(value) {
+      const label = String(value || "").trim().toLowerCase().replace(/ё/g, "е");
+      if (!label) return false;
+      const totalMeaning = /(?:итог(?:о)?|сумма|amount|total|к\s+оплате|списан(?:о|ие)|перевод(?:а)?|платеж(?:а)?)/i.test(label);
+      if (!totalMeaning) return false;
+      return !/(?:комисс|fee|баланс|balance|остаток|телефон|phone|номер\s+(?:карты|операции|документа|счета)|card\s*(?:number|no)|operation\s*(?:id|number)|document\s*(?:id|number)|время|time|дата|date)/i.test(label);
+    }
+    function parseReceiptVisionEngineV1(input) {
+      let value = input;
+      if (typeof input === "string") {
+        try {
+          value = JSON.parse(input);
+        } catch (_2) {
+          return void 0;
+        }
+      }
+      const keys = [
+        "is_receipt", "bank_or_provider", "operation_date", "operation_time",
+        "amount", "currency", "status", "amount_label", "confidence",
+        "ambiguity_reason"
+      ];
+      if (!imageClassificationHasExactKeys(value, keys)) return void 0;
+      if (typeof value.is_receipt !== "boolean") return void 0;
+      if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) return void 0;
+      const bankOrProvider = receiptVisionEngineNullableString(value.bank_or_provider);
+      const amountLabel = receiptVisionEngineNullableString(value.amount_label);
+      const ambiguityReason = receiptVisionEngineNullableString(value.ambiguity_reason, 240);
+      if (bankOrProvider === null || amountLabel === null || ambiguityReason === null) return void 0;
+      const operationDate = value.operation_date === null ? void 0 : String(value.operation_date || "");
+      if (operationDate) {
+        const match = operationDate.match(/^(20\d{2})-(\d{2})-(\d{2})$/);
+        if (!match || normalizedDate(match[1], match[2], match[3]) !== operationDate) return void 0;
+      } else if (value.operation_date !== null) {
+        return void 0;
+      }
+      const operationTime = value.operation_time === null ? void 0 : String(value.operation_time || "");
+      if (operationTime && !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(operationTime)) return void 0;
+      if (!operationTime && value.operation_time !== null) return void 0;
+      const amount = value.amount === null ? void 0 : receiptAmountFromAiValue(value.amount);
+      if (value.amount !== null && !isValidReceiptAmount(amount)) return void 0;
+      if (["RUB", "unknown"].indexOf(value.currency) === -1) return void 0;
+      if (["success", "failed", "unknown"].indexOf(value.status) === -1) return void 0;
+      return {
+        isReceipt: value.is_receipt,
+        bankOrProvider,
+        operationDate,
+        operationTime,
+        amount,
+        currency: value.currency,
+        status: value.status,
+        amountLabel,
+        confidence: value.confidence,
+        ambiguityReason
+      };
+    }
+    function receiptVisionEngineIsAuthoritative(result) {
+      return Boolean(
+        result &&
+        result.isReceipt === true &&
+        result.confidence >= RECEIPT_VISION_ENGINE_MIN_CONFIDENCE &&
+        /^20\d{2}-\d{2}-\d{2}$/.test(String(result.operationDate || "")) &&
+        isValidReceiptAmount(result.amount) &&
+        result.currency === "RUB" &&
+        ["success", "failed"].indexOf(result.status) !== -1 &&
+        !result.ambiguityReason &&
+        receiptVisionAmountLabelSupportsTotal(result.amountLabel)
+      );
+    }
+    function receiptVisionEngineIsAuthoritativeNonReceipt(result) {
+      return Boolean(
+        result &&
+        result.isReceipt === false &&
+        result.confidence >= RECEIPT_VISION_ENGINE_MIN_CONFIDENCE &&
+        !result.operationDate &&
+        !result.operationTime &&
+        !isValidReceiptAmount(result.amount) &&
+        result.currency === "unknown" &&
+        result.status === "unknown" &&
+        !result.amountLabel &&
+        !result.ambiguityReason
+      );
+    }
+    function receiptVisionEngineRetryableStatus(statusCode) {
+      return statusCode === 429 || statusCode >= 500 && statusCode <= 599;
+    }
+    async function requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt = 0, providerOverride, providerFallbackAttempted = false) {
+      if (!config || !content || !content.length || !http) return void 0;
+      const openAiModel = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+      const provider = providerOverride || receiptVisionProviderForConfig(config, openAiModel);
+      if (!provider) return void 0;
+      const fallbackProvider = provider.id === "yandex_ai_studio" && !providerFallbackAttempted ? openAiVisionProviderForConfig(config, openAiModel) : void 0;
+      const useFallbackProvider = async (reason) => {
+        if (!fallbackProvider) return void 0;
+        if (logger) logger.warn(`RECEIPT_VISION_ENGINE_V1 provider_fallback=yandex_ai_studio_to_openai reason=${reason}`);
+        return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, 0, fallbackProvider, true);
+      };
+      const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
+      let response;
+      try {
+        response = await http.post(provider.url, {
+          headers: provider.headers,
+          data: {
+            model: provider.model,
+            store: false,
+            reasoning: { effort: "none" },
+            input: [{
+              role: "user",
+              content: [
+                {
+                  type: "input_text",
+                  text: "Проанализируй всё изображение как единый банковский документ, включая чек на экране второго телефона, поворот, перспективу, блики и мелкий текст. Определи, является ли изображение подтверждением завершённой банковской операции, и извлеки дату, время и ИМЕННО итоговую сумму операции. Допустимые смысловые подписи: Сумма операции, Сумма перевода, Сумма платежа, Сумма списания, Итог, Итого, К оплате и их явные банковские аналоги. Никогда не выбирай комиссию, баланс, остаток, телефон, номер карты или последние четыре цифры, номер операции, документа, счёта, QR/СБП идентификатор, код, дату, время или случайное одиночное число. Если рядом несколько денежных значений, amount — только значение итоговой операции, а amount_label — подпись непосредственно этого значения. Нормализуй ₽, руб., RUB и RUR в currency=RUB. operation_date верни YYYY-MM-DD, operation_time — HH:MM или HH:MM:SS. Если итоговая сумма, дата или смысл документа не видны надёжно, не угадывай: верни null/unknown, снизь confidence и укажи краткий ambiguity_reason. ambiguity_reason=null только для внутренне согласованного результата."
+                },
+                receiptVisionImageInput(provider, imageUrl)
+              ]
+            }],
+            text: { format: { type: "json_schema", name: "receipt_vision_engine_v1", strict: true, schema: RECEIPT_VISION_ENGINE_SCHEMA } },
+            max_output_tokens: provider.id === "yandex_ai_studio" ? 4096 : 320
+          },
+          timeout: 14e3
+        });
+      } catch (error) {
+        const timeout = /(?:timeout|timed\s*out|etimedout)/i.test(String(error && (error.code || error.message) || error || ""));
+        if (timeout && attempt < 1) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt + 1, provider, providerFallbackAttempted);
+        }
+        if (fallbackProvider) return useFallbackProvider(timeout ? "timeout" : "transport");
+        if (logger) logger.warn(`RECEIPT_VISION_ENGINE_V1 unavailable provider=${provider.id} class=${timeout ? "timeout" : "other"}`);
+        return void 0;
+      }
+      const statusCode = Number(response && response.statusCode || 0);
+      if (statusCode < 200 || statusCode >= 300) {
+        if (receiptVisionEngineRetryableStatus(statusCode) && attempt < 1) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+          return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt + 1, provider, providerFallbackAttempted);
+        }
+        if (fallbackProvider) return useFallbackProvider(statusCode === 429 ? "429" : statusCode >= 500 ? "5xx" : "http_error");
+        if (logger) logger.warn(`RECEIPT_VISION_ENGINE_V1 unavailable provider=${provider.id} status=${statusCode || "unknown"}`);
+        return void 0;
+      }
+      let payload = response.data || response.content || response;
+      if (typeof payload === "string") {
+        try {
+          payload = JSON.parse(payload);
+        } catch (_2) {
+          if (fallbackProvider) return useFallbackProvider("invalid_response");
+          return void 0;
+        }
+      }
+      const parsed = parseReceiptVisionEngineV1(openAiReceiptOutputText(payload));
+      if (!parsed && fallbackProvider) return useFallbackProvider("invalid_response");
+      return parsed ? { ...parsed, providerId: provider.id } : void 0;
+    }
     function normalizeOpenAiStatus(value) {
       return String(value || "").trim().toLowerCase().replace(/ё/g, "е");
     }
@@ -4835,10 +5191,72 @@ var require_upload_duplicate_guard = __commonJS({
       if (typeof value === "number") return Number.isFinite(value) && value > 0 ? Math.round(value * 100) / 100 : void 0;
       return normalizeReceiptAmount(value);
     }
-    function openAiReceiptCandidateFromJson(json, requiredDate) {
+    function receiptFieldTelemetryPayload(input) {
+      const source = input && typeof input === "object" ? input : {};
+      const allowed = (value, values, fallback) => values.indexOf(String(value || "")) !== -1 ? String(value) : fallback;
+      const date = /^20\d{2}-\d{2}-\d{2}$/.test(String(source.date || "")) ? String(source.date) : null;
+      const amount = isValidReceiptAmount(source.amount) ? Math.round(Number(source.amount) * 100) / 100 : null;
+      const confidence = typeof source.confidence === "number" && Number.isFinite(source.confidence) && source.confidence >= 0 && source.confidence <= 1 ? Math.round(source.confidence * 1e3) / 1e3 : null;
+      return {
+        provider: allowed(source.provider, ["yandex_ai_studio", "openai", "yandex_ocr", "decision"], "unknown"),
+        pass: allowed(source.pass, ["receipt_vision_engine", "ocr", "date_focus", "amount_focus", "decision"], "decision"),
+        amount,
+        date,
+        confidence,
+        source: allowed(source.source, ["vision", "ocr", "focused", "decision"], "decision"),
+        layout: allowed(source.layout, ["page", "page-column-sort", "table", "markdown", "none"], "none"),
+        selected_authority: allowed(source.selectedAuthority, ["yandex_qwen", "openai_vision", "ocr_confirmed", "control", "none"], "none"),
+        disagreement: source.disagreement === true,
+        reason_code: allowed(source.reasonCode, [
+          "observed", "no_disagreement", "date_disagreement", "amount_disagreement", "date_and_amount_disagreement",
+          "focused_confirms_qwen", "focused_confirms_ocr", "focused_unresolved", "amount_conflict"
+        ], "observed")
+      };
+    }
+    function emitReceiptFieldTelemetry(logger, input) {
+      if (!logger || typeof logger.info !== "function") return;
+      logger.info(`RECEIPT_FIELD_TRACE_V1 ${JSON.stringify(receiptFieldTelemetryPayload(input))}`);
+    }
+    function receiptVisionAuthorityDisagreement(authority, candidates) {
+      const ocrCandidates = (Array.isArray(candidates) ? candidates : []).filter((candidate) => {
+        return candidate && !candidate.combinedReceipt && /^yandex:/.test(String(candidate.receiptAmountSource || ""));
+      });
+      const ocrDates = Array.from(new Set(ocrCandidates.map((candidate) => String(candidate.receiptDate || "")).filter((value) => /^20\d{2}-\d{2}-\d{2}$/.test(value))));
+      const ocrAmounts = [];
+      for (const candidate of ocrCandidates) {
+        if (!isValidReceiptAmount(candidate.receiptAmount)) continue;
+        const amount = Number(candidate.receiptAmount);
+        if (!ocrAmounts.some((value) => sameReceiptAmount(value, amount))) ocrAmounts.push(amount);
+      }
+      return {
+        dateDisagreement: Boolean(authority && ocrDates.some((value) => value !== authority.receiptDate)),
+        amountDisagreement: Boolean(authority && ocrAmounts.some((value) => !sameReceiptAmount(value, authority.receiptAmount))),
+        ocrDates,
+        ocrAmounts
+      };
+    }
+    function resolveReceiptVisionField(authorityValue, ocrValues, focusedValue, equal) {
+      const same = typeof equal === "function" ? equal : (left, right) => left === right;
+      if (focusedValue !== void 0 && focusedValue !== null && same(focusedValue, authorityValue)) {
+        return { resolved: true, value: authorityValue, selectedAuthority: "primary_vision", reasonCode: "focused_confirms_qwen" };
+      }
+      const confirmedOcr = (Array.isArray(ocrValues) ? ocrValues : []).find((value) => focusedValue !== void 0 && focusedValue !== null && same(focusedValue, value));
+      if (confirmedOcr !== void 0) {
+        return { resolved: true, value: confirmedOcr, selectedAuthority: "ocr_confirmed", reasonCode: "focused_confirms_ocr" };
+      }
+      return { resolved: false, value: void 0, selectedAuthority: "control", reasonCode: "focused_unresolved" };
+    }
+    function openAiReceiptCandidateFromJson(json, requiredDate, preserveDateYear = false) {
       if (!json || typeof json !== "object") return void 0;
       const text = JSON.stringify(json);
-      const containerRejection = json.is_screenshot_of_chat === true || json.is_container_screenshot === true ? "🚫 ЧЕК НЕ ПРИНЯТ: СКРИНШОТ ЧАТА ИЛИ СТРАНИЦЫ" : "";
+      const visualType = String(json.visual_type || "").trim().toLowerCase();
+      const positiveReceiptVisual = /^(?:bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt)$/.test(visualType);
+      const containerFlag = json.is_screenshot_of_chat === true || json.is_container_screenshot === true;
+      // A photographed receipt displayed on a phone is still a receipt. Some
+      // providers describe any visible screen as a "screenshot" even when the
+      // same structured result explicitly confirms a bank receipt. Preserve
+      // the hard container veto unless both positive signals agree.
+      const containerRejection = containerFlag && !(json.is_receipt === true && positiveReceiptVisual) ? "🚫 ЧЕК НЕ ПРИНЯТ: СКРИНШОТ ЧАТА ИЛИ СТРАНИЦЫ" : "";
       if (json.is_receipt === false && !containerRejection) {
         return { text, receiptDate: void 0, receiptAmount: void 0, statusRejection: "", containerRejection: "", aiReceipt: true };
       }
@@ -4848,12 +5266,51 @@ var require_upload_duplicate_guard = __commonJS({
       else if (/pending|processing|ожидан|обработ/.test(status) && !isGazpromReceiptText(json.bank || text)) statusRejection = "🚫 СТАТУС ЧЕКА НЕ ПОДТВЕРЖДЁН";
       return {
         text,
-        receiptDate: normalizeOpenAiDate(json.date, requiredDate),
+        receiptDate: normalizeOpenAiDate(json.date, preserveDateYear ? void 0 : requiredDate),
         receiptAmount: receiptAmountFromAiValue(json.amount),
         statusRejection,
         containerRejection,
+        containerRejectionSource: containerRejection ? "vision_classifier" : "none",
         aiReceipt: true
       };
+    }
+    function receiptFieldFocusCandidateFromJson(json, requiredDate, preserveDateYear = false) {
+      if (!json || typeof json !== "object") return void 0;
+      const confidence = Number(json.confidence);
+      const confident = Number.isFinite(confidence) && confidence >= RECEIPT_VISION_ENGINE_MIN_CONFIDENCE && !String(json.ambiguity_reason || "").trim();
+      const transcribedAmount = json.currency === "RUB" ? normalizeReceiptAmount(json.amount_text) : void 0;
+      const numericAmount = json.currency === "RUB" ? receiptAmountFromAiValue(json.amount) : void 0;
+      return {
+        text: JSON.stringify(json),
+        receiptDate: confident ? normalizeOpenAiDate(json.date, preserveDateYear ? void 0 : requiredDate) : void 0,
+        receiptTime: confident && /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(String(json.time || "")) ? String(json.time) : void 0,
+        receiptAmount: confident ? isValidReceiptAmount(transcribedAmount) ? transcribedAmount : numericAmount : void 0,
+        receiptConfidence: Number.isFinite(confidence) ? confidence : void 0,
+        statusRejection: "",
+        // A focused field reader is not a classifier. It must never create or
+        // clear a receipt/document routing veto.
+        containerRejection: "",
+        containerRejectionSource: "none",
+        aiReceipt: true,
+        receiptFieldOnly: true
+      };
+    }
+    function receiptFieldFocusCandidateFromEngineJson(json, requiredDate, focusAmount, focusDate, preserveDateYear = false) {
+      const parsed = parseReceiptVisionEngineV1(json);
+      if (!parsed) return void 0;
+      // Yandex Qwen is more reliable with the already-supported Receipt Vision
+      // Engine contract. Project that response back to the single disputed
+      // field so classification/status fields can never create a routing veto.
+      return receiptFieldFocusCandidateFromJson({
+        date: focusDate ? parsed.operationDate || null : null,
+        time: focusDate ? parsed.operationTime || null : null,
+        amount: focusAmount && isValidReceiptAmount(parsed.amount) ? parsed.amount : null,
+        amount_text: null,
+        amount_label: focusAmount ? parsed.amountLabel || null : null,
+        currency: focusAmount ? parsed.currency : "unknown",
+        confidence: parsed.confidence,
+        ambiguity_reason: parsed.ambiguityReason || null
+      }, requiredDate, preserveDateYear);
     }
     function aiCandidateStronglyAcceptsReceipt(candidate, requiredDate) {
       if (!candidate || !candidate.aiReceipt) return false;
@@ -4929,72 +5386,122 @@ var require_upload_duplicate_guard = __commonJS({
       // layouts alone are still one provider and cannot form a consensus.
       return hasConflict && confirmedReceiptAmount(candidates, requiredDate, allowOpenAiPair) === void 0;
     }
-    async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false, focusDate = false, diagnostic, diagnosticRole = "") {
-      if (!config || !config.openaiApiKey || !content || !content.length) return void 0;
+    async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false, focusDate = false, diagnostic, diagnosticRole = "", providerOverride, providerFallbackAttempted = false) {
+      if (!config || !content || !content.length) return void 0;
+      const fieldFocus = focusAmount || focusDate;
       const primaryModel = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
-      const model = focusAmount || focusDate ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
+      const openAiModel = fieldFocus ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
+      const receiptProviderAllowed = diagnosticRole === "receipt" || diagnosticRole === "receipt_dispute";
+      const provider = providerOverride || (receiptProviderAllowed ? receiptVisionProviderForConfig(config, openAiModel) : openAiVisionProviderForConfig(config, openAiModel));
+      if (!provider) return void 0;
+      const yandexFieldFocusEngineContract = fieldFocus && provider.id === "yandex_ai_studio";
+      const fallbackProvider = provider.id === "yandex_ai_studio" && !providerFallbackAttempted ? openAiVisionProviderForConfig(config, openAiModel) : void 0;
+      const useFallbackProvider = async (reason) => {
+        if (!fallbackProvider) return void 0;
+        if (logger) logger.warn(`RECEIPT_PROVIDER_FALLBACK from=yandex_ai_studio to=openai reason=${reason}`);
+        try {
+          return await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, focusAmount, focusDate, diagnostic, diagnosticRole, fallbackProvider, true);
+        } catch (fallbackError) {
+          if (/OpenAI receipt HTTP 40[13]/i.test(String(fallbackError && fallbackError.message || fallbackError))) {
+            if (logger) logger.warn("RECEIPT_PROVIDER_FALLBACK_UNAVAILABLE provider=openai class=authorization");
+            return void 0;
+          }
+          throw fallbackError;
+        }
+      };
+      const model = provider.model;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       const primaryVisionContract = diagnosticRole === "primary" && !focusAmount && !focusDate ? ' ОСНОВНАЯ КЛАССИФИКАЦИЯ ТИПА: дополнительно обязательно верни class:"receipt|bank_transfer|work_photo|mailing|document|unknown", service_kind:"hair|nails|pedicure|brows_lashes|other|none", confidence:"high|medium|low", has_payment_ui:boolean, has_receipt_layout:boolean, has_financial_document:boolean, has_qr_payment_document:boolean, has_financial_text:boolean, has_document_layout:boolean, has_visible_client:boolean, has_visible_hair_result:boolean, has_visible_nail_result:boolean, has_visible_brow_lash_result:boolean, has_salon_context:boolean, has_messaging_ui:boolean. confidence=high разрешено только когда тип непосредственно и однозначно виден. Для work_photo high требуется ясно видимый результат услуги; кресло, инструменты, зеркало, рабочая зона и интерьер не обязательны. Крупный план готовых ногтей, педикюра, бровей или ресниц достаточен без полного человека. Для hair должны быть видны клиент и выраженная форма стрижки, укладки или окрашивания. Work_photo блокируют только конкретные видимые признаки: банковский/payment UI, receipt layout, financial/document layout, QR/payment document или явный экран банковского приложения. Просто текст, логотип, телефон в кадре, человек или фон не блокируют work_photo без таких конкретных признаков. Обычный портрет без различимого результата услуги и пустой интерьер означают class=unknown. ' : "";
-      const focusedPrompt = focusDate ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ: не копируй предыдущий ответ и не подставляй дату загрузки. Документ может занимать небольшую часть фотографии и быть открыт на экране другого телефона. Сначала найди границы экрана телефона и область банковского документа внутри него, мысленно приблизь её и проверь верхнюю часть чека и строки Дата, Дата операции, Операция совершена, Чек по операции или Сформировано. Перепиши только реально видимую календарную дату операции в формате YYYY-MM-DD. Не принимай время в строке состояния телефона, дату сообщения или номер документа за дату чека. Остальные поля прочитай как обычно. " : focusAmount ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА: не копируй предыдущий ответ. Изображение может быть повёрнуто на 90, 180 или 270 градусов — мысленно разверни его и проверь все ориентации. Сначала найди на самом чеке подписи даты, статуса и итоговой суммы, затем верни JSON. Внимательно увеличь область с итогом и обязательно перечитай сумму операции. Ищи подписи ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания. Верни amount числом без пробелов и знака валюты. Не используй комиссию, баланс, время, номер карты, документа или квитанции. " : "Изображение чека может быть снято боком или вверх ногами. Перед чтением определи ориентацию и мысленно поверни его на 90, 180 или 270 градусов. Сначала прочитай видимые подписи даты, статуса и итоговой суммы на самом чеке; не делай вывод по имени файла или окружающей обстановке. ";
-      const amountFocusPrompt = focusedPrompt + "ВАЖНО: официальная надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод; для неё верни status=success. Оплата SberPay со статусом «Исполнено» также является успешной операцией. Не путай их с отдельным промежуточным статусом «Отправлен». ";
+      const focusedPrompt = focusDate ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ: не копируй предыдущий ответ и не подставляй дату загрузки. Документ может занимать небольшую часть фотографии и быть открыт на экране другого телефона. Сначала найди границы экрана телефона и область банковского документа внутри него, мысленно приблизь её и проверь верхнюю часть чека и строки Дата, Дата операции, Операция совершена, Чек по операции или Сформировано. Перепиши только реально видимую календарную дату операции в формате YYYY-MM-DD. Не принимай время в строке состояния телефона, дату сообщения или номер документа за дату чека. Не классифицируй тип изображения и не решай, является ли оно скриншотом. " : focusAmount ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ: не копируй предыдущий ответ. Изображение может быть повёрнуто на 90, 180 или 270 градусов — мысленно разверни его и проверь все ориентации. Найди область банковского документа, включая документ на экране другого телефона, мысленно приблизь её и перечитай итоговую сумму операции. Ищи подписи ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания. Верни amount числом без пробелов и знака валюты, а amount_text — дословной видимой строкой, например «1 900 руб.». Не используй комиссию, баланс, время, номер карты, документа или квитанции. Не классифицируй тип изображения и не решай, является ли оно скриншотом. " : "Изображение чека может быть снято боком или вверх ногами. Перед чтением определи ориентацию и мысленно поверни его на 90, 180 или 270 градусов. Сначала прочитай видимые подписи даты, статуса и итоговой суммы на самом чеке; не делай вывод по имени файла или окружающей обстановке. ";
+      const receiptStatusPrompt = "ВАЖНО: официальная надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод; для неё верни status=success. Оплата SberPay со статусом «Исполнено» также является успешной операцией. Не путай их с отдельным промежуточным статусом «Отправлен». ";
+      const fieldFocusContract = "Верни только JSON для чтения полей: date — дата операции YYYY-MM-DD или null; time — время операции HH:MM[:SS] или null; amount — итоговая сумма операции числом или null; amount_text — дословная строка суммы с валютой или null; amount_label — подпись непосредственно рядом с суммой или null; currency — RUB только при явных ₽/руб./RUB/RUR, иначе unknown; confidence — уверенность именно в прочитанных полях от 0 до 1; ambiguity_reason — краткая причина неоднозначности или null. Если поле не видно надёжно, верни null и не угадывай. ";
+      const fullReceiptContract = RECEIPT_VISUAL_CRITERIA + WORK_PHOTO_VISUAL_CRITERIA + "Ты проверяешь фото банковского чека салона. Верни только JSON без Markdown: {\"is_receipt\":boolean,\"has_readable_text\":boolean,\"visual_type\":\"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown\",\"is_mailing_proof\":boolean,\"service_type\":\"haircut|coloring|manicure|pedicure|brows|lashes|unknown\",\"is_screenshot_of_chat\":boolean,\"date\":\"YYYY-MM-DD|null\",\"amount\":number|null,\"amount_text\":\"точно переписанная строка суммы с чека|null\",\"amount_label\":\"подпись рядом с суммой|null\",\"status\":\"success|failed|pending|unknown\",\"bank\":\"string|null\"}." + primaryVisionContract + " Визуальный тип mailing_proof_screenshot: скрин Instagram/Direct/личных сообщений со списком получателей и статусами Отправлено, Просмотрено, Sent, Seen, Delivered, либо текстом что аккаунт не может получать сообщения. Такой скрин всегда is_receipt=false и is_mailing_proof=true. Для фото работы выбери hair_work_photo, nails_work_photo, pedicure_work_photo или brows_lashes_work_photo строго по критериям выше. is_receipt=true только для банковского чека, квитанции, справки по операции, перевода или платежа. Не выдумывай дату или сумму. Если видишь 17.08.2026, это 2026-08-17, не 2016. Сумма — итог операции в рублях рядом с ИТОГО, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания или Сумма в валюте операции. Дословно перепиши видимую строку суммы в amount_text, включая разделители тысяч и валюту, а её подпись — в amount_label. Не бери комиссию, баланс, время, номер карты, документа, телефона или код подтверждения как сумму. status=success только для Успешно, Исполнен, Исполнено, Выполнен, Оплачен, Completed, Success. status=pending для Ожидает подтверждения, В обработке, На подпись, К отправке, Черновик, Отправлен, request_sent, processing или pending.";
+      const requestPrompt = focusedPrompt + (fieldFocus ? fieldFocusContract : receiptStatusPrompt + fullReceiptContract);
       let response;
       try {
-        response = await http.post("https://api.openai.com/v1/responses", {
-          headers: {
-            Authorization: "Bearer " + config.openaiApiKey,
-            "Content-Type": "application/json"
-          },
+        response = await http.post(provider.url, {
+          headers: provider.headers,
           data: {
             model,
+            store: false,
             input: [{
               role: "user",
               content: [
                 {
                   type: "input_text",
-                  text: amountFocusPrompt + RECEIPT_VISUAL_CRITERIA + WORK_PHOTO_VISUAL_CRITERIA + "Ты проверяешь фото банковского чека салона. Верни только JSON без Markdown: {\"is_receipt\":boolean,\"has_readable_text\":boolean,\"visual_type\":\"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown\",\"is_mailing_proof\":boolean,\"service_type\":\"haircut|coloring|manicure|pedicure|brows|lashes|unknown\",\"is_screenshot_of_chat\":boolean,\"date\":\"YYYY-MM-DD|null\",\"amount\":number|null,\"amount_text\":\"точно переписанная строка суммы с чека|null\",\"amount_label\":\"подпись рядом с суммой|null\",\"status\":\"success|failed|pending|unknown\",\"bank\":\"string|null\"}." + primaryVisionContract + " Визуальный тип mailing_proof_screenshot: скрин Instagram/Direct/личных сообщений со списком получателей и статусами Отправлено, Просмотрено, Sent, Seen, Delivered, либо текстом что аккаунт не может получать сообщения. Такой скрин всегда is_receipt=false и is_mailing_proof=true. Для фото работы выбери hair_work_photo, nails_work_photo, pedicure_work_photo или brows_lashes_work_photo строго по критериям выше. is_receipt=true только для банковского чека, квитанции, справки по операции, перевода или платежа. Не выдумывай дату или сумму. Если видишь 17.08.2026, это 2026-08-17, не 2016. Сумма — итог операции в рублях рядом с ИТОГО, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания или Сумма в валюте операции. Дословно перепиши видимую строку суммы в amount_text, включая разделители тысяч и валюту, а её подпись — в amount_label. Не бери комиссию, баланс, время, номер карты, документа, телефона или код подтверждения как сумму. status=success только для Успешно, Исполнен, Исполнено, Выполнен, Оплачен, Completed, Success. status=pending для Ожидает подтверждения, В обработке, На подпись, К отправке, Черновик, Отправлен, request_sent, processing или pending."
+                  text: requestPrompt
                 },
-                { type: "input_image", image_url: imageUrl, detail: "high" }
+                receiptVisionImageInput(provider, imageUrl)
               ]
             }],
-            max_output_tokens: 500
+            text: {
+              format: {
+                type: "json_schema",
+                name: diagnosticRole === "primary" && !fieldFocus ? "tars_receipt_primary_vision_v1" : yandexFieldFocusEngineContract ? "tars_receipt_field_focus_yandex_v1" : fieldFocus ? "tars_receipt_field_focus_v1" : "tars_receipt_fields_v1",
+                strict: true,
+                schema: diagnosticRole === "primary" && !fieldFocus ? RECEIPT_PRIMARY_VISION_SCHEMA : yandexFieldFocusEngineContract ? RECEIPT_VISION_ENGINE_SCHEMA : fieldFocus ? RECEIPT_FIELD_FOCUS_SCHEMA : RECEIPT_VISION_SCHEMA
+              }
+            },
+            // Qwen 3.6 uses reasoning mode by default in Yandex AI Studio.
+            // The Responses API counts those hidden reasoning tokens against
+            // max_output_tokens, so a receipt request can otherwise finish
+            // with HTTP 2xx but no final structured JSON. Keep the OpenAI
+            // budget unchanged and reserve enough room only for Yandex to
+            // emit the strict receipt object after its visual analysis.
+            max_output_tokens: provider.id === "yandex_ai_studio" ? 4096 : 800
           },
           timeout: 14e3
         });
       } catch (networkError) {
         if (retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole);
+          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole, provider, providerFallbackAttempted);
         }
         captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, /timeout|timed\s*out|etimedout/i.test(String(networkError && networkError.message || networkError)) ? "timeout" : "other_error", "no_json", void 0, void 0);
+        if (fallbackProvider) return useFallbackProvider(/timeout|timed\s*out|etimedout/i.test(String(networkError && networkError.message || networkError)) ? "timeout" : "transport");
         throw networkError;
       }
       if (!response || response.statusCode < 2e2 || response.statusCode >= 3e2) {
         if (response && (response.statusCode >= 500 || response.statusCode === 429) && retryAttempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole);
+          return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole, provider, providerFallbackAttempted);
         }
         captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, response && response.statusCode === 429 ? "429" : response && response.statusCode >= 500 ? "5xx" : "other_error", "no_json", void 0, void 0);
+        if (fallbackProvider) return useFallbackProvider(response && response.statusCode === 429 ? "429" : response && response.statusCode >= 500 ? "5xx" : "http_error");
         throw new Error(`OpenAI receipt HTTP ${response && response.statusCode || "unknown"}`);
       }
       let payload;
       try {
-        payload = response.data || (response.content ? JSON.parse(response.content) : {});
+        payload = typeof response.data === "string" ? JSON.parse(response.data) : response.data || (response.content ? JSON.parse(response.content) : {});
       } catch (payloadParseError) {
         captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, "2xx", "parse_error", void 0, void 0);
+        if (fallbackProvider) return useFallbackProvider("invalid_response");
         throw payloadParseError;
       }
       const outputText = openAiReceiptOutputText(payload);
       const parsed = parseReceiptJson(outputText);
-      const candidate = openAiReceiptCandidateFromJson(parsed, requiredDate);
-      const parserState = diagnosticRole === "primary" ? openAiPrimaryVisionParserState(outputText, parsed) : openAiReceiptParserState(outputText, parsed);
+      const yandexEngineFocusedCandidate = yandexFieldFocusEngineContract ? receiptFieldFocusCandidateFromEngineJson(parsed, requiredDate, focusAmount, focusDate, diagnosticRole === "receipt_dispute") : void 0;
+      const parserState = diagnosticRole === "primary" ? openAiPrimaryVisionParserState(outputText, parsed) : fieldFocus ? yandexFieldFocusEngineContract ? yandexEngineFocusedCandidate ? "parsed" : receiptFieldFocusParserState(outputText, parsed) : receiptFieldFocusParserState(outputText, parsed) : openAiReceiptParserState(outputText, parsed);
+      const candidate = fieldFocus ? parserState === "parsed" ? yandexEngineFocusedCandidate || receiptFieldFocusCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute") : void 0 : openAiReceiptCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute");
       if (candidate) {
-        const transcribedAmount = normalizeReceiptAmount(parsed && parsed.amount_text);
-        if (isValidReceiptAmount(transcribedAmount)) candidate.receiptAmount = transcribedAmount;
+        if (!fieldFocus) {
+          const transcribedAmount = normalizeReceiptAmount(parsed && parsed.amount_text);
+          if (isValidReceiptAmount(transcribedAmount)) candidate.receiptAmount = transcribedAmount;
+        }
         candidate.receiptAmountSource = `openai:${model}`;
+        candidate.receiptProvider = provider.id;
+        candidate.receiptPass = focusDate ? "date_focus" : focusAmount ? "amount_focus" : "primary";
         if (diagnosticRole === "primary") candidate.primaryVisionDecision = primaryVisionDecisionFromCandidate(candidate, parserState);
       }
       captureOpenAiReceiptTelemetry(diagnostic, diagnosticRole, "2xx", parserState, parsed, candidate);
-      if (!candidate && logger) logger.warn("OpenAI receipt check returned no parseable JSON");
+      // Retry one incomplete Yandex 2xx response before using another provider.
+      if (provider.id === "yandex_ai_studio" && parserState !== "parsed" && retryAttempt < 1) {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        return requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt + 1, focusAmount, focusDate, diagnostic, diagnosticRole, provider, providerFallbackAttempted);
+      }
+      if (fallbackProvider && parserState !== "parsed") return useFallbackProvider(parserState);
+      if (!candidate && fallbackProvider) return useFallbackProvider("schema_mismatch");
+      if (!candidate && logger) logger.warn(`${provider.id === "yandex_ai_studio" ? "Yandex AI Studio" : "OpenAI"} receipt check returned no parseable JSON`);
       return candidate;
     }
     function normalizedDate(year, month, day) {
@@ -5190,18 +5697,24 @@ var require_upload_duplicate_guard = __commonJS({
       return void 0;
     }
     function normalizeReceiptAmount(raw) {
-      if (!/\d/.test(String(raw || ""))) return void 0;
-      const compact = String(raw || "").replace(/[ОоO]/g, "0").replace(/[Бб]/g, "6").replace(/[Зз]/g, "3").replace(/[ІI|l]/g, "1").replace(/[\s\u00a0']/g, "");
+      const source = String(raw === null || raw === void 0 ? "" : raw).trim();
+      if (!/\d/.test(source)) return void 0;
+      const numericPart = source.replace(/\s*(?:₽|руб(?:\.|лей|ля)?|RUB|RUR)\s*$/i, "").trim();
+      if (!numericPart || !/\d/.test(numericPart)) return void 0;
+      // Confusable replacement is intentionally limited to the numeric token.
+      // Applying it to a currency suffix turns `1 900 руб.` into `19006` because
+      // the Cyrillic `б` was previously normalized as a digit.
+      if (!/^\+?[0-9ОоOБбЗзІI|l\s\u00a0'’.,]+$/.test(numericPart)) return void 0;
+      const compact = numericPart.replace(/[ОоO]/g, "0").replace(/[Бб]/g, "6").replace(/[Зз]/g, "3").replace(/[ІI|l]/g, "1").replace(/[\s\u00a0'’]/g, "").replace(/^\+/, "");
       if (!compact || !/\d/.test(compact)) return void 0;
-      const comma = compact.lastIndexOf(",");
-      const dot = compact.lastIndexOf(".");
-      const separator = Math.max(comma, dot);
       let normalized;
-      if (separator !== -1 && compact.length - separator - 1 <= 2) {
-        normalized = compact.slice(0, separator).replace(/[^0-9]/g, "") + "." + compact.slice(separator + 1).replace(/[^0-9]/g, "");
-      } else {
-        normalized = compact.replace(/[^0-9]/g, "");
-      }
+      if (/^\d+$/.test(compact)) normalized = compact;
+      else if (/^\d{1,3}(?:[.,]\d{3})+$/.test(compact)) normalized = compact.replace(/[.,]/g, "");
+      else if (/^\d+[.,]\d{1,2}$/.test(compact)) normalized = compact.replace(",", ".");
+      else if (/^\d{1,3}(?:[.,]\d{3})+[.,]\d{1,2}$/.test(compact)) {
+        const separator = Math.max(compact.lastIndexOf(","), compact.lastIndexOf("."));
+        normalized = compact.slice(0, separator).replace(/[.,]/g, "") + "." + compact.slice(separator + 1);
+      } else return void 0;
       const value = Number(normalized);
       return Number.isFinite(value) && value > 0 && value < 1e8 ? Math.round(value * 100) / 100 : void 0;
     }
@@ -5540,13 +6053,359 @@ var require_upload_duplicate_guard = __commonJS({
         qualitySignal: evidenceCount / 4
       };
     }
-    async function validateReceiptDate(file, content, http, config, logger, retryAttempt = 0, validationContext, diagnostic) {
+    const RECEIPT_REPLAY_SCHEMA_VERSION = "receipt-replay-v1";
+    const RECEIPT_REPLAY_COOLDOWN_MS = 30 * 1e3;
+    const RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS = 120;
+    const RECEIPT_REPLAY_PRODUCTION_WAIT_POLL_MS = 250;
+    let receiptReplayActive = false;
+    let receiptReplayLastStartedAt = 0;
+    let productionReceiptExtractionActive = 0;
+    async function waitForReceiptReplayProductionIdle(maxPolls = RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS) {
+      const boundedPolls = Number.isInteger(maxPolls) ? Math.max(0, Math.min(RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS, maxPolls)) : RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS;
+      for (let attempt = 0; productionReceiptExtractionActive > 0 && attempt < boundedPolls; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, RECEIPT_REPLAY_PRODUCTION_WAIT_POLL_MS));
+      }
+      return productionReceiptExtractionActive === 0;
+    }
+    function normalizedReceiptReplayDate(value) {
+      const date = String(value || "");
+      return /^20\d{2}-\d{2}-\d{2}$/.test(date) ? date : null;
+    }
+    function normalizedReceiptReplayTime(value) {
+      const time = String(value || "");
+      return /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(time) ? time : null;
+    }
+    function normalizedReceiptReplayStatus(value) {
+      const status = String(value || "").toLowerCase();
+      if (status === "success") return "success";
+      if (status === "failed") return "failed";
+      if (status === "pending") return "pending";
+      return "unknown";
+    }
+    function normalizedReceiptReplayProvider(value) {
+      const provider = String(value || "");
+      return ["yandex_ai_studio", "openai", "yandex_ocr", "decision"].indexOf(provider) !== -1 ? provider : "unknown";
+    }
+    function normalizedReceiptReplayAuthority(value) {
+      const authority = String(value || "");
+      return ["yandex_qwen", "openai_vision", "ocr_confirmed", "legacy_consensus", "control", "none"].indexOf(authority) !== -1 ? authority : "none";
+    }
+    function normalizedReceiptReplayContainerVetoSource(value) {
+      const source = String(value || "");
+      return ["vision_classifier", "yandex_ocr", "ocr_combined", "none"].indexOf(source) !== -1 ? source : "none";
+    }
+    function normalizedReceiptReplayPass(value) {
+      const pass = String(value || "");
+      return ["receipt_vision_engine", "ocr", "date_focus", "amount_focus", "decision"].indexOf(pass) !== -1 ? pass : "decision";
+    }
+    function normalizedReceiptReplayReasonCode(value) {
+      const reasonCode = String(value || "");
+      return [
+        "accepted", "not_receipt", "date_mismatch", "date_missing", "amount_missing", "status_rejected", "amount_conflict",
+        "date_disagreement", "amount_disagreement", "date_and_amount_disagreement", "focused_confirms_qwen",
+        "focused_confirms_ocr", "focused_unresolved", "canonical_original_unresolved", "historical_reference_unresolved",
+        "invalid_upload_id", "forbidden", "busy", "rate_limited", "provider_error", "unexpected"
+      ].indexOf(reasonCode) !== -1 ? reasonCode : "unexpected";
+    }
+    function normalizedReceiptReplayErrorCode(value) {
+      const errorCode = String(value || "");
+      return ["none", "timeout", "rate_limited", "authorization", "provider_4xx", "provider_5xx", "invalid_response", "production_priority", "other"].indexOf(errorCode) !== -1 ? errorCode : "other";
+    }
+    function receiptReplayContext(context) {
+      const replay = context && context.receiptReplayV1;
+      return replay && replay.schemaVersion === RECEIPT_REPLAY_SCHEMA_VERSION ? replay : void 0;
+    }
+    function createReceiptReplayTraceV1(referenceDate) {
+      return {
+        schemaVersion: RECEIPT_REPLAY_SCHEMA_VERSION,
+        referenceDate: normalizedReceiptReplayDate(referenceDate),
+        passes: [],
+        disagreement: { date: false, amount: false },
+        selectedAuthority: "none",
+        containerVetoSource: "none",
+        decisionReasonCode: "unexpected",
+        providerErrorCode: "none"
+      };
+    }
+    function sanitizeReceiptReplayPass(input) {
+      const source = input && typeof input === "object" ? input : {};
+      const amount = isValidReceiptAmount(source.amount) ? Math.round(Number(source.amount) * 100) / 100 : null;
+      const confidence = typeof source.confidence === "number" && Number.isFinite(source.confidence) && source.confidence >= 0 && source.confidence <= 1 ? Math.round(source.confidence * 1e3) / 1e3 : null;
+      const layout = ["page", "page-column-sort", "table", "markdown", "none"].indexOf(String(source.layout || "")) !== -1 ? String(source.layout) : "none";
+      return {
+        provider: normalizedReceiptReplayProvider(source.provider),
+        pass: normalizedReceiptReplayPass(source.pass),
+        amount,
+        date: normalizedReceiptReplayDate(source.date),
+        time: normalizedReceiptReplayTime(source.time),
+        status: normalizedReceiptReplayStatus(source.status),
+        confidence,
+        layout,
+        selected_authority: normalizedReceiptReplayAuthority(source.selectedAuthority || source.selected_authority),
+        disagreement: source.disagreement === true,
+        reason_code: normalizedReceiptReplayReasonCode(source.reasonCode || source.reason_code)
+      };
+    }
+    function recordReceiptReplayPass(context, input) {
+      const trace = receiptReplayContext(context);
+      if (!trace || !Array.isArray(trace.passes) || trace.passes.length >= 16) return;
+      trace.passes.push(sanitizeReceiptReplayPass(input));
+    }
+    function captureReceiptReplayFieldTelemetry(trace, input) {
+      if (!trace || !input || typeof input !== "object") return;
+      const pass = normalizedReceiptReplayPass(input.pass);
+      if (pass === "decision") {
+        const reasonCode = String(input.reason_code || "");
+        trace.disagreement.date = /date/.test(reasonCode) || trace.disagreement.date;
+        trace.disagreement.amount = /amount/.test(reasonCode) || trace.disagreement.amount;
+        trace.selectedAuthority = normalizedReceiptReplayAuthority(input.selected_authority);
+        trace.decisionReasonCode = normalizedReceiptReplayReasonCode(reasonCode === "no_disagreement" ? "accepted" : reasonCode);
+        return;
+      }
+      if (pass !== "date_focus" && pass !== "amount_focus") return;
+      for (let index = trace.passes.length - 1; index >= 0; index -= 1) {
+        if (trace.passes[index].pass !== pass) continue;
+        trace.passes[index].selected_authority = normalizedReceiptReplayAuthority(input.selected_authority);
+        trace.passes[index].disagreement = input.disagreement === true;
+        trace.passes[index].reason_code = normalizedReceiptReplayReasonCode(input.reason_code);
+        break;
+      }
+    }
+    function receiptReplayProviderErrorCode(value) {
+      const source = String(value || "");
+      if (/timeout|timed\s*out|etimedout/i.test(source)) return "timeout";
+      if (/\b429\b/.test(source)) return "rate_limited";
+      if (/\b40[13]\b|authorization/i.test(source)) return "authorization";
+      if (/\b4\d\d\b/.test(source)) return "provider_4xx";
+      if (/\b5\d\d\b/.test(source)) return "provider_5xx";
+      if (/parse|json|schema|response/i.test(source)) return "invalid_response";
+      if (/production_priority/i.test(source)) return "production_priority";
+      return "other";
+    }
+    function receiptReplayLogger(trace) {
+      return {
+        info(value) {
+          const line = String(value || "");
+          if (line.indexOf("RECEIPT_FIELD_TRACE_V1 ") !== 0) return;
+          try {
+            captureReceiptReplayFieldTelemetry(trace, JSON.parse(line.slice("RECEIPT_FIELD_TRACE_V1 ".length)));
+          } catch (_2) {
+            trace.providerErrorCode = "invalid_response";
+          }
+        },
+        warn(value) {
+          const errorCode = receiptReplayProviderErrorCode(value);
+          if (trace.providerErrorCode === "none" || errorCode === "production_priority") trace.providerErrorCode = errorCode;
+        }
+      };
+    }
+    function receiptReplayReasonCodeFromResult(result) {
+      const reason = String(result && result.reason || "");
+      if (result && result.ok) return "accepted";
+      if (/НЕ СОВПАЛИ|НЕ ПОДТВЕРЖДЕНЫ/i.test(reason)) {
+        if (/ДАТА И СУММА/i.test(reason)) return "date_and_amount_disagreement";
+        if (/ДАТ/i.test(reason)) return "date_disagreement";
+        return "amount_conflict";
+      }
+      if (/ДАТА ЧЕКА .*НУЖНА/i.test(reason)) return "date_mismatch";
+      if (/ДАТА ЧЕКА НЕ РАСПОЗНАНА/i.test(reason)) return "date_missing";
+      if (/СУММА ЧЕКА НЕ РАСПОЗНАНА/i.test(reason)) return "amount_missing";
+      if (/Vision не подтвердил финансовый документ|не принят/i.test(reason)) return "not_receipt";
+      if (/СТАТУС|ПЛАТЕЖ|НЕ ПРОШ[ЕЁ]Л/i.test(reason)) return "status_rejected";
+      return "provider_error";
+    }
+    function receiptReplayOutcomeFromResult(result) {
+      const reasonCode = receiptReplayReasonCodeFromResult(result);
+      if (result && result.ok) return "fields_resolved";
+      if (/disagreement|conflict/.test(reasonCode)) return "control";
+      if (reasonCode === "provider_error") return "provider_error";
+      return "rejected";
+    }
+    function strictProductionReplayResult(result, config) {
+      const today = expectedReceiptDate(config);
+      const selectedDate = normalizedReceiptReplayDate(result && result.receiptDate);
+      if (selectedDate && selectedDate !== today) return "date_mismatch";
+      if (result && result.ok) return "accepted";
+      const reasonCode = receiptReplayReasonCodeFromResult(result);
+      return /disagreement|conflict/.test(reasonCode) ? "control" : "rejected";
+    }
+    function receiptReplaySelectedProvider(trace) {
+      const authority = normalizedReceiptReplayAuthority(trace && trace.selectedAuthority);
+      if (authority === "yandex_qwen") return "yandex_ai_studio";
+      if (authority === "openai_vision") return "openai";
+      if (authority === "ocr_confirmed") return "yandex_ocr";
+      return "decision";
+    }
+    function safeReceiptReplayResultV1(input) {
+      const source = input && typeof input === "object" ? input : {};
+      const passes = (Array.isArray(source.passes) ? source.passes : []).slice(0, 16).map(sanitizeReceiptReplayPass);
+      const sourceAmount = source.amount === void 0 ? source.normalized_amount : source.amount;
+      const amount = isValidReceiptAmount(sourceAmount) ? Math.round(Number(sourceAmount) * 100) / 100 : null;
+      const confidence = typeof source.confidence === "number" && Number.isFinite(source.confidence) && source.confidence >= 0 && source.confidence <= 1 ? Math.round(source.confidence * 1e3) / 1e3 : null;
+      const sourceReplayOutcome = source.replayOutcome || source.replay_outcome;
+      const sourceStrictProductionResult = source.strictProductionResult || source.strict_production_result;
+      const replayOutcome = ["fields_resolved", "control", "rejected", "provider_error", "forbidden", "busy", "rate_limited"].indexOf(String(sourceReplayOutcome || "")) !== -1 ? String(sourceReplayOutcome) : "rejected";
+      const strictProductionResult = ["accepted", "rejected", "control", "date_mismatch", "not_run"].indexOf(String(sourceStrictProductionResult || "")) !== -1 ? String(sourceStrictProductionResult) : "not_run";
+      return {
+        schema_version: RECEIPT_REPLAY_SCHEMA_VERSION,
+        provider: normalizedReceiptReplayProvider(source.provider),
+        passes,
+        normalized_amount: amount,
+        normalized_date: normalizedReceiptReplayDate(source.date || source.normalized_date),
+        normalized_time: normalizedReceiptReplayTime(source.time || source.normalized_time),
+        normalized_status: normalizedReceiptReplayStatus(source.status || source.normalized_status),
+        confidence,
+        disagreement: {
+          date: Boolean(source.disagreement && source.disagreement.date),
+          amount: Boolean(source.disagreement && source.disagreement.amount)
+        },
+        targeted_pass_result: passes.filter((pass) => pass.pass === "date_focus" || pass.pass === "amount_focus"),
+        selected_authority: normalizedReceiptReplayAuthority(source.selectedAuthority || source.selected_authority),
+        container_veto_source: normalizedReceiptReplayContainerVetoSource(source.containerVetoSource || source.container_veto_source),
+        replay_outcome: replayOutcome,
+        strict_production_result: strictProductionResult,
+        reason_code: normalizedReceiptReplayReasonCode(source.reasonCode || source.reason_code),
+        provider_error_code: normalizedReceiptReplayErrorCode(source.providerErrorCode || source.provider_error_code || "none")
+      };
+    }
+    function receiptReplayAllowedUser(user, config) {
+      const username = normalizedUsername(user && user.username);
+      if (!username) return false;
+      return ["teimur", "shura", config && config.ownerUsername, config && config.adminUsername].some((value) => username === normalizedUsername(value));
+    }
+    function normalizedReceiptReplayUploadId(value) {
+      const uploadId = String(value || "").trim();
+      return uploadId && uploadId.length <= 160 && /^[A-Za-z0-9_-]+$/.test(uploadId) ? uploadId : "";
+    }
+    function receiptReplayUploadIsCanonical(upload) {
+      if (!upload || !upload.id || upload.complete === false || upload.uploading === true || !fileLooksLikeImage(upload)) return false;
+      const name = String(upload.name || upload.path || upload.url || "").split("?")[0].split("/").pop();
+      return Boolean(name && !/^thumb[-_]/i.test(name));
+    }
+    async function resolveCanonicalReceiptReplayUpload(read, uploadId) {
+      if (!read || !read.getUploadReader) return void 0;
+      const id = normalizedReceiptReplayUploadId(uploadId);
+      if (!id) return void 0;
+      let upload;
+      try {
+        upload = await read.getUploadReader().getById(id);
+      } catch (_2) {
+        return void 0;
+      }
+      if (!receiptReplayUploadIsCanonical(upload)) return void 0;
+      let content;
+      try {
+        content = await read.getUploadReader().getBufferById(id);
+      } catch (_2) {
+        return void 0;
+      }
+      if (!content || !content.length || content.length > MAX_IMAGE_BYTES) return void 0;
+      return { upload, content };
+    }
+    function receiptReplayReferenceDate(upload, config) {
+      const uploadedAt = upload && upload.uploadedAt;
+      const timestamp = uploadedAt instanceof Date ? uploadedAt.getTime() : Date.parse(String(uploadedAt || ""));
+      return Number.isFinite(timestamp) ? receiptCalendarDateForTimestamp(timestamp, config) : null;
+    }
+    function receiptReplayResultStatus(result) {
+      const reason = String(result && result.reason || "");
+      if (result && result.ok) return "success";
+      if (/ОБРАБОТ|ОЖИД|НЕ ПОДТВЕРЖД/i.test(reason)) return "pending";
+      if (/НЕ ВЫПОЛНЕН|НЕ ПРОШ[ЕЁ]Л|ОТКЛОН|ОТМЕН/i.test(reason)) return "failed";
+      return "unknown";
+    }
+    function receiptReplaySelectedConfidence(trace, result) {
+      const passes = trace && Array.isArray(trace.passes) ? trace.passes : [];
+      for (let index = passes.length - 1; index >= 0; index -= 1) {
+        const pass = passes[index];
+        if (pass.confidence === null) continue;
+        if (result && normalizedReceiptReplayDate(result.receiptDate) && pass.date !== normalizedReceiptReplayDate(result.receiptDate)) continue;
+        if (result && isValidReceiptAmount(result.receiptAmount) && pass.amount !== Number(result.receiptAmount)) continue;
+        return pass.confidence;
+      }
+      return null;
+    }
+    async function runReceiptReplayV1(read, http, config, request, runtimeOptions) {
+      const authorized = request && request.authorized === true;
+      if (!authorized) return safeReceiptReplayResultV1({ replayOutcome: "forbidden", reasonCode: "forbidden", providerErrorCode: "none" });
+      const uploadId = normalizedReceiptReplayUploadId(request && request.uploadId);
+      if (!uploadId) return safeReceiptReplayResultV1({ replayOutcome: "rejected", reasonCode: "invalid_upload_id", providerErrorCode: "none" });
+      const now = Date.now();
+      if (receiptReplayActive) return safeReceiptReplayResultV1({ replayOutcome: "busy", reasonCode: "busy", providerErrorCode: "none" });
+      if (now - receiptReplayLastStartedAt < RECEIPT_REPLAY_COOLDOWN_MS) {
+        return safeReceiptReplayResultV1({ replayOutcome: "rate_limited", reasonCode: "rate_limited", providerErrorCode: "none" });
+      }
+      receiptReplayActive = true;
+      receiptReplayLastStartedAt = now;
+      try {
+        const configuredWaitPolls = runtimeOptions && Number.isInteger(runtimeOptions.productionWaitPolls) ? runtimeOptions.productionWaitPolls : RECEIPT_REPLAY_PRODUCTION_WAIT_POLLS;
+        if (!await waitForReceiptReplayProductionIdle(configuredWaitPolls)) {
+          return safeReceiptReplayResultV1({ replayOutcome: "busy", reasonCode: "busy", providerErrorCode: "production_priority" });
+        }
+        const canonical = await resolveCanonicalReceiptReplayUpload(read, uploadId);
+        if (!canonical) return safeReceiptReplayResultV1({ replayOutcome: "rejected", reasonCode: "canonical_original_unresolved", providerErrorCode: "none" });
+        const referenceDate = receiptReplayReferenceDate(canonical.upload, config);
+        if (!referenceDate) return safeReceiptReplayResultV1({ replayOutcome: "rejected", reasonCode: "historical_reference_unresolved", providerErrorCode: "none" });
+        const trace = createReceiptReplayTraceV1(referenceDate);
+        const replayHttp = {
+          async post(url, options) {
+            if (!await waitForReceiptReplayProductionIdle(configuredWaitPolls)) {
+              trace.providerErrorCode = "production_priority";
+              throw new Error("production_priority");
+            }
+            return http.post(url, options);
+          }
+        };
+        const stageContext = {
+          caseToken: "receipt-replay-v1",
+          primaryConsumed: true,
+          receiptReplayV1: trace
+        };
+        const result = await validateReceiptDate(canonical.upload, canonical.content, replayHttp, config, receiptReplayLogger(trace), 0, stageContext);
+        if (trace.selectedAuthority === "none") {
+          if (/disagreement|conflict/.test(receiptReplayReasonCodeFromResult(result))) trace.selectedAuthority = "control";
+          else if (result && result.ok) trace.selectedAuthority = "legacy_consensus";
+        }
+        const matchingPass = trace.passes.slice().reverse().find((pass) => {
+          const dateMatches = !result || !result.receiptDate || pass.date === normalizedReceiptReplayDate(result.receiptDate);
+          const amountMatches = !result || !isValidReceiptAmount(result.receiptAmount) || pass.amount === Number(result.receiptAmount);
+          return dateMatches && amountMatches && pass.pass !== "decision";
+        });
+        return safeReceiptReplayResultV1({
+          provider: receiptReplaySelectedProvider(trace),
+          passes: trace.passes,
+          amount: result && result.receiptAmount,
+          date: result && result.receiptDate,
+          time: result && result.receiptTime || matchingPass && matchingPass.time,
+          status: matchingPass && matchingPass.status || receiptReplayResultStatus(result),
+          confidence: receiptReplaySelectedConfidence(trace, result),
+          disagreement: trace.disagreement,
+          selectedAuthority: trace.selectedAuthority,
+          containerVetoSource: trace.containerVetoSource,
+          replayOutcome: receiptReplayOutcomeFromResult(result),
+          strictProductionResult: strictProductionReplayResult(result, config),
+          reasonCode: trace.decisionReasonCode !== "unexpected" ? trace.decisionReasonCode : receiptReplayReasonCodeFromResult(result),
+          providerErrorCode: trace.providerErrorCode
+        });
+      } catch (_2) {
+        return safeReceiptReplayResultV1({ replayOutcome: "provider_error", reasonCode: "provider_error", providerErrorCode: "other" });
+      } finally {
+        receiptReplayActive = false;
+      }
+    }
+    function resetReceiptReplayRuntimeForTests() {
+      receiptReplayActive = false;
+      receiptReplayLastStartedAt = 0;
+      productionReceiptExtractionActive = 0;
+    }
+    async function validateReceiptDateCore(file, content, http, config, logger, retryAttempt = 0, validationContext, diagnostic) {
       if (!config) {
         return { ok: false, reason: "🚫 ПРОВЕРКА ДАТЫ ЧЕКА НЕ НАСТРОЕНА" };
       }
-      const requiredDate = expectedReceiptDate(config);
+      const replay = receiptReplayContext(validationContext);
+      const requiredDate = replay && replay.referenceDate || expectedReceiptDate(config);
       const hasYandex = Boolean(config.apiKey && config.folderId);
-      const hasOpenAi = Boolean(config.openaiApiKey);
+      const hasOpenAi = receiptVisionProviderConfigured(config);
       let openAiUnavailable = false;
       const stageContext = validationContext || receiptStageContext(file, content, config);
       if (!hasYandex && !hasOpenAi) {
@@ -5557,6 +6416,8 @@ var require_upload_duplicate_guard = __commonJS({
       const legacyOcrResults = [];
       const legacyVisionResults = [];
       let yandexLayoutResult = "error";
+      let receiptVisionAuthority;
+      let receiptVisionNonReceiptAuthority = false;
       const candidateConfirmsFinancialDocument = (candidate) => {
         if (!candidate || candidate.combinedReceipt) return false;
         const text = String(candidate.text || "");
@@ -5579,12 +6440,14 @@ var require_upload_duplicate_guard = __commonJS({
           if (candidates[index].combinedReceipt) candidates.splice(index, 1);
         }
         const combinedText = sourceCandidates.map((candidate) => candidate.text).join("\n");
+        const containerRejection = receiptContainerScreenshotRejection(combinedText);
         candidates.push({
           text: combinedText,
           receiptDate: extractReceiptDate(combinedText, requiredDate),
           receiptAmount: extractReceiptAmount(combinedText),
           statusRejection: receiptStatusRejection(combinedText),
-          containerRejection: receiptContainerScreenshotRejection(combinedText),
+          containerRejection,
+          containerRejectionSource: containerRejection ? "ocr_combined" : "none",
           combinedReceipt: true
         });
       };
@@ -5600,15 +6463,33 @@ var require_upload_duplicate_guard = __commonJS({
           text: [base.text, amountCandidate.text].filter(Boolean).join("\n"),
           receiptDate: base.receiptDate,
           receiptAmount: amountCandidate.receiptAmount,
+          receiptAmountSource: amountCandidate.receiptAmountSource,
+          receiptAmountFieldOnly: amountCandidate.receiptFieldOnly === true,
+          receiptConfidence: amountCandidate.receiptConfidence,
           statusRejection: base.statusRejection || amountCandidate.statusRejection || "",
           containerRejection: base.containerRejection || amountCandidate.containerRejection || "",
+          containerRejectionSource: base.containerRejection ? base.containerRejectionSource : amountCandidate.containerRejection ? amountCandidate.containerRejectionSource : "none",
           aiReceipt: base.aiReceipt || amountCandidate.aiReceipt,
           mergedReceipt: true
         };
       };
+      const focusedAmountCanCompleteReceipt = (candidate) => {
+        if (!candidate || candidate.receiptAmountFieldOnly !== true || candidate.receiptConfidence < RECEIPT_VISION_ENGINE_MIN_CONFIDENCE || !isValidReceiptAmount(candidate.receiptAmount)) return false;
+        const conflictingAmount = candidates.some((other) => {
+          if (!other || other === candidate || other.combinedReceipt || !isValidReceiptAmount(other.receiptAmount)) return false;
+          return !sameReceiptAmount(other.receiptAmount, candidate.receiptAmount);
+        });
+        if (conflictingAmount) return false;
+        return candidates.some((other) => {
+          if (!other || other === candidate || other.combinedReceipt || other.containerRejection || receiptStatusBlocks(other.statusRejection)) return false;
+          return other.receiptDate === requiredDate && candidateConfirmsFinancialDocument(other);
+        });
+      };
       const returnContainer = () => {
         const containerCandidate = mergeCandidateForDecision(candidates.find((candidate) => candidate.containerRejection));
         if (!containerCandidate) return void 0;
+        const replayTrace = receiptReplayContext(stageContext);
+        if (replayTrace) replayTrace.containerVetoSource = normalizedReceiptReplayContainerVetoSource(containerCandidate.containerRejectionSource);
         return withShadowEvidence({
           ok: false,
           reason: containerCandidate.containerRejection,
@@ -5619,15 +6500,20 @@ var require_upload_duplicate_guard = __commonJS({
       };
       const returnAccepted = () => {
         if (receiptAmountsDisagree(candidates, requiredDate, !hasYandex)) return void 0;
-        const accepted = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate && !receiptStatusBlocks(candidate.statusRejection) && (!candidate.aiReceipt || aiCandidateStronglyAcceptsReceipt(candidate, requiredDate)) && (!hasOpenAi || openAiUnavailable || receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate, !hasYandex))));
-        if (!accepted || !isValidReceiptAmount(accepted.receiptAmount) || receiptStatusBlocks(accepted.statusRejection)) return void 0;
-        return withShadowEvidence({
-          ok: true,
-          receiptDate: accepted.receiptDate,
-          receiptAmount: accepted.receiptAmount,
-          receiptIdentity: extractReceiptIdentity(accepted.text, accepted.receiptDate, accepted.receiptAmount),
-          receiptWarning: accepted.statusRejection || ""
-        });
+        for (const base of candidates) {
+          if (!base || base.receiptDate !== requiredDate || receiptStatusBlocks(base.statusRejection) || base.aiReceipt && !aiCandidateStronglyAcceptsReceipt(base, requiredDate)) continue;
+          const accepted = mergeCandidateForDecision(base);
+          if (!accepted || !isValidReceiptAmount(accepted.receiptAmount) || receiptStatusBlocks(accepted.statusRejection)) continue;
+          if (hasOpenAi && !openAiUnavailable && !receiptAmountHasIndependentConfirmation(candidates, accepted, requiredDate, !hasYandex) && !focusedAmountCanCompleteReceipt(accepted)) continue;
+          return withShadowEvidence({
+            ok: true,
+            receiptDate: accepted.receiptDate,
+            receiptAmount: accepted.receiptAmount,
+            receiptIdentity: extractReceiptIdentity(accepted.text, accepted.receiptDate, accepted.receiptAmount),
+            receiptWarning: accepted.statusRejection || ""
+          });
+        }
+        return void 0;
       };
       const returnStatus = () => {
         const statusCandidate = mergeCandidateForDecision(candidates.find((candidate) => receiptStatusBlocks(candidate.statusRejection)));
@@ -5667,26 +6553,294 @@ var require_upload_duplicate_guard = __commonJS({
           return looksLikeBankReceiptText(text) && successStatus;
         });
       };
+      const receiptVisionIdentityText = () => candidates.filter((candidate) => candidate && !candidate.combinedReceipt && !candidate.receiptVisionAuthority).map((candidate) => String(candidate.text || "")).filter(Boolean).concat(receiptVisionAuthority ? [String(receiptVisionAuthority.text || "")] : []).join("\n");
+      const receiptVisionSelectedAuthority = () => receiptVisionAuthority && receiptVisionAuthority.receiptProvider === "yandex_ai_studio" ? "yandex_qwen" : "openai_vision";
+      const logReceiptVisionEngineDisagreement = () => {
+        if (!receiptVisionAuthority) return receiptVisionAuthorityDisagreement(receiptVisionAuthority, candidates);
+        const comparable = candidates.filter((candidate) => candidate && !candidate.combinedReceipt && !candidate.receiptVisionAuthority);
+        const fieldDisagreement = receiptVisionAuthorityDisagreement(receiptVisionAuthority, candidates);
+        const dateDisagreement = fieldDisagreement.dateDisagreement;
+        const amountDisagreement = fieldDisagreement.amountDisagreement;
+        const statusDisagreement = comparable.some((candidate) => receiptStatusBlocks(candidate.statusRejection) !== receiptStatusBlocks(receiptVisionAuthority.statusRejection));
+        const containerDisagreement = comparable.some((candidate) => Boolean(candidate.containerRejection));
+        if (logger) logger.info(`RECEIPT_VISION_ENGINE_V1 authority=high date_disagreement=${dateDisagreement} amount_disagreement=${amountDisagreement} status_disagreement=${statusDisagreement} container_disagreement=${containerDisagreement}`);
+        emitReceiptFieldTelemetry(logger, {
+          provider: receiptVisionAuthority.receiptProvider,
+          pass: "decision",
+          amount: receiptVisionAuthority.receiptAmount,
+          date: receiptVisionAuthority.receiptDate,
+          confidence: receiptVisionAuthority.receiptConfidence,
+          source: "decision",
+          selectedAuthority: dateDisagreement || amountDisagreement ? "none" : receiptVisionSelectedAuthority(),
+          disagreement: dateDisagreement || amountDisagreement,
+          reasonCode: dateDisagreement && amountDisagreement ? "date_and_amount_disagreement" : dateDisagreement ? "date_disagreement" : amountDisagreement ? "amount_disagreement" : "no_disagreement"
+        });
+        return fieldDisagreement;
+      };
+      const returnReceiptVisionAuthority = () => {
+        if (!receiptVisionAuthority) return void 0;
+        const identityText = receiptVisionIdentityText();
+        if (receiptVisionAuthority.receiptDate !== requiredDate) {
+          const mismatch = returnDateMismatch({ ...receiptVisionAuthority, text: identityText });
+          if (mismatch && receiptVisionAuthority.receiptTime) mismatch.receiptTime = receiptVisionAuthority.receiptTime;
+          return mismatch;
+        }
+        if (receiptStatusBlocks(receiptVisionAuthority.statusRejection)) {
+          return withShadowEvidence({
+            ok: false,
+            reason: receiptVisionAuthority.statusRejection,
+            receiptDate: receiptVisionAuthority.receiptDate,
+            receiptTime: receiptVisionAuthority.receiptTime,
+            receiptAmount: receiptVisionAuthority.receiptAmount,
+            receiptIdentity: extractReceiptIdentity(identityText, receiptVisionAuthority.receiptDate, receiptVisionAuthority.receiptAmount)
+          });
+        }
+        return withShadowEvidence({
+          ok: true,
+          receiptDate: receiptVisionAuthority.receiptDate,
+          receiptTime: receiptVisionAuthority.receiptTime,
+          receiptAmount: receiptVisionAuthority.receiptAmount,
+          receiptIdentity: extractReceiptIdentity(identityText, receiptVisionAuthority.receiptDate, receiptVisionAuthority.receiptAmount),
+          receiptWarning: ""
+        });
+      };
+      const returnReceiptVisionDisagreementControl = (dateDisagreement, amountDisagreement) => {
+        const identityText = receiptVisionIdentityText();
+        const reason = dateDisagreement && amountDisagreement ? "🚫 ДАТА И СУММА ЧЕКА НЕ ПОДТВЕРЖДЕНЫ — НУЖНА ПРОВЕРКА" : dateDisagreement ? "🚫 ДАТЫ ЧЕКА НЕ СОВПАЛИ — НУЖНА ПРОВЕРКА" : "🚫 СУММЫ ЧЕКА НЕ СОВПАЛИ — НУЖНА ПРОВЕРКА";
+        emitReceiptFieldTelemetry(logger, {
+          provider: "decision",
+          pass: "decision",
+          amount: amountDisagreement ? null : receiptVisionAuthority && receiptVisionAuthority.receiptAmount,
+          date: dateDisagreement ? null : receiptVisionAuthority && receiptVisionAuthority.receiptDate,
+          source: "decision",
+          selectedAuthority: "control",
+          disagreement: true,
+          reasonCode: "focused_unresolved"
+        });
+        return withShadowEvidence({
+          ok: false,
+          reason,
+          receiptDate: dateDisagreement ? void 0 : receiptVisionAuthority && receiptVisionAuthority.receiptDate,
+          receiptAmount: amountDisagreement ? void 0 : receiptVisionAuthority && receiptVisionAuthority.receiptAmount,
+          receiptIdentity: extractReceiptIdentity(identityText, dateDisagreement ? void 0 : receiptVisionAuthority && receiptVisionAuthority.receiptDate, amountDisagreement ? void 0 : receiptVisionAuthority && receiptVisionAuthority.receiptAmount)
+        });
+      };
+      const replaceReceiptVisionAuthorityField = (field, value) => {
+        if (!receiptVisionAuthority) return;
+        const structured = parseReceiptJson(receiptVisionAuthority.text) || {};
+        if (field === "date") {
+          receiptVisionAuthority = { ...receiptVisionAuthority, receiptDate: value, text: JSON.stringify({ ...structured, operation_date: value }) };
+        } else if (field === "amount") {
+          receiptVisionAuthority = { ...receiptVisionAuthority, receiptAmount: value, text: JSON.stringify({ ...structured, amount: value }) };
+        }
+      };
+      const resolveReceiptVisionAuthorityDisagreement = async (fieldDisagreement) => {
+        if (!receiptVisionAuthority) return void 0;
+        const disagreement = fieldDisagreement || receiptVisionAuthorityDisagreement(receiptVisionAuthority, candidates);
+        let unresolvedDate = false;
+        let unresolvedAmount = false;
+        let selectedAuthority = receiptVisionSelectedAuthority();
+        let selectedReasonCode = "focused_confirms_qwen";
+        if (disagreement.dateDisagreement) {
+          let focusedCandidate;
+          const focusedAt = Date.now();
+          logReceiptStage(logger, stageContext, "receipt_dispute_date_focus_start");
+          try {
+            focusedCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, false, true, diagnostic, "receipt_dispute");
+          } catch (_2) {}
+          logReceiptStage(logger, stageContext, "receipt_dispute_date_focus_end", focusedAt, focusedCandidate ? "ok" : "empty");
+          const resolution = resolveReceiptVisionField(receiptVisionAuthority.receiptDate, disagreement.ocrDates, focusedCandidate && focusedCandidate.receiptDate);
+          if (focusedCandidate) recordReceiptReplayPass(stageContext, {
+            provider: focusedCandidate.receiptProvider,
+            pass: "date_focus",
+            amount: focusedCandidate.receiptAmount,
+            date: focusedCandidate.receiptDate,
+            time: focusedCandidate.receiptTime,
+            status: shadowOperationStatus(focusedCandidate),
+            confidence: focusedCandidate.receiptConfidence,
+            selectedAuthority: resolution.selectedAuthority === "primary_vision" ? receiptVisionSelectedAuthority() : resolution.selectedAuthority,
+            disagreement: true,
+            reasonCode: resolution.reasonCode
+          });
+          emitReceiptFieldTelemetry(logger, {
+            provider: focusedCandidate && focusedCandidate.receiptProvider,
+            pass: "date_focus",
+            amount: null,
+            date: focusedCandidate && focusedCandidate.receiptDate,
+            source: "focused",
+            selectedAuthority: resolution.selectedAuthority === "primary_vision" ? receiptVisionSelectedAuthority() : resolution.selectedAuthority,
+            disagreement: true,
+            reasonCode: resolution.reasonCode
+          });
+          if (focusedCandidate) legacyVisionResults.push(shadowObservation(focusedCandidate, "date_focus"));
+          if (resolution.resolved) {
+            replaceReceiptVisionAuthorityField("date", resolution.value);
+            if (resolution.selectedAuthority === "ocr_confirmed") selectedAuthority = "ocr_confirmed";
+            selectedReasonCode = resolution.reasonCode;
+          }
+          else unresolvedDate = true;
+        }
+        if (disagreement.amountDisagreement) {
+          let focusedCandidate;
+          const focusedAt = Date.now();
+          logReceiptStage(logger, stageContext, "receipt_dispute_amount_focus_start");
+          try {
+            focusedCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, true, false, diagnostic, "receipt_dispute");
+          } catch (_2) {}
+          logReceiptStage(logger, stageContext, "receipt_dispute_amount_focus_end", focusedAt, focusedCandidate ? "ok" : "empty");
+          const resolution = resolveReceiptVisionField(receiptVisionAuthority.receiptAmount, disagreement.ocrAmounts, focusedCandidate && focusedCandidate.receiptAmount, sameReceiptAmount);
+          if (focusedCandidate) recordReceiptReplayPass(stageContext, {
+            provider: focusedCandidate.receiptProvider,
+            pass: "amount_focus",
+            amount: focusedCandidate.receiptAmount,
+            date: focusedCandidate.receiptDate,
+            time: focusedCandidate.receiptTime,
+            status: shadowOperationStatus(focusedCandidate),
+            confidence: focusedCandidate.receiptConfidence,
+            selectedAuthority: resolution.selectedAuthority === "primary_vision" ? receiptVisionSelectedAuthority() : resolution.selectedAuthority,
+            disagreement: true,
+            reasonCode: resolution.reasonCode
+          });
+          emitReceiptFieldTelemetry(logger, {
+            provider: focusedCandidate && focusedCandidate.receiptProvider,
+            pass: "amount_focus",
+            amount: focusedCandidate && focusedCandidate.receiptAmount,
+            date: null,
+            source: "focused",
+            selectedAuthority: resolution.selectedAuthority === "primary_vision" ? receiptVisionSelectedAuthority() : resolution.selectedAuthority,
+            disagreement: true,
+            reasonCode: resolution.reasonCode
+          });
+          if (focusedCandidate) legacyVisionResults.push(shadowObservation(focusedCandidate, "amount_focus"));
+          if (resolution.resolved) {
+            replaceReceiptVisionAuthorityField("amount", resolution.value);
+            if (resolution.selectedAuthority === "ocr_confirmed") selectedAuthority = "ocr_confirmed";
+            selectedReasonCode = resolution.reasonCode;
+          }
+          else unresolvedAmount = true;
+        }
+        if (unresolvedDate || unresolvedAmount) return returnReceiptVisionDisagreementControl(unresolvedDate, unresolvedAmount);
+        emitReceiptFieldTelemetry(logger, {
+          provider: receiptVisionAuthority.receiptProvider,
+          pass: "decision",
+          amount: receiptVisionAuthority.receiptAmount,
+          date: receiptVisionAuthority.receiptDate,
+          confidence: receiptVisionAuthority.receiptConfidence,
+          source: "decision",
+          selectedAuthority,
+          disagreement: true,
+          reasonCode: selectedReasonCode
+        });
+        return returnReceiptVisionAuthority();
+      };
       try {
+        if (hasOpenAi) {
+          const visionStartedAt = Date.now();
+          logReceiptStage(logger, stageContext, "receipt_vision_engine_start");
+          const visionResult = await requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger);
+          logReceiptStage(logger, stageContext, "receipt_vision_engine_end", visionStartedAt, visionResult ? "ok" : "fallback");
+          if (visionResult) recordReceiptReplayPass(stageContext, {
+            provider: visionResult.providerId,
+            pass: "receipt_vision_engine",
+            amount: visionResult.amount,
+            date: visionResult.operationDate,
+            time: visionResult.operationTime,
+            status: visionResult.status,
+            confidence: visionResult.confidence,
+            layout: "none",
+            selectedAuthority: "none",
+            disagreement: false,
+            reasonCode: "accepted"
+          });
+          if (visionResult) emitReceiptFieldTelemetry(logger, {
+            provider: visionResult.providerId,
+            pass: "receipt_vision_engine",
+            amount: visionResult.amount,
+            date: visionResult.operationDate,
+            confidence: visionResult.confidence,
+            source: "vision",
+            selectedAuthority: "none",
+            disagreement: false,
+            reasonCode: "observed"
+          });
+          if (receiptVisionEngineIsAuthoritative(visionResult)) {
+            receiptVisionAuthority = {
+              text: JSON.stringify({
+                is_receipt: true,
+                bank_or_provider: visionResult.bankOrProvider || null,
+                operation_date: visionResult.operationDate,
+                operation_time: visionResult.operationTime || null,
+                amount: visionResult.amount,
+                currency: visionResult.currency,
+                status: visionResult.status,
+                amount_label: visionResult.amountLabel,
+                confidence: visionResult.confidence,
+                ambiguity_reason: null
+              }),
+              receiptDate: visionResult.operationDate,
+              receiptTime: visionResult.operationTime,
+              receiptAmount: visionResult.amount,
+              receiptAmountSource: `${receiptVisionProviderCacheKey(config, config.openaiReceiptModel)}:receipt_vision_engine_v1`,
+              receiptProvider: visionResult.providerId || "unknown",
+              receiptConfidence: visionResult.confidence,
+              statusRejection: visionResult.status === "failed" ? "🚫 ЧЕК НЕ ПРОШЁЛ ПРОВЕРКУ" : "",
+              containerRejection: "",
+              aiReceipt: true,
+              receiptVisionAuthority: true
+            };
+            candidates.push(receiptVisionAuthority);
+            legacyVisionResults.push(shadowObservation(receiptVisionAuthority, "receipt_vision_engine_v1"));
+          } else if (receiptVisionEngineIsAuthoritativeNonReceipt(visionResult)) {
+            receiptVisionNonReceiptAuthority = true;
+          }
+        }
+        if (receiptVisionNonReceiptAuthority) {
+          if (logger) logger.info("RECEIPT_VISION_ENGINE_V1 authority=high classification=not_receipt");
+          return withShadowEvidence({ ok: false, reason: "⚠️ Чек не принят: Vision не подтвердил финансовый документ." });
+        }
         if (hasYandex) {
           const yandexStartedAt = Date.now();
           logReceiptStage(logger, stageContext, "yandex_validation_start");
           for (const model of ["page", "page-column-sort", "table", "markdown"]) {
             try {
-              const payload = await requestReceiptOcr(file, content, http, config, model);
+              const payload = await requestReceiptOcr(file, content, http, config, model, 0, stageContext);
               const text = receiptOcrText(payload);
               if (text) {
                 yandexLayoutResult = "success";
+                const containerRejection = receiptContainerScreenshotRejection(text);
                 const candidate = {
                   text,
                   receiptDate: extractReceiptDate(text, requiredDate),
                   receiptAmount: extractReceiptAmount(text),
                   receiptAmountSource: `yandex:${model}`,
                   statusRejection: receiptStatusRejection(text),
-                  containerRejection: receiptContainerScreenshotRejection(text)
+                  containerRejection,
+                  containerRejectionSource: containerRejection ? "yandex_ocr" : "none"
                 };
                 candidates.push(candidate);
                 legacyOcrResults.push(shadowObservation(candidate, model));
+                recordReceiptReplayPass(stageContext, {
+                  provider: "yandex_ocr",
+                  pass: "ocr",
+                  amount: candidate.receiptAmount,
+                  date: candidate.receiptDate,
+                  status: shadowOperationStatus(candidate),
+                  layout: model,
+                  selectedAuthority: "none",
+                  disagreement: false,
+                  reasonCode: "accepted"
+                });
+                emitReceiptFieldTelemetry(logger, {
+                  provider: "yandex_ocr",
+                  pass: "ocr",
+                  amount: candidate.receiptAmount,
+                  date: candidate.receiptDate,
+                  source: "ocr",
+                  layout: model,
+                  selectedAuthority: "none",
+                  disagreement: false,
+                  reasonCode: "observed"
+                });
               } else if (yandexLayoutResult !== "success") {
                 yandexLayoutResult = "empty";
               }
@@ -5699,6 +6853,13 @@ var require_upload_duplicate_guard = __commonJS({
           addCombinedCandidate();
           if (diagnostic) diagnostic.yandex_layout_result = yandexLayoutResult;
           logReceiptStage(logger, stageContext, "yandex_validation_end", yandexStartedAt, failures.length ? "partial" : "ok");
+        }
+        if (receiptVisionAuthority) {
+          const fieldDisagreement = logReceiptVisionEngineDisagreement();
+          if (fieldDisagreement.dateDisagreement || fieldDisagreement.amountDisagreement) {
+            return await resolveReceiptVisionAuthorityDisagreement(fieldDisagreement);
+          }
+          return returnReceiptVisionAuthority();
         }
         if (hasOpenAi) {
           try {
@@ -5715,6 +6876,17 @@ var require_upload_duplicate_guard = __commonJS({
             }
             if (aiCandidate) candidates.push(aiCandidate);
             if (aiCandidate) legacyVisionResults.push(shadowObservation(aiCandidate, "primary"));
+            if (aiCandidate) recordReceiptReplayPass(stageContext, {
+              provider: aiCandidate.receiptProvider,
+              pass: "receipt_vision_engine",
+              amount: aiCandidate.receiptAmount,
+              date: aiCandidate.receiptDate,
+              status: shadowOperationStatus(aiCandidate),
+              confidence: aiCandidate.receiptConfidence,
+              selectedAuthority: "none",
+              disagreement: false,
+              reasonCode: "accepted"
+            });
             const earlyDateMismatch = independentEarlyDateMismatch(aiCandidate);
             if (earlyDateMismatch) return returnDateMismatch(earlyDateMismatch);
             const amountStartedAt = Date.now();
@@ -5723,6 +6895,18 @@ var require_upload_duplicate_guard = __commonJS({
             logReceiptStage(logger, stageContext, "amount_focus_end", amountStartedAt, amountCandidate ? "ok" : "empty");
             if (amountCandidate) candidates.push(amountCandidate);
             if (amountCandidate) legacyVisionResults.push(shadowObservation(amountCandidate, "amount_focus"));
+            if (amountCandidate) recordReceiptReplayPass(stageContext, {
+              provider: amountCandidate.receiptProvider,
+              pass: "amount_focus",
+              amount: amountCandidate.receiptAmount,
+              date: amountCandidate.receiptDate,
+              time: amountCandidate.receiptTime,
+              status: shadowOperationStatus(amountCandidate),
+              confidence: amountCandidate.receiptConfidence,
+              selectedAuthority: "none",
+              disagreement: false,
+              reasonCode: "accepted"
+            });
             if (!candidates.some((candidate) => candidate && candidate.receiptDate === requiredDate)) {
               const dateStartedAt = Date.now();
               logReceiptStage(logger, stageContext, "date_focus_start");
@@ -5730,6 +6914,18 @@ var require_upload_duplicate_guard = __commonJS({
               logReceiptStage(logger, stageContext, "date_focus_end", dateStartedAt, dateCandidate ? "ok" : "empty");
               if (dateCandidate) candidates.push(dateCandidate);
               if (dateCandidate) legacyVisionResults.push(shadowObservation(dateCandidate, "date_focus"));
+              if (dateCandidate) recordReceiptReplayPass(stageContext, {
+                provider: dateCandidate.receiptProvider,
+                pass: "date_focus",
+                amount: dateCandidate.receiptAmount,
+                date: dateCandidate.receiptDate,
+                time: dateCandidate.receiptTime,
+                status: shadowOperationStatus(dateCandidate),
+                confidence: dateCandidate.receiptConfidence,
+                selectedAuthority: "none",
+                disagreement: false,
+                reasonCode: "accepted"
+              });
             }
           } catch (aiError) {
             openAiUnavailable = true;
@@ -5753,13 +6949,22 @@ var require_upload_duplicate_guard = __commonJS({
         const accepted = returnAccepted();
         if (accepted) return accepted;
         if (receiptAmountsDisagree(candidates, requiredDate, !hasYandex)) {
-          const conflicting = candidates.find((candidate) => candidate && !candidate.combinedReceipt && candidate.receiptDate === requiredDate && isValidReceiptAmount(candidate.receiptAmount));
+          emitReceiptFieldTelemetry(logger, {
+            provider: "decision",
+            pass: "decision",
+            amount: null,
+            date: requiredDate,
+            source: "decision",
+            selectedAuthority: "control",
+            disagreement: true,
+            reasonCode: "amount_conflict"
+          });
           return withShadowEvidence({
             ok: false,
             reason: "🚫 СУММЫ ЧЕКА НЕ СОВПАЛИ — НУЖНА ПРОВЕРКА",
             receiptDate: requiredDate,
-            receiptAmount: conflicting && conflicting.receiptAmount,
-            receiptIdentity: conflicting ? extractReceiptIdentity(conflicting.text, conflicting.receiptDate, conflicting.receiptAmount) : void 0
+            receiptAmount: void 0,
+            receiptIdentity: extractReceiptIdentity(candidates.map((candidate) => String(candidate && candidate.text || "")).filter(Boolean).join("\n"), requiredDate, void 0)
           });
         }
         const correctDate = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate));
@@ -5767,8 +6972,8 @@ var require_upload_duplicate_guard = __commonJS({
           ok: false,
           reason: "🚫 СУММА ЧЕКА НЕ РАСПОЗНАНА",
           receiptDate: correctDate.receiptDate,
-          receiptAmount: correctDate.receiptAmount,
-          receiptIdentity: extractReceiptIdentity(correctDate.text, correctDate.receiptDate, correctDate.receiptAmount)
+          receiptAmount: void 0,
+          receiptIdentity: extractReceiptIdentity(correctDate.text, correctDate.receiptDate, void 0)
         });
         const dated = candidates.find((candidate) => candidate.receiptDate);
         if (dated) return returnDateMismatch(dated);
@@ -5782,6 +6987,15 @@ var require_upload_duplicate_guard = __commonJS({
         }
         if (logger) logger.warn(`Receipt date OCR failed: ${errorText}`);
         return withShadowEvidence({ ok: false, reason: "🚫 НЕ УДАЛОСЬ ПРОВЕРИТЬ ДАТУ ЧЕКА" });
+      }
+    }
+    async function validateReceiptDate(file, content, http, config, logger, retryAttempt = 0, validationContext, diagnostic) {
+      const replay = receiptReplayContext(validationContext);
+      if (!replay) productionReceiptExtractionActive += 1;
+      try {
+        return await validateReceiptDateCore(file, content, http, config, logger, retryAttempt, validationContext, diagnostic);
+      } finally {
+        if (!replay) productionReceiptExtractionActive = Math.max(0, productionReceiptExtractionActive - 1);
       }
     }
     const strictReceiptValidationCache = /* @__PURE__ */ new Map();
@@ -5801,7 +7015,7 @@ var require_upload_duplicate_guard = __commonJS({
         logReceiptStage(logger, stageContext, "strict_validation_done", strictStartedAt, result && result.ok ? "accepted" : "rejected");
         return result;
       }
-      const key = `${expectedReceiptDate(config)}:${exactHash(content)}`;
+      const key = `${expectedReceiptDate(config)}:${receiptVisionProviderCacheKey(config)}:${exactHash(content)}`;
       const cached = strictReceiptValidationCache.get(key);
       const cacheHit = Boolean(cached && Date.now() - cached.createdAt < 10 * 60 * 1e3);
       capturePersonalImageCacheTelemetry(diagnostic, "strict_cache", cacheHit);
@@ -6459,7 +7673,10 @@ var require_upload_duplicate_guard = __commonJS({
       const archiveText = entry.archiveKey && entry.archiveStatus === "stored" ? "\nАрхив: сохранено" : "";
       const warningText = entry.receiptWarning ? `\nПроверка: ${entry.receiptWarning}` : "";
       const text = `✅ ЧЕК ПРИНЯТ\nМастер: ${username}\nДата: ${dateText}\nСумма: ${amountText} ₽${warningText}${archiveText}`;
-      const builder = modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text);
+      const builder = attachReceiptResultToMessage(
+        modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text),
+        message.id
+      );
       const resultId = await modify.getCreator().finish(builder);
       entry.resultRoomId = room.id;
       entry.resultMessageId = resultId || "published";
@@ -6709,7 +7926,7 @@ var require_upload_duplicate_guard = __commonJS({
       await modify.getCreator().finish(modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("✅ ФОТО РАБОТЫ ПРИНЯТО"));
       return true;
     }
-    async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", processingStatusManager, personalImageDiagnostic) {
+    async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", processingStatusManager, personalImageDiagnostic, resultContext = {}) {
       if (await isKnownArchiveRoom(message && message.room, read)) return false;
       const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
       if (isTarsAppMessage(message, appUser)) return false;
@@ -7270,6 +8487,7 @@ var require_upload_duplicate_guard = __commonJS({
           const roomConfig = roomCache[indexName];
           return roomConfig && roomConfig.kind === "receipt" ? list.concat(acceptedByIndex[indexName] || []) : list;
         }, []);
+        resultContext.acceptedReceiptEntries = receiptEntries.slice();
         if (receiptEntries.length) {
           const refreshed = {};
           for (const entry of receiptEntries) {
@@ -7365,7 +8583,8 @@ var require_upload_duplicate_guard = __commonJS({
       }
       const processingStatusManager = createReceiptProcessingStatusManager(message, read, persistence, modify, logger, allowProcessingStatus);
       try {
-        const result = await rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent, processingStatusManager, personalImageDiagnostic);
+        const resultContext = {};
+        const result = await rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent, processingStatusManager, personalImageDiagnostic, resultContext);
         const handled = result === true || result === "processed";
         if (result === true) processingStatusManager.markAll("rejected_published", "ok");
         if (logger) logger.info(`MEDIA_V2_FINISH message=${String(message.id || "none")} handled=${handled} result=${String(result || "none")}`);
@@ -7379,7 +8598,7 @@ var require_upload_duplicate_guard = __commonJS({
           setPersonalImageFinalDiagnostic(personalImageDiagnostic, "unknown", finalReason, "final");
           emitPersonalImageClassificationDiagnostic(logger, personalImageDiagnostic);
         }
-        return { handled, status: handled ? "processed" : "unclassified", result };
+        return { handled, status: handled ? "processed" : "unclassified", result, acceptedReceiptEntries: resultContext.acceptedReceiptEntries || [] };
       } finally {
         await processingStatusManager.clearAll();
       }
@@ -7992,6 +9211,11 @@ var require_upload_duplicate_guard = __commonJS({
       processPersonalMediaV2,
       validateReceiptDate,
       validateReceiptStrict,
+      safeReceiptReplayResultV1,
+      receiptReplayAllowedUser,
+      resolveCanonicalReceiptReplayUpload,
+      runReceiptReplayV1,
+      resetReceiptReplayRuntimeForTests,
       receiptStageContext,
       createReceiptProcessingStatusManager,
       seedExistingPhotos,
@@ -8006,6 +9230,28 @@ var require_upload_duplicate_guard = __commonJS({
       IMAGE_CLASSIFICATION_MODEL,
       PRIMARY_IMAGE_VISION_MODEL,
       PRIMARY_IMAGE_VISION_SCHEMA,
+      RECEIPT_VISION_ENGINE_MIN_CONFIDENCE,
+      RECEIPT_VISION_ENGINE_SCHEMA,
+      RECEIPT_FIELD_FOCUS_SCHEMA,
+      YANDEX_AI_STUDIO_RESPONSES_URL,
+      YANDEX_AI_STUDIO_DEFAULT_MODEL,
+      normalizedYandexAiStudioModel,
+      receiptVisionProviderForConfig,
+      receiptVisionProviderConfigured,
+      receiptVisionProviderCacheKey,
+      receiptVisionImageInput,
+      parseReceiptVisionEngineV1,
+      receiptVisionAmountLabelSupportsTotal,
+      receiptVisionEngineIsAuthoritative,
+      receiptVisionEngineIsAuthoritativeNonReceipt,
+      requestOpenAiReceiptVisionEngineV1,
+      normalizeReceiptAmount,
+      receiptFieldFocusParserState,
+      receiptFieldFocusCandidateFromJson,
+      receiptFieldFocusCandidateFromEngineJson,
+      receiptFieldTelemetryPayload,
+      receiptVisionAuthorityDisagreement,
+      resolveReceiptVisionField,
       parseImageClassification,
       invalidImageClassification,
       requestOpenAiImageClassificationUncached,
@@ -8022,6 +9268,7 @@ var require_upload_duplicate_guard = __commonJS({
       primaryVisionDecisionForImage,
       primaryVisionDecisionForPersonalMessage,
       requestOpenAiWorkPhotoCheck,
+      requestOpenAiReceiptCheck,
       manualPhotoYandexSafetyCheck,
       shouldForwardConfirmedWorkPhoto,
       createPersonalImageClassificationDiagnostic,
@@ -8183,6 +9430,31 @@ var C = class extends j.App {
       public: false,
       i18nLabel: "yandex_ocr_folder_id_label",
       i18nDescription: "yandex_ocr_folder_id_description"
+    });
+    await e.settings.provideSetting({
+      id: "yandex_ai_studio_api_key",
+      type: z.SettingType.PASSWORD,
+      required: false,
+      public: false,
+      i18nLabel: "yandex_ai_studio_api_key_label",
+      i18nDescription: "yandex_ai_studio_api_key_description"
+    });
+    await e.settings.provideSetting({
+      id: "yandex_ai_studio_folder_id",
+      type: z.SettingType.STRING,
+      required: false,
+      public: false,
+      i18nLabel: "yandex_ai_studio_folder_id_label",
+      i18nDescription: "yandex_ai_studio_folder_id_description"
+    });
+    await e.settings.provideSetting({
+      id: "yandex_ai_studio_model",
+      type: z.SettingType.STRING,
+      packageValue: "qwen3.6-35b-a3b",
+      required: false,
+      public: false,
+      i18nLabel: "yandex_ai_studio_model_label",
+      i18nDescription: "yandex_ai_studio_model_description"
     });
     await e.settings.provideSetting({
       id: "openai_receipt_api_key",
@@ -8402,7 +9674,7 @@ var C = class extends j.App {
       id: "forward-pending-report-photos-now",
       processor: async (jobContext, read, modify, http, persistence) => this.forwardPendingReportPhotosJob(jobContext, read, modify, http, persistence)
     }]);
-    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.api.provideApi({
+    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.slashCommands.provideSlashCommand(new ReceiptReplayCommand(this)), e.api.provideApi({
       visibility: A.ApiVisibility.PUBLIC,
       security: A.ApiSecurity.UNSECURE,
       endpoints: [new S(this), new ReportFormEndpoint(this), new ReportFormScriptEndpoint(this)]
@@ -8731,14 +10003,19 @@ var C = class extends j.App {
       if (mediaV2.handled) {
         if (explicitPhotoIntent) await this.clearPhotoReportIntent(s, e.room);
         if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);
-        if (hasPersonalImageUpload && G.directFileIntent(e) !== "mailing") await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
+        if (hasPersonalImageUpload && G.directFileIntent(e) !== "mailing") {
+          const currentValidatedReceipts = Array.isArray(mediaV2.acceptedReceiptEntries) ? mediaV2.acceptedReceiptEntries : [];
+          const receiptAccepted = currentValidatedReceipts.length > 0 || await this.receiptWasAcceptedForMessage(n, e);
+          await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room, { refreshFinancialReport: receiptAccepted, currentValidatedReceipts });
+        }
         return;
       }
       if (hasPersonalImageUpload && !explicitPhotoIntent && !explicitMailingIntent && !explicitTransferIntent && !G.directFileIntent(e) && !await this.receiptWasAcceptedForMessage(n, e)) {
         await this.sendUnknownImageTypePrompt(n, r, e);
       }
       if (hasPersonalImageUpload && G.directFileIntent(e) !== "mailing") {
-        await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room);
+        const receiptAccepted = await this.receiptWasAcceptedForMessage(n, e);
+        await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room, { refreshFinancialReport: receiptAccepted });
       }
       if (G.isMasterTransferSumRequest(e) && await G.sendMasterTransferSummaryRequest(e, n, s, r, this.getLogger(), t, i)) return;
       if (G.isTodayTransferSumRequest(e)) await G.sendTodayTransferSummary(e, n, s, r, this.getLogger(), t, i);
@@ -8771,6 +10048,9 @@ var C = class extends j.App {
     const config = {
       apiKey: String(await n.getValueById("yandex_ocr_api_key") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       folderId: String(await n.getValueById("yandex_ocr_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
+      yandexAiStudioApiKey: String(await n.getValueById("yandex_ai_studio_api_key") || "").trim(),
+      yandexAiStudioFolderId: String(await n.getValueById("yandex_ai_studio_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
+      yandexAiStudioModel: G.normalizedYandexAiStudioModel(await n.getValueById("yandex_ai_studio_model")),
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
       openaiReceiptModel: String(await n.getValueById("openai_receipt_model") || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
       imageClassificationV1ShadowEnabled: imageClassificationV1ShadowEnabledSetting === true || String(imageClassificationV1ShadowEnabledSetting || "").toLowerCase() === "true",
@@ -8795,6 +10075,25 @@ var C = class extends j.App {
     this.workdayCutoffHour = G.effectiveWorkdayCutoffHour(config);
     this.workdayTimeZone = config.timeZone || "Europe/Astrakhan";
     return config;
+  }
+  async handleReceiptReplayCommand(read, http, sender, args = []) {
+    let config;
+    try {
+      config = await this.receiptOcrConfig(read);
+    } catch (_2) {
+      const unavailable = G.safeReceiptReplayResultV1({ replayOutcome: "provider_error", reasonCode: "provider_error", providerErrorCode: "other" });
+      this.getLogger().info(`RECEIPT_REPLAY_V1 ${JSON.stringify(unavailable)}`);
+      return unavailable;
+    }
+    const argumentsList = Array.isArray(args) ? args : [];
+    const uploadId = argumentsList.length === 1 ? argumentsList[0] : "";
+    const result = await G.runReceiptReplayV1(read, http, config, {
+      authorized: G.receiptReplayAllowedUser(sender, config),
+      uploadId
+    });
+    const safeResult = G.safeReceiptReplayResultV1(result);
+    this.getLogger().info(`RECEIPT_REPLAY_V1 ${JSON.stringify(safeResult)}`);
+    return safeResult;
   }
   async handleReceiptArchiveCommand(e, n, t, s, r, a = []) {
     if (!e || !n || !s || !r) return;
@@ -8922,6 +10221,11 @@ var C = class extends j.App {
             userName: entry.userName || "",
             nameCandidates: [targetUsername]
           }, { room: masterRoom }, e, t, n, config, this.getLogger(), true, [entry]);
+          await this.refreshPreliminaryReportAnalysis(e, t, n, r, masterRoom, {
+            refreshFinancialReport: true,
+            workday: targetDate,
+            currentValidatedReceipts: [entry]
+          });
         }
       } catch (error) {
         this.getLogger().warn(`Could not refresh master transfer summary after manual approval: ${error && error.message || error}`);
@@ -8977,6 +10281,11 @@ var C = class extends j.App {
             userName: entry.userName || "",
             nameCandidates: [entry.username || ""]
           }, { room: masterRoom }, e, t, n, config, this.getLogger(), true, [entry]);
+          await this.refreshPreliminaryReportAnalysis(e, t, n, a.user, masterRoom, {
+            refreshFinancialReport: true,
+            workday: targetDate,
+            currentValidatedReceipts: [entry]
+          });
         }
       } catch (error) {
         this.getLogger().warn(`Could not refresh master transfer summary after receipt button approval: ${error && error.message || error}`);
@@ -9165,6 +10474,8 @@ var C = class extends j.App {
     const config = await this.receiptOcrConfig(read);
     let statusMessageId = "";
     let outcome = "failed";
+    let receiptAcceptedForRefresh = false;
+    let currentValidatedReceiptsForRefresh = [];
     try {
       const diagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(sourceMessage));
       let primaryDecision;
@@ -9181,6 +10492,8 @@ var C = class extends j.App {
       if (routedType === "receipt") {
         const result = await G.processPersonalMediaV2(sourceMessage, read, persistence, modify, this.getLogger(), http, config, "receipt", true);
         outcome = result && result.handled ? "receipt-processed" : "not-receipt";
+        currentValidatedReceiptsForRefresh = result && Array.isArray(result.acceptedReceiptEntries) ? result.acceptedReceiptEntries : [];
+        receiptAcceptedForRefresh = currentValidatedReceiptsForRefresh.length > 0 || await this.receiptWasAcceptedForMessage(read, sourceMessage);
         if (!result || !result.handled) await this.publishManualImageSelectionText(read, modify, data.room, "⚠️ Это изображение не подтверждено как финансовый чек.");
       } else if (routedType === "photo") {
         statusMessageId = await this.publishManualImageSelectionText(read, modify, data.room, "⏳ Обрабатываю фото…");
@@ -9225,7 +10538,7 @@ var C = class extends j.App {
         }
       }
       try {
-        await this.refreshPreliminaryReportAnalysis(read, persistence, modify, sourceMessage.sender, sourceMessage.room);
+        await this.refreshPreliminaryReportAnalysis(read, persistence, modify, sourceMessage.sender, sourceMessage.room, { refreshFinancialReport: receiptAcceptedForRefresh, currentValidatedReceipts: currentValidatedReceiptsForRefresh });
       } catch (error) {
         this.getLogger().warn(`Could not refresh report after manual image selection: ${error && error.message || error}`);
       }
@@ -9924,26 +11237,34 @@ var C = class extends j.App {
       this.getLogger().warn(`Could not delete preliminary report analysis ${t}: ${s && s.message || s}`);
     }
   }
-  async refreshPreliminaryReportAnalysis(n, s, r, t, a) {
+  async refreshPreliminaryReportAnalysis(n, s, r, t, a, options = {}) {
     if (!n || !s || !r || !t || !t.id || !a || !this.isPersonalReportRoom(a)) return;
-    const o = this.reportWorkday(), c = ["male", "female", "brow", "manicure"];
+    const reportOwner = await this.masterUserForPersonalReportRoom(n, a, t);
+    if (!reportOwner || !reportOwner.id) return;
+    const requestedWorkday = String(options && options.workday || ""), o = /^\d{4}-\d{2}-\d{2}$/.test(requestedWorkday) ? requestedWorkday : this.reportWorkday(), refreshFinancialReport = options && options.refreshFinancialReport === true, c = ["male", "female", "brow", "manicure"];
     for (const d of c) {
-      const m = this.reportAssociation(t.id, d, o), u = await n.getPersistenceReader().readByAssociation(m), I = (u || []).filter((P) => P && P.userId === t.id && P.reportType === d && P.workday === o && P.formData).sort((P, x) => Number(x.updatedAt || 0) - Number(P.updatedAt || 0))[0];
+      const m = this.reportAssociation(reportOwner.id, d, o), u = await n.getPersistenceReader().readByAssociation(m), I = (u || []).filter((P) => P && P.userId === reportOwner.id && P.reportType === d && P.workday === o && P.formData).sort((P, x) => Number(x.updatedAt || 0) - Number(P.updatedAt || 0))[0];
       if (!I || !I.formData) continue;
       const f = this.parseSubmittedReport(I.formData, d);
       if (!f) continue;
-      const dueAt = this.reportFinalDueAt(Number(I.firstSubmittedAt || I.updatedAt || Date.now()), o);
-      if (Date.now() >= dueAt) {
-        await this.deletePreliminaryReportAnalysis(r, n, I.preliminaryMessageId || "");
-        await s.removeByAssociation(m);
-        await s.createWithAssociation({ ...I, preliminaryMessageId: "", updatedAt: Date.now() }, m);
-        return;
+      const h = await this.receiptOcrConfig(n), currentValidatedReceipts = options && Array.isArray(options.currentValidatedReceipts) ? options.currentValidatedReceipts : void 0, O = await G.confirmedTransferSummaryForUser(n, h, reportOwner.id, o, void 0, currentValidatedReceipts, a.id), B = await this.mailingProofStatus(n, reportOwner, o), L = await this.reportPhotoStatus(n, reportOwner, o), w = this.payrollRule(d, f.rows, f.mailings, B), dueAt = this.reportFinalDueAt(Number(I.firstSubmittedAt || I.updatedAt || Date.now()), o);
+      let messageId = I.messageId || "", ownerSummaryMessageId = I.ownerSummaryMessageId || "", preliminaryMessageId = I.preliminaryMessageId || "";
+      if (refreshFinancialReport) {
+        const timeCorrection = I.timeCorrection || this.reportTimeCorrection(I.firstSubmittedAt || I.updatedAt || Date.now(), I.scheduleStatus || null), penalties = await this.latenessSummary(n, reportOwner.id, o);
+        messageId = await this.sendReport(r, a, reportOwner, f.rows, f.cash, f.transfers, d, messageId, O, reportOwner, f.mailings, B, timeCorrection, penalties, true);
+        ownerSummaryMessageId = await this.sendOwnerShortReport(r, n, reportOwner, f.rows, f.cash, f.transfers, d, ownerSummaryMessageId, O, f.mailings, B, timeCorrection, penalties, true, o);
       }
-      const h = await this.receiptOcrConfig(n), O = await G.confirmedTransferSummaryForUser(n, h, t.id, o, void 0, void 0, a.id), B = await this.mailingProofStatus(n, t, o), L = await this.reportPhotoStatus(n, t, o), w = this.payrollRule(d, f.rows, f.mailings, B), E = await this.sendPreliminaryReportAnalysis(r, n, a, t, O, L, B, w, I.preliminaryMessageId || "", true);
+      if (Date.now() >= dueAt) {
+        await this.deletePreliminaryReportAnalysis(r, n, preliminaryMessageId);
+        preliminaryMessageId = "";
+      } else {
+        preliminaryMessageId = await this.sendPreliminaryReportAnalysis(r, n, a, reportOwner, O, L, B, w, preliminaryMessageId, true) || "";
+      }
       await s.removeByAssociation(m);
-      await s.createWithAssociation({ ...I, preliminaryMessageId: E || "", updatedAt: Date.now() }, m);
-      return;
+      await s.createWithAssociation({ ...I, roomId: a.id, sourceRoomId: a.id, messageId, ownerSummaryMessageId, preliminaryMessageId, updatedAt: Date.now() }, m);
+      return true;
     }
+    return false;
   }
   async sendQueuedReportReminder(e, n, t, s = Date.now()) {
     if (!e || !n || !t || !t.userId || !t.reportType || !t.workday) return t;
@@ -12436,6 +13757,14 @@ var LatenessCommand = class {
   }
   async executor(e, n, t, s, r) {
     await this.app.handleLatenessCommand(n, t, r, e.getRoom(), e.getSender(), e.getArguments());
+  }
+};
+var ReceiptReplayCommand = class {
+  constructor(e) {
+    this.app = e, this.command = "receipt-replay", this.i18nParamsExample = "receipt_replay_command_params", this.i18nDescription = "receipt_replay_command_description", this.providesPreview = false;
+  }
+  async executor(e, n, t, s, r) {
+    return this.app.handleReceiptReplayCommand(n, s, e.getSender(), e.getArguments());
   }
 };
 /*! Bundled license information:

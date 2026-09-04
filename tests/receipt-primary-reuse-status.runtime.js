@@ -8,9 +8,11 @@ function associationKey(association) {
 }
 
 function openAiPass(options) {
+  const format = options && options.data && options.data.text && options.data.text.format;
+  if (format && format.name === "receipt_vision_engine_v1") return "vision-engine";
   const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
   if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ")) return "date-focus";
-  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:")) return "amount-focus";
+  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ")) return "amount-focus";
   return "primary";
 }
 
@@ -38,6 +40,19 @@ function receiptPayload(date) {
   };
 }
 
+function focusedPayload(date) {
+  return {
+    date,
+    time: null,
+    amount: 1200,
+    amount_text: "1200 RUB",
+    amount_label: "amount",
+    currency: "RUB",
+    confidence: 0.98,
+    ambiguity_reason: null
+  };
+}
+
 function provider(config, calls) {
   const requiredDate = config.requiredDate;
   return {
@@ -45,7 +60,21 @@ function provider(config, calls) {
       assert(String(url).includes("api.openai.com"), `unexpected provider URL: ${url}`);
       const pass = openAiPass(options);
       calls.push(pass);
-      return { statusCode: 200, data: { output_text: JSON.stringify(receiptPayload(requiredDate)) } };
+      if (pass === "vision-engine") {
+        return { statusCode: 200, data: { output_text: JSON.stringify({
+          is_receipt: true,
+          bank_or_provider: null,
+          operation_date: null,
+          operation_time: null,
+          amount: null,
+          currency: "unknown",
+          status: "unknown",
+          amount_label: null,
+          confidence: 0,
+          ambiguity_reason: "legacy regression scenario"
+        }) } };
+      }
+      return { statusCode: 200, data: { output_text: JSON.stringify(pass === "date-focus" || pass === "amount-focus" ? focusedPayload(requiredDate) : receiptPayload(requiredDate)) } };
     }
   };
 }
@@ -68,7 +97,7 @@ async function verifyPrimaryReuse(guard) {
   const reusedContext = guard.receiptStageContext(reusedFile, reusedContent, config);
   const reusedResult = await guard.validateReceiptDate(reusedFile, reusedContent, provider(config, reusedCalls), config, logger, 0, reusedContext);
   assert.strictEqual(reusedResult.ok, true);
-  assert.deepStrictEqual(reusedCalls, ["primary", "amount-focus"], "classification primary must be reused and amount-focus must remain mandatory");
+  assert.deepStrictEqual(reusedCalls, ["primary", "vision-engine", "amount-focus"], "classification primary must be reused and amount-focus must remain mandatory when semantic Vision is inconclusive");
 
   const fallbackCalls = [];
   const fallbackFile = { _id: "fallback-upload", id: "fallback-upload", name: "receipt.jpg", type: "image/jpeg" };
@@ -80,7 +109,7 @@ async function verifyPrimaryReuse(guard) {
     logger
   );
   assert.strictEqual(fallbackResult.ok, true);
-  assert.deepStrictEqual(fallbackCalls, ["primary", "amount-focus"], "missing reusable evidence must retain the old provider path");
+  assert.deepStrictEqual(fallbackCalls, ["vision-engine", "primary", "amount-focus"], "missing reusable evidence must retain the old provider path");
 
   const mismatchCalls = [];
   const sourceFile = { _id: "source-upload", id: "source-upload", name: "receipt.jpg", type: "image/jpeg" };
@@ -90,7 +119,7 @@ async function verifyPrimaryReuse(guard) {
   const sourceContext = guard.receiptStageContext(sourceFile, mismatchContent, config);
   const mismatchResult = await guard.validateReceiptDate(targetFile, mismatchContent, provider(config, mismatchCalls), config, logger, 0, sourceContext);
   assert.strictEqual(mismatchResult.ok, true);
-  assert.deepStrictEqual(mismatchCalls, ["primary", "primary", "amount-focus"], "evidence from another upload must never be reused");
+  assert.deepStrictEqual(mismatchCalls, ["primary", "vision-engine", "primary", "amount-focus"], "evidence from another upload must never be reused");
 }
 
 async function verifyStatusIdempotency(guard) {

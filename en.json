@@ -6,6 +6,12 @@
     "yandex_ocr_api_key_description": "Key used to recognize receipt dates",
     "yandex_ocr_folder_id_label": "Yandex Cloud folder ID",
     "yandex_ocr_folder_id_description": "Folder identifier used by Yandex OCR",
+    "yandex_ai_studio_api_key_label": "Yandex AI Studio API key",
+    "yandex_ai_studio_api_key_description": "Private API key for image classification and receipt Vision. When both this key and the AI Studio folder ID are set, AI Studio is used instead of OpenAI",
+    "yandex_ai_studio_folder_id_label": "Yandex AI Studio folder ID",
+    "yandex_ai_studio_folder_id_description": "Folder that owns the AI Studio model and API key",
+    "yandex_ai_studio_model_label": "Yandex AI Studio Vision model",
+    "yandex_ai_studio_model_description": "Model ID without the folder prefix. Default: qwen3.6-35b-a3b",
     "openai_receipt_api_key_label": "OpenAI API key for receipt checks",
     "openai_receipt_api_key_description": "Optional. Used together with Yandex OCR as a second layer for receipt date, amount, status, and readable text checks",
     "openai_receipt_model_label": "OpenAI receipt check model",
@@ -55,5 +61,7 @@
     "lateness_command_params": "@username minutes [DD.MM.YYYY]",
     "lateness_command_description": "Record a master's lateness and payroll penalty",
     "approve_receipt_command_params": "@username amount [DD.MM.YYYY]",
-    "approve_receipt_command_description": "Manually approve a rejected receipt (e.g. one stuck in \"processing\" status); owner and Shura only"
+    "approve_receipt_command_description": "Manually approve a rejected receipt (e.g. one stuck in \"processing\" status); owner and Shura only",
+    "receipt_replay_command_params": "<uploadId>",
+    "receipt_replay_command_description": "Read-only receipt extraction replay for an existing canonical upload; owner/admin only"
 }

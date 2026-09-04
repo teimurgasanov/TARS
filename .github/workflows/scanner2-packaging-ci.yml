@@ -28,6 +28,9 @@ on:
       - fix/receipt-openai-unavailable-fallback
       - fix/receipt-openai-runtime-fallback
       - feature/tars-maximum-vision
+      - feature/yandex-ai-studio-vision-provider
+      - integration/receipt-extraction-fixes-current-develop
+      - fix/receipt-late-report-reconciliation
   pull_request:
   workflow_dispatch:
 
@@ -93,6 +96,12 @@ jobs:
       || github.base_ref == 'fix/receipt-openai-runtime-fallback'
       || github.head_ref == 'feature/tars-maximum-vision'
       || github.base_ref == 'feature/tars-maximum-vision'
+      || github.head_ref == 'feature/yandex-ai-studio-vision-provider'
+      || github.base_ref == 'feature/yandex-ai-studio-vision-provider'
+      || github.head_ref == 'integration/receipt-extraction-fixes-current-develop'
+      || github.base_ref == 'integration/receipt-extraction-fixes-current-develop'
+      || github.head_ref == 'fix/receipt-late-report-reconciliation'
+      || github.base_ref == 'fix/receipt-late-report-reconciliation'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -142,6 +151,9 @@ jobs:
           node --check tools/verify-tars-bundle.js
           node --check tests/scanner2-packaging.test.js
           node --check tests/image-classification-v1-runtime-shadow.test.js
+          node --check tests/receipt-vision-engine-v1.test.js
+          node --check tests/receipt-extraction-fixes-v1.test.js
+          node --check tests/receipt-replay-v1.test.js
           git diff --check
 
       - name: Run Scanner 2.0 tests
@@ -169,6 +181,21 @@ jobs:
           node tests/image-classification-v1-runtime-shadow.test.js
           echo "IMAGE_CLASSIFICATION_V1_TEST_COUNT=2" >> "$GITHUB_ENV"
 
+      - name: Run Yandex AI Studio provider tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/yandex-ai-studio-vision-provider.test.js
+
+      - name: Run Receipt Vision Engine V1 tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/receipt-vision-engine-v1.test.js
+          node tests/receipt-extraction-fixes-v1.test.js
+          node tests/receipt-replay-v1.test.js
+          echo "RECEIPT_VISION_ENGINE_V1_TEST_COUNT=3" >> "$GITHUB_ENV"
+
       - name: Run 78 legacy TARS tests
         shell: bash
         run: |
@@ -178,7 +205,7 @@ jobs:
             echo "==> $test_file"
             node "$test_file"
             legacy_count=$((legacy_count + 1))
-          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' | sort)
+          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' ! -name 'yandex-ai-studio-vision-provider.test.js' ! -name 'receipt-vision-engine-v1.test.js' ! -name 'receipt-extraction-fixes-v1.test.js' ! -name 'receipt-replay-v1.test.js' | sort)
           test "$legacy_count" -eq 78
           echo "LEGACY_TEST_COUNT=$legacy_count" >> "$GITHUB_ENV"
 
