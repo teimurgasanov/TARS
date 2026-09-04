@@ -5700,6 +5700,18 @@ var require_upload_duplicate_guard = __commonJS({
         const amount = normalizeReceiptAmount(value);
         return amount !== void 0 && amount > 0 ? amount : void 0;
       };
+      // A bank's explicit total line is stronger evidence than nearby numbers.
+      // Resolve it before the broad context scorer so a commission, balance,
+      // card suffix or OCR outlier cannot outrank `Итого 600 ₽` merely because
+      // it appears in the same context window.
+      const totalLineSource = raw.replace(/[\t ]+/g, " ");
+      const explicitTotalPattern = new RegExp(
+        "(?:^|\\n)\\s*(?:итого(?:\\s+к\\s+оплате)?|итог(?:овая\\s+сумма)?)\\s*(?:[:=—–-]\\s*)?(?:\\n\\s*)?" + number + "\\s*" + currency + amountBoundary,
+        "im"
+      );
+      const explicitTotalMatch = explicitTotalPattern.exec(totalLineSource);
+      const explicitTotalAmount = explicitTotalMatch ? cleanAmount(explicitTotalMatch[1]) : void 0;
+      if (explicitTotalAmount !== void 0 && explicitTotalAmount <= 5e5) return explicitTotalAmount;
       const scoreAmountContext = (context) => {
         const lower = String(context || "").toLowerCase().replace(/ё/g, "е");
         let score = 0;
@@ -6014,6 +6026,353 @@ var require_upload_duplicate_guard = __commonJS({
         status,
         qualitySignal: evidenceCount / 4
       };
+    }
+    const RECEIPT_VERIFICATION_V2_SCHEMA_VERSION = "receipt-verification-v2-shadow-v1";
+    const RECEIPT_VERIFICATION_V2_NAMESPACE = "receipt-verification-v2-shadow:v1";
+    const RECEIPT_VERIFICATION_V2_RETENTION_DAYS = 30;
+    const RECEIPT_VERIFICATION_V2_MAX_RECORDS = 5e3;
+    const RECEIPT_VERIFICATION_V2_MAX_DELETES = 32;
+    const RECEIPT_VERIFICATION_V2_MAX_PENDING = 4;
+    const RECEIPT_VERIFICATION_V2_CACHE_TTL_MS = 10 * 60 * 1e3;
+    const RECEIPT_VERIFICATION_V2_CACHE_MAX = 200;
+    const RECEIPT_VERIFICATION_V2_OUTCOMES = ["ACCEPT", "REJECT", "CONTROL"];
+    const RECEIPT_VERIFICATION_V2_REASON_CODES = [
+      "fields_confirmed",
+      "focused_confirms_qwen",
+      "focused_confirms_ocr",
+      "focused_unresolved",
+      "qwen_missing",
+      "qwen_invalid",
+      "qwen_low_confidence",
+      "qwen_not_receipt",
+      "ocr_evidence_missing",
+      "date_and_amount_disagreement",
+      "status_disagreement",
+      "wrong_date",
+      "operation_failed",
+      "operation_pending",
+      "duplicate",
+      "provider_error",
+      "persistence_error"
+    ];
+    const receiptVerificationV2EvidenceCache = /* @__PURE__ */ new Map();
+    function receiptVerificationV2Date(value) {
+      const date = String(value || "");
+      return /^20\d{2}-\d{2}-\d{2}$/.test(date) && normalizedDate(date.slice(0, 4), date.slice(5, 7), date.slice(8, 10)) === date ? date : null;
+    }
+    function receiptVerificationV2Time(value) {
+      const time = String(value || "");
+      return /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(time) ? time : null;
+    }
+    function receiptVerificationV2Amount(value) {
+      const amount = value && typeof value === "object" && Number.isSafeInteger(value.minorUnits) ? value.minorUnits / 100 : Number(value);
+      return isValidReceiptAmount(amount) ? Number(amount) : null;
+    }
+    function receiptVerificationV2Status(value) {
+      const status = String(value || "").toLowerCase();
+      return ["success", "failed", "pending"].indexOf(status) !== -1 ? status : "unknown";
+    }
+    function receiptVerificationV2ProductionOutcome(value) {
+      const outcome = String(value || "").toUpperCase();
+      return RECEIPT_VERIFICATION_V2_OUTCOMES.indexOf(outcome) !== -1 ? outcome : "CONTROL";
+    }
+    function receiptVerificationV2Unique(values, equal = (left, right) => left === right) {
+      const unique = [];
+      for (const value of values) {
+        if (value === null || value === void 0 || unique.some((existing) => equal(existing, value))) continue;
+        unique.push(value);
+      }
+      return unique;
+    }
+    function receiptVerificationV2SafeEvidence(value) {
+      const source = value && typeof value === "object" ? value : {};
+      return {
+        passType: ["receipt_vision_engine_v1", "receipt_vision_engine_fields", "date_focus", "amount_focus", "page", "page-column-sort", "table", "markdown"].indexOf(String(source.passType || "")) !== -1 ? String(source.passType) : "unknown",
+        provider: ["yandex_ai_studio", "yandex_ocr"].indexOf(String(source.provider || "")) !== -1 ? String(source.provider) : "unknown",
+        isReceipt: source.isReceipt === true,
+        date: receiptVerificationV2Date(source.date),
+        time: receiptVerificationV2Time(source.time),
+        amount: receiptVerificationV2Amount(source.amount),
+        status: receiptVerificationV2Status(source.status),
+        confidence: Number.isFinite(Number(source.confidence)) && Number(source.confidence) >= 0 && Number(source.confidence) <= 1 ? Number(source.confidence) : null
+      };
+    }
+    function receiptVerificationV2EvidenceFromCandidate(candidate, passType) {
+      return receiptVerificationV2SafeEvidence({
+        passType,
+        provider: ["yandex_ai_studio", "openai", "yandex_ocr"].indexOf(String(candidate && candidate.receiptProvider || "")) !== -1 ? String(candidate.receiptProvider) : /^yandex:/.test(String(candidate && candidate.receiptAmountSource || "")) ? "yandex_ocr" : "unknown",
+        isReceipt: candidate && candidate.aiReceipt === true && /"is_receipt"\s*:\s*true/i.test(String(candidate.text || "")),
+        date: candidate && candidate.receiptDate,
+        time: candidate && candidate.receiptTime,
+        amount: candidate && candidate.receiptAmount,
+        status: shadowOperationStatus(candidate),
+        confidence: candidate && candidate.receiptConfidence
+      });
+    }
+    function captureReceiptVerificationV2Evidence(content, candidate, passType) {
+      if (!content || !content.length || !candidate) return;
+      const observation = receiptVerificationV2EvidenceFromCandidate(candidate, passType);
+      if (observation.provider !== "yandex_ai_studio" && observation.provider !== "yandex_ocr") return;
+      const key = exactHash(content);
+      const existing = receiptVerificationV2EvidenceCache.get(key);
+      const record = existing && Date.now() - existing.capturedAt < RECEIPT_VERIFICATION_V2_CACHE_TTL_MS ? existing : { capturedAt: Date.now(), legacyVisionResults: [], legacyOcrResults: [] };
+      const target = observation.provider === "yandex_ocr" ? record.legacyOcrResults : record.legacyVisionResults;
+      target.push(observation);
+      if (target.length > 8) target.shift();
+      record.capturedAt = Date.now();
+      receiptVerificationV2EvidenceCache.set(key, record);
+      if (receiptVerificationV2EvidenceCache.size > RECEIPT_VERIFICATION_V2_CACHE_MAX) receiptVerificationV2EvidenceCache.delete(receiptVerificationV2EvidenceCache.keys().next().value);
+    }
+    function receiptVerificationV2CapturedEvidence(content) {
+      if (!content || !content.length) return { legacyVisionResults: [], legacyOcrResults: [] };
+      const cached = receiptVerificationV2EvidenceCache.get(exactHash(content));
+      if (!cached || Date.now() - cached.capturedAt >= RECEIPT_VERIFICATION_V2_CACHE_TTL_MS) return { legacyVisionResults: [], legacyOcrResults: [] };
+      return {
+        legacyVisionResults: cached.legacyVisionResults.slice(),
+        legacyOcrResults: cached.legacyOcrResults.slice()
+      };
+    }
+    function receiptVerificationV2Evidence(input) {
+      const source = input && typeof input === "object" ? input : {};
+      const vision = Array.isArray(source.legacyVisionResults) ? source.legacyVisionResults.slice(0, 8).map(receiptVerificationV2SafeEvidence) : [];
+      const ocr = Array.isArray(source.legacyOcrResults) ? source.legacyOcrResults.slice(0, 8).map(receiptVerificationV2SafeEvidence) : [];
+      const qwen = vision.find((item) => item.provider === "yandex_ai_studio" && (item.passType === "receipt_vision_engine_v1" || item.passType === "receipt_vision_engine_fields")) || null;
+      return { qwen, vision, ocr };
+    }
+    function receiptVerificationV2TargetedEvidence(evidence, field) {
+      const passType = field === "date" ? "date_focus" : "amount_focus";
+      return (evidence && Array.isArray(evidence.vision) ? evidence.vision : []).find((item) => item.provider === "yandex_ai_studio" && item.passType === passType) || null;
+    }
+    function receiptVerificationV2Result(input) {
+      const source = input && typeof input === "object" ? input : {};
+      const outcome = receiptVerificationV2ProductionOutcome(source.outcome);
+      const reasonCode = RECEIPT_VERIFICATION_V2_REASON_CODES.indexOf(String(source.reasonCode || "")) !== -1 ? String(source.reasonCode) : "qwen_invalid";
+      return Object.freeze({
+        outcome,
+        amount: receiptVerificationV2Amount(source.amount),
+        date: receiptVerificationV2Date(source.date),
+        time: receiptVerificationV2Time(source.time),
+        status: receiptVerificationV2Status(source.status),
+        selectedAuthority: ["qwen_verified", "qwen_targeted", "ocr_targeted", "control", "strict_rules"].indexOf(String(source.selectedAuthority || "")) !== -1 ? String(source.selectedAuthority) : "control",
+        reasonCode,
+        disagreement: Object.freeze({
+          amount: source.disagreement && source.disagreement.amount === true,
+          date: source.disagreement && source.disagreement.date === true,
+          status: source.disagreement && source.disagreement.status === true
+        }),
+        targeted: source.targeted && typeof source.targeted === "object" ? Object.freeze({
+          field: source.targeted.field === "date" ? "date" : "amount",
+          amount: receiptVerificationV2Amount(source.targeted.amount),
+          date: receiptVerificationV2Date(source.targeted.date),
+          confidence: Number.isFinite(Number(source.targeted.confidence)) && Number(source.targeted.confidence) >= 0 && Number(source.targeted.confidence) <= 1 ? Number(source.targeted.confidence) : null,
+          resolved: source.targeted.resolved === true
+        }) : null,
+        targetedCallCount: source.targetedCallCount === 1 ? 1 : 0
+      });
+    }
+    async function evaluateReceiptVerificationV2(input) {
+      const source = input && typeof input === "object" ? input : {};
+      const evidence = receiptVerificationV2Evidence(source.evidence);
+      const qwen = evidence.qwen;
+      const control = (reasonCode, disagreement, targeted, targetedCallCount = 0) => receiptVerificationV2Result({
+        outcome: "CONTROL",
+        amount: qwen && qwen.amount,
+        date: qwen && qwen.date,
+        time: qwen && qwen.time,
+        status: qwen && qwen.status,
+        selectedAuthority: "control",
+        reasonCode,
+        disagreement,
+        targeted,
+        targetedCallCount
+      });
+      if (!qwen) return control("qwen_missing");
+      if (!qwen.isReceipt) return control("qwen_not_receipt");
+      if (qwen.confidence === null || qwen.confidence < RECEIPT_VISION_ENGINE_MIN_CONFIDENCE) return control("qwen_low_confidence");
+      if (!qwen.date || qwen.amount === null || qwen.status === "unknown") return control("qwen_invalid");
+      const ocrDates = receiptVerificationV2Unique(evidence.ocr.map((item) => item.date));
+      const ocrAmounts = receiptVerificationV2Unique(evidence.ocr.map((item) => item.amount), sameReceiptAmount);
+      const ocrStatuses = receiptVerificationV2Unique(evidence.ocr.map((item) => item.status).filter((status) => status !== "unknown"));
+      if (!ocrDates.length || !ocrAmounts.length || !ocrStatuses.length) return control("ocr_evidence_missing");
+      const disagreement = {
+        date: ocrDates.some((date) => date !== qwen.date),
+        amount: ocrAmounts.some((amount) => !sameReceiptAmount(amount, qwen.amount)),
+        status: ocrStatuses.some((status) => status !== qwen.status)
+      };
+      if (disagreement.status) return control("status_disagreement", disagreement);
+      if (disagreement.date && disagreement.amount) return control("date_and_amount_disagreement", disagreement);
+      let amount = qwen.amount;
+      let date = qwen.date;
+      let selectedAuthority = "qwen_verified";
+      let reasonCode = "fields_confirmed";
+      let targeted = null;
+      let targetedCallCount = 0;
+      if (disagreement.date || disagreement.amount) {
+        const field = disagreement.date ? "date" : "amount";
+        let focused = receiptVerificationV2TargetedEvidence(evidence, field);
+        if (!focused && typeof source.targetedPass === "function") {
+          targetedCallCount = 1;
+          try {
+            focused = receiptVerificationV2SafeEvidence(await source.targetedPass(field));
+          } catch (_error) {
+            focused = null;
+          }
+        }
+        const focusedValue = field === "date" ? focused && focused.date : focused && focused.amount;
+        const resolution = resolveReceiptVisionField(field === "date" ? qwen.date : qwen.amount, field === "date" ? ocrDates : ocrAmounts, focusedValue, field === "amount" ? sameReceiptAmount : void 0);
+        targeted = {
+          field,
+          amount: field === "amount" && focused ? focused.amount : null,
+          date: field === "date" && focused ? focused.date : null,
+          confidence: focused && focused.confidence,
+          resolved: resolution.resolved
+        };
+        if (!resolution.resolved) return control("focused_unresolved", disagreement, targeted, targetedCallCount);
+        if (field === "date") date = resolution.value;
+        else amount = resolution.value;
+        selectedAuthority = resolution.selectedAuthority === "ocr_confirmed" ? "ocr_targeted" : "qwen_targeted";
+        reasonCode = resolution.reasonCode;
+      }
+      const requiredDate = receiptVerificationV2Date(source.requiredDate);
+      if (!requiredDate || date !== requiredDate) return receiptVerificationV2Result({ outcome: "REJECT", amount, date, time: qwen.time, status: qwen.status, selectedAuthority: "strict_rules", reasonCode: "wrong_date", disagreement, targeted, targetedCallCount });
+      if (qwen.status === "failed") return receiptVerificationV2Result({ outcome: "REJECT", amount, date, time: qwen.time, status: qwen.status, selectedAuthority: "strict_rules", reasonCode: "operation_failed", disagreement, targeted, targetedCallCount });
+      if (qwen.status === "pending") return receiptVerificationV2Result({ outcome: "REJECT", amount, date, time: qwen.time, status: qwen.status, selectedAuthority: "strict_rules", reasonCode: "operation_pending", disagreement, targeted, targetedCallCount });
+      if (source.duplicateSnapshot === true) return receiptVerificationV2Result({ outcome: "REJECT", amount, date, time: qwen.time, status: qwen.status, selectedAuthority: "strict_rules", reasonCode: "duplicate", disagreement, targeted, targetedCallCount });
+      return receiptVerificationV2Result({ outcome: "ACCEPT", amount, date, time: qwen.time, status: qwen.status, selectedAuthority, reasonCode, disagreement, targeted, targetedCallCount });
+    }
+    function receiptVerificationV2CaseId(content) {
+      if (!content || !content.length) return "";
+      return `rv2-${sha256Bytes(utf8Bytes(`${RECEIPT_VERIFICATION_V2_NAMESPACE}:${exactHash(content)}`)).slice(0, 48)}`;
+    }
+    function sanitizeReceiptVerificationV2Observation(input) {
+      const source = input && typeof input === "object" ? input : {};
+      const result = receiptVerificationV2Result(source.result);
+      const qwen = receiptVerificationV2SafeEvidence(source.qwen);
+      const safeAmounts = receiptVerificationV2Unique(Array.isArray(source.ocrAmounts) ? source.ocrAmounts.map(receiptVerificationV2Amount) : [], sameReceiptAmount).slice(0, 8);
+      const safeDates = receiptVerificationV2Unique(Array.isArray(source.ocrDates) ? source.ocrDates.map(receiptVerificationV2Date) : []).slice(0, 8);
+      const safeStatuses = receiptVerificationV2Unique(Array.isArray(source.ocrStatuses) ? source.ocrStatuses.map(receiptVerificationV2Status).filter((status) => status !== "unknown") : []).slice(0, 4);
+      const productionOutcome = receiptVerificationV2ProductionOutcome(source.productionOutcome);
+      return Object.freeze({
+        schema_version: RECEIPT_VERIFICATION_V2_SCHEMA_VERSION,
+        captured_at: Number.isSafeInteger(source.capturedAt) && source.capturedAt >= 0 ? source.capturedAt : Date.now(),
+        case_id: /^rv2-[a-f0-9]{48}$/.test(String(source.caseId || "")) ? String(source.caseId) : "",
+        production_outcome: productionOutcome,
+        v2_outcome: result.outcome,
+        qwen: Object.freeze({ amount: qwen.amount, date: qwen.date, status: qwen.status, confidence: qwen.confidence }),
+        ocr_candidates: Object.freeze({ amounts: Object.freeze(safeAmounts), dates: Object.freeze(safeDates), statuses: Object.freeze(safeStatuses) }),
+        disagreement: result.disagreement,
+        targeted_result: result.targeted,
+        selected_authority: result.selectedAuthority,
+        reason_code: result.reasonCode,
+        agreement: productionOutcome === result.outcome,
+        production_disagreement: productionOutcome !== result.outcome
+      });
+    }
+    function receiptVerificationV2Association(caseId) {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `${RECEIPT_VERIFICATION_V2_NAMESPACE}:${caseId}`);
+    }
+    function receiptVerificationV2IndexAssociation() {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `${RECEIPT_VERIFICATION_V2_NAMESPACE}:index`);
+    }
+    async function recordReceiptVerificationV2Observation(observation, read, persistence, options = {}) {
+      try {
+        if (!observation || !/^rv2-[a-f0-9]{48}$/.test(String(observation.case_id || "")) || !read || !persistence) return false;
+        const retentionDays = Number.isSafeInteger(options.retentionDays) && options.retentionDays > 0 ? options.retentionDays : RECEIPT_VERIFICATION_V2_RETENTION_DAYS;
+        const maxRecords = Number.isSafeInteger(options.maxRecords) && options.maxRecords > 0 ? options.maxRecords : RECEIPT_VERIFICATION_V2_MAX_RECORDS;
+        const maxDeletes = Number.isSafeInteger(options.maxDeletes) && options.maxDeletes > 0 ? options.maxDeletes : RECEIPT_VERIFICATION_V2_MAX_DELETES;
+        await persistence.updateByAssociation(receiptVerificationV2Association(observation.case_id), observation, true);
+        const indexAssociation = receiptVerificationV2IndexAssociation();
+        const records = await read.getPersistenceReader().readByAssociation(indexAssociation);
+        const entries = Array.isArray(records) && records[0] && Array.isArray(records[0].entries) ? records[0].entries : [];
+        const byCase = /* @__PURE__ */ new Map();
+        for (const entry of entries) {
+          if (!entry || !/^rv2-[a-f0-9]{48}$/.test(String(entry.case_id || "")) || !Number.isSafeInteger(entry.captured_at)) continue;
+          const previous = byCase.get(entry.case_id);
+          if (!previous || entry.captured_at > previous.captured_at) byCase.set(entry.case_id, { case_id: entry.case_id, captured_at: entry.captured_at });
+        }
+        byCase.set(observation.case_id, { case_id: observation.case_id, captured_at: observation.captured_at });
+        const cutoff = observation.captured_at - retentionDays * 24 * 60 * 60 * 1e3;
+        const ordered = Array.from(byCase.values()).sort((left, right) => right.captured_at - left.captured_at || left.case_id.localeCompare(right.case_id));
+        const active = ordered.filter((entry) => entry.captured_at >= cutoff);
+        const expired = ordered.filter((entry) => entry.captured_at < cutoff);
+        const kept = active.slice(0, maxRecords);
+        const removals = active.slice(maxRecords).concat(expired).slice(0, maxDeletes);
+        for (const entry of removals) await persistence.removeByAssociation(receiptVerificationV2Association(entry.case_id));
+        await persistence.updateByAssociation(indexAssociation, { namespace: RECEIPT_VERIFICATION_V2_NAMESPACE, entries: kept.concat(expired.slice(removals.length)).slice(0, maxRecords) }, true);
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    }
+    const receiptVerificationV2ShadowCache = /* @__PURE__ */ new Map();
+    let receiptVerificationV2ShadowQueue = Promise.resolve();
+    let receiptVerificationV2ShadowPending = 0;
+    async function runReceiptVerificationV2Shadow(input) {
+      try {
+        if (!input || input.enabled !== true || !input.content || !input.content.length) return Object.freeze({ attempted: false, recorded: false });
+        const caseId = receiptVerificationV2CaseId(input.content);
+        const evidence = receiptVerificationV2Evidence(input.evidence);
+        const cacheKey = `${RECEIPT_VERIFICATION_V2_SCHEMA_VERSION}:${caseId}`;
+        const cached = receiptVerificationV2ShadowCache.get(cacheKey);
+        let resultPromise;
+        if (cached && Date.now() - cached.createdAt < RECEIPT_VERIFICATION_V2_CACHE_TTL_MS) resultPromise = cached.promise;
+        else {
+          resultPromise = evaluateReceiptVerificationV2({
+            evidence: input.evidence,
+            requiredDate: input.requiredDate,
+            duplicateSnapshot: input.duplicateSnapshot,
+            targetedPass: input.targetedPass
+          });
+          receiptVerificationV2ShadowCache.set(cacheKey, { createdAt: Date.now(), promise: resultPromise });
+          if (receiptVerificationV2ShadowCache.size > RECEIPT_VERIFICATION_V2_CACHE_MAX) receiptVerificationV2ShadowCache.delete(receiptVerificationV2ShadowCache.keys().next().value);
+        }
+        let result;
+        try {
+          result = await resultPromise;
+        } catch (error) {
+          receiptVerificationV2ShadowCache.delete(cacheKey);
+          throw error;
+        }
+        if (["qwen_missing", "qwen_invalid", "focused_unresolved", "provider_error"].indexOf(result.reasonCode) !== -1) receiptVerificationV2ShadowCache.delete(cacheKey);
+        const observation = sanitizeReceiptVerificationV2Observation({
+          caseId,
+          capturedAt: Date.now(),
+          productionOutcome: input.productionOutcome,
+          result,
+          qwen: evidence.qwen,
+          ocrAmounts: evidence.ocr.map((item) => item.amount),
+          ocrDates: evidence.ocr.map((item) => item.date),
+          ocrStatuses: evidence.ocr.map((item) => item.status)
+        });
+        const recorder = typeof input.record === "function" ? input.record : recordReceiptVerificationV2Observation;
+        const recorded = await recorder(observation, input.read, input.persistence, input.retentionOptions);
+        return Object.freeze({ attempted: true, recorded: recorded === true, observation });
+      } catch (_error) {
+        return Object.freeze({ attempted: true, recorded: false });
+      }
+    }
+    function scheduleReceiptVerificationV2Shadow(input) {
+      if (!input || input.enabled !== true || !input.content || !input.content.length || productionReceiptExtractionActive > 0 || receiptVerificationV2ShadowPending >= RECEIPT_VERIFICATION_V2_MAX_PENDING) return false;
+      receiptVerificationV2ShadowPending += 1;
+      const run = receiptVerificationV2ShadowQueue.then(async () => {
+        if (productionReceiptExtractionActive > 0) return Object.freeze({ attempted: false, recorded: false, skipped: "production_active" });
+        return runReceiptVerificationV2Shadow(input);
+      }, async () => {
+        if (productionReceiptExtractionActive > 0) return Object.freeze({ attempted: false, recorded: false, skipped: "production_active" });
+        return runReceiptVerificationV2Shadow(input);
+      });
+      receiptVerificationV2ShadowQueue = run.then(() => {
+        receiptVerificationV2ShadowPending -= 1;
+      }, () => {
+        receiptVerificationV2ShadowPending -= 1;
+      });
+      return true;
+    }
+    function resetReceiptVerificationV2RuntimeForTests() {
+      receiptVerificationV2EvidenceCache.clear();
+      receiptVerificationV2ShadowCache.clear();
+      receiptVerificationV2ShadowQueue = Promise.resolve();
+      receiptVerificationV2ShadowPending = 0;
     }
     const RECEIPT_REPLAY_SCHEMA_VERSION = "receipt-replay-v1";
     const RECEIPT_REPLAY_COOLDOWN_MS = 30 * 1e3;
@@ -6634,7 +6993,10 @@ var require_upload_duplicate_guard = __commonJS({
             disagreement: true,
             reasonCode: resolution.reasonCode
           });
-          if (focusedCandidate) legacyVisionResults.push(shadowObservation(focusedCandidate, "date_focus"));
+          if (focusedCandidate) {
+            legacyVisionResults.push(shadowObservation(focusedCandidate, "date_focus"));
+            if (config && config.receiptVerificationV2ShadowEnabled === true) captureReceiptVerificationV2Evidence(content, focusedCandidate, "date_focus");
+          }
           if (resolution.resolved) {
             replaceReceiptVisionAuthorityField("date", resolution.value);
             if (resolution.selectedAuthority === "ocr_confirmed") selectedAuthority = "ocr_confirmed";
@@ -6673,7 +7035,10 @@ var require_upload_duplicate_guard = __commonJS({
             disagreement: true,
             reasonCode: resolution.reasonCode
           });
-          if (focusedCandidate) legacyVisionResults.push(shadowObservation(focusedCandidate, "amount_focus"));
+          if (focusedCandidate) {
+            legacyVisionResults.push(shadowObservation(focusedCandidate, "amount_focus"));
+            if (config && config.receiptVerificationV2ShadowEnabled === true) captureReceiptVerificationV2Evidence(content, focusedCandidate, "amount_focus");
+          }
           if (resolution.resolved) {
             replaceReceiptVisionAuthorityField("amount", resolution.value);
             if (resolution.selectedAuthority === "ocr_confirmed") selectedAuthority = "ocr_confirmed";
@@ -6725,6 +7090,16 @@ var require_upload_duplicate_guard = __commonJS({
             disagreement: false,
             reasonCode: "observed"
           });
+          if (config && config.receiptVerificationV2ShadowEnabled === true && visionResult && visionResult.providerId === "yandex_ai_studio") captureReceiptVerificationV2Evidence(content, {
+            text: JSON.stringify({ is_receipt: visionResult.isReceipt === true, status: visionResult.status }),
+            receiptDate: visionResult.operationDate,
+            receiptTime: visionResult.operationTime,
+            receiptAmount: visionResult.amount,
+            receiptProvider: visionResult.providerId,
+            receiptConfidence: visionResult.confidence,
+            statusRejection: visionResult.status === "failed" ? "failed" : visionResult.status === "pending" ? "pending" : "",
+            aiReceipt: true
+          }, "receipt_vision_engine_v1");
           if (receiptVisionEngineIsAuthoritative(visionResult)) {
             receiptVisionAuthority = {
               text: JSON.stringify({
@@ -6781,6 +7156,7 @@ var require_upload_duplicate_guard = __commonJS({
                 };
                 candidates.push(candidate);
                 legacyOcrResults.push(shadowObservation(candidate, model));
+                if (config && config.receiptVerificationV2ShadowEnabled === true) captureReceiptVerificationV2Evidence(content, candidate, model);
                 recordReceiptReplayPass(stageContext, {
                   provider: "yandex_ocr",
                   pass: "ocr",
@@ -6837,7 +7213,10 @@ var require_upload_duplicate_guard = __commonJS({
               logReceiptStage(logger, stageContext, "primary_openai_request_done", primaryStartedAt, aiCandidate ? "ok" : "empty");
             }
             if (aiCandidate) candidates.push(aiCandidate);
-            if (aiCandidate) legacyVisionResults.push(shadowObservation(aiCandidate, "primary"));
+            if (aiCandidate) {
+              legacyVisionResults.push(shadowObservation(aiCandidate, "primary"));
+              if (config && config.receiptVerificationV2ShadowEnabled === true) captureReceiptVerificationV2Evidence(content, aiCandidate, "primary");
+            }
             if (aiCandidate) recordReceiptReplayPass(stageContext, {
               provider: aiCandidate.receiptProvider,
               pass: "receipt_vision_engine",
@@ -6856,7 +7235,10 @@ var require_upload_duplicate_guard = __commonJS({
             const amountCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, true, false, diagnostic, "receipt");
             logReceiptStage(logger, stageContext, "amount_focus_end", amountStartedAt, amountCandidate ? "ok" : "empty");
             if (amountCandidate) candidates.push(amountCandidate);
-            if (amountCandidate) legacyVisionResults.push(shadowObservation(amountCandidate, "amount_focus"));
+            if (amountCandidate) {
+              legacyVisionResults.push(shadowObservation(amountCandidate, "amount_focus"));
+              if (config && config.receiptVerificationV2ShadowEnabled === true) captureReceiptVerificationV2Evidence(content, amountCandidate, "amount_focus");
+            }
             if (amountCandidate) recordReceiptReplayPass(stageContext, {
               provider: amountCandidate.receiptProvider,
               pass: "amount_focus",
@@ -6875,7 +7257,10 @@ var require_upload_duplicate_guard = __commonJS({
               const dateCandidate = await requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, 0, false, true, diagnostic, "receipt");
               logReceiptStage(logger, stageContext, "date_focus_end", dateStartedAt, dateCandidate ? "ok" : "empty");
               if (dateCandidate) candidates.push(dateCandidate);
-              if (dateCandidate) legacyVisionResults.push(shadowObservation(dateCandidate, "date_focus"));
+              if (dateCandidate) {
+                legacyVisionResults.push(shadowObservation(dateCandidate, "date_focus"));
+                if (config && config.receiptVerificationV2ShadowEnabled === true) captureReceiptVerificationV2Evidence(content, dateCandidate, "date_focus");
+              }
               if (dateCandidate) recordReceiptReplayPass(stageContext, {
                 provider: dateCandidate.receiptProvider,
                 pass: "date_focus",
@@ -7115,6 +7500,41 @@ var require_upload_duplicate_guard = __commonJS({
     }
     async function recordShadowReceiptOutcome(input, read, persistence, config) {
       try {
+        const productionDecision = input && input.decision === ShadowDecision.ACCEPT ? "ACCEPT" : input && input.decision === ShadowDecision.REJECT ? "REJECT" : "CONTROL";
+        if (typeof scheduleReceiptVerificationV2Shadow === "function" && config && config.receiptVerificationV2ShadowEnabled === true) scheduleReceiptVerificationV2Shadow({
+          enabled: config && config.receiptVerificationV2ShadowEnabled === true,
+          file: input && input.file,
+          content: input && input.content,
+          http: input && input.http,
+          logger: input && input.logger,
+          evidence: receiptVerificationV2CapturedEvidence(input && input.content),
+          requiredDate: input && input.requiredDate,
+          duplicateSnapshot: Boolean(input && (input.duplicateMatchType === "IDENTITY" || /ПОВТОР ЧЕКА/i.test(String(input.reason || "")))),
+          productionOutcome: productionDecision,
+          read,
+          persistence,
+          targetedPass: async (field) => {
+            if (productionReceiptExtractionActive > 0 || !input || !input.file || !input.content || !input.http) return null;
+            const provider = receiptVisionProviderForConfig(config, config && config.openaiReceiptModel);
+            if (!provider || provider.id !== "yandex_ai_studio") return null;
+            const focused = await requestOpenAiReceiptCheck(
+              input.file,
+              input.content,
+              input.http,
+              config,
+              input.requiredDate,
+              input.logger,
+              1,
+              field === "amount",
+              field === "date",
+              void 0,
+              "receipt_dispute",
+              provider,
+              true
+            );
+            return focused ? receiptVerificationV2EvidenceFromCandidate(focused, field === "date" ? "date_focus" : "amount_focus") : null;
+          }
+        });
         if (String(config && config.scanner2ShadowMode || "").toUpperCase() !== "RECORD_ONLY") return;
         const tokenizer = createShadowTokenizer({
           secret: config && config.scanner2ShadowHmacSecret,
@@ -8112,7 +8532,11 @@ var require_upload_duplicate_guard = __commonJS({
                   reason: receiptCheck.reason,
                   date: receiptCheck.receiptDate,
                   amount: receiptCheck.receiptAmount,
-                  receiptIdentity: receiptCheck.receiptIdentity
+                  receiptIdentity: receiptCheck.receiptIdentity,
+                  file: messageFile,
+                  content,
+                  http,
+                  logger
                 }, read, persistence, ocrConfig);
                 return true;
               }
@@ -8162,7 +8586,11 @@ var require_upload_duplicate_guard = __commonJS({
                   amount: receiptCheck.receiptAmount,
                   receiptIdentity: receiptCheck.receiptIdentity,
                   duplicateMatchType: "IDENTITY",
-                  duplicateReference: identityMatch.receiptIdentity
+                  duplicateReference: identityMatch.receiptIdentity,
+                  file: messageFile,
+                  content,
+                  http,
+                  logger
                 }, read, persistence, ocrConfig);
                 return true;
               }
@@ -8182,7 +8610,11 @@ var require_upload_duplicate_guard = __commonJS({
                 decision: ShadowDecision.ACCEPT,
                 date: receiptCheck.receiptDate,
                 amount: receiptCheck.receiptAmount,
-                receiptIdentity: receiptCheck.receiptIdentity
+                receiptIdentity: receiptCheck.receiptIdentity,
+                file: messageFile,
+                content,
+                http,
+                logger
               });
             }
             exactMatch.roomId = message.room && message.room.id || exactMatch.roomId;
@@ -8271,7 +8703,11 @@ var require_upload_duplicate_guard = __commonJS({
                 reason: receiptCheck.reason,
                 date: receiptCheck.receiptDate,
                 amount: receiptCheck.receiptAmount,
-                receiptIdentity: receiptCheck.receiptIdentity
+                receiptIdentity: receiptCheck.receiptIdentity,
+                file: messageFile,
+                content,
+                http,
+                logger
               }, read, persistence, ocrConfig);
               return true;
             }
@@ -8317,7 +8753,11 @@ var require_upload_duplicate_guard = __commonJS({
                 amount: receiptCheck.receiptAmount,
                 receiptIdentity: receiptCheck.receiptIdentity,
                 duplicateMatchType: "IDENTITY",
-                duplicateReference: identityMatch.receiptIdentity
+                duplicateReference: identityMatch.receiptIdentity,
+                file: messageFile,
+                content,
+                http,
+                logger
               }, read, persistence, ocrConfig);
               return true;
             }
@@ -8409,7 +8849,11 @@ var require_upload_duplicate_guard = __commonJS({
             decision: ShadowDecision.ACCEPT,
             date: receiptDate,
             amount: receiptAmount,
-            receiptIdentity
+            receiptIdentity,
+            file: messageFile,
+            content,
+            http,
+            logger
           });
         } catch (postError) {
           if (logger) logger.warn(`Duplicate post-check failed for upload ${messageFile._id || messageFile.id || "unknown"}: ${postError && postError.message || postError}`);
@@ -9199,12 +9643,24 @@ var require_upload_duplicate_guard = __commonJS({
       receiptVisionEngineIsAuthoritativeNonReceipt,
       requestOpenAiReceiptVisionEngineV1,
       normalizeReceiptAmount,
+      extractReceiptAmount,
       receiptFieldFocusParserState,
       receiptFieldFocusCandidateFromJson,
       receiptFieldFocusCandidateFromEngineJson,
       receiptFieldTelemetryPayload,
       receiptVisionAuthorityDisagreement,
       resolveReceiptVisionField,
+      RECEIPT_VERIFICATION_V2_SCHEMA_VERSION,
+      RECEIPT_VERIFICATION_V2_MAX_PENDING,
+      RECEIPT_VERIFICATION_V2_CACHE_MAX,
+      receiptVerificationV2SafeEvidence,
+      receiptVerificationV2Evidence,
+      evaluateReceiptVerificationV2,
+      sanitizeReceiptVerificationV2Observation,
+      recordReceiptVerificationV2Observation,
+      runReceiptVerificationV2Shadow,
+      scheduleReceiptVerificationV2Shadow,
+      resetReceiptVerificationV2RuntimeForTests,
       parseImageClassification,
       invalidImageClassification,
       requestOpenAiImageClassificationUncached,
@@ -9434,6 +9890,15 @@ var C = class extends j.App {
       public: false,
       i18nLabel: "image_classification_v1_shadow_enabled_label",
       i18nDescription: "image_classification_v1_shadow_enabled_description"
+    });
+    await e.settings.provideSetting({
+      id: "receipt_verification_v2_shadow_enabled",
+      type: z.SettingType.BOOLEAN,
+      packageValue: false,
+      required: false,
+      public: false,
+      i18nLabel: "receipt_verification_v2_shadow_enabled_label",
+      i18nDescription: "receipt_verification_v2_shadow_enabled_description"
     });
     await e.settings.provideSetting({
       id: "scanner2_shadow_mode",
@@ -9991,6 +10456,7 @@ var C = class extends j.App {
     const cutoffSetting = await n.getValueById("receipt_workday_cutoff");
     const archiveEnabledSetting = await n.getValueById("receipt_archive_enabled");
     const imageClassificationV1ShadowEnabledSetting = await n.getValueById("image_classification_v1_shadow_enabled");
+    const receiptVerificationV2ShadowEnabledSetting = await n.getValueById("receipt_verification_v2_shadow_enabled");
     return {
       apiKey: String(await n.getValueById("yandex_ocr_api_key") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       folderId: String(await n.getValueById("yandex_ocr_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
@@ -10000,6 +10466,7 @@ var C = class extends j.App {
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
       openaiReceiptModel: String(await n.getValueById("openai_receipt_model") || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
       imageClassificationV1ShadowEnabled: imageClassificationV1ShadowEnabledSetting === true || String(imageClassificationV1ShadowEnabledSetting || "").toLowerCase() === "true",
+      receiptVerificationV2ShadowEnabled: receiptVerificationV2ShadowEnabledSetting === true || String(receiptVerificationV2ShadowEnabledSetting || "").toLowerCase() === "true",
       scanner2ShadowMode: String(await n.getValueById("scanner2_shadow_mode") || "OFF").toUpperCase() === "RECORD_ONLY" ? "RECORD_ONLY" : "OFF",
       scanner2ShadowHmacSecret: String(await n.getValueById("scanner2_shadow_hmac_secret") || ""),
       scanner2ShadowTokenKeyVersion: String(await n.getValueById("scanner2_shadow_token_key_version") || "k1").trim() || "k1",

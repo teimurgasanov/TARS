@@ -31,6 +31,7 @@ on:
       - feature/yandex-ai-studio-vision-provider
       - integration/receipt-extraction-fixes-current-develop
       - fix/receipt-late-report-reconciliation
+      - feature/receipt-verification-v2-shadow
   pull_request:
   workflow_dispatch:
 
@@ -102,6 +103,8 @@ jobs:
       || github.base_ref == 'integration/receipt-extraction-fixes-current-develop'
       || github.head_ref == 'fix/receipt-late-report-reconciliation'
       || github.base_ref == 'fix/receipt-late-report-reconciliation'
+      || github.head_ref == 'feature/receipt-verification-v2-shadow'
+      || github.base_ref == 'feature/receipt-verification-v2-shadow'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -154,6 +157,7 @@ jobs:
           node --check tests/receipt-vision-engine-v1.test.js
           node --check tests/receipt-extraction-fixes-v1.test.js
           node --check tests/receipt-replay-v1.test.js
+          node --check tests/receipt-verification-v2-shadow.test.js
           git diff --check
 
       - name: Run Scanner 2.0 tests
@@ -194,7 +198,8 @@ jobs:
           node tests/receipt-vision-engine-v1.test.js
           node tests/receipt-extraction-fixes-v1.test.js
           node tests/receipt-replay-v1.test.js
-          echo "RECEIPT_VISION_ENGINE_V1_TEST_COUNT=3" >> "$GITHUB_ENV"
+          node tests/receipt-verification-v2-shadow.test.js
+          echo "RECEIPT_VISION_ENGINE_V1_TEST_COUNT=4" >> "$GITHUB_ENV"
 
       - name: Run 77 legacy TARS tests
         shell: bash
@@ -205,7 +210,7 @@ jobs:
             echo "==> $test_file"
             node "$test_file"
             legacy_count=$((legacy_count + 1))
-          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' ! -name 'yandex-ai-studio-vision-provider.test.js' ! -name 'receipt-vision-engine-v1.test.js' ! -name 'receipt-extraction-fixes-v1.test.js' ! -name 'receipt-replay-v1.test.js' | sort)
+          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' ! -name 'yandex-ai-studio-vision-provider.test.js' ! -name 'receipt-vision-engine-v1.test.js' ! -name 'receipt-extraction-fixes-v1.test.js' ! -name 'receipt-replay-v1.test.js' ! -name 'receipt-verification-v2-shadow.test.js' | sort)
           test "$legacy_count" -eq 77
           echo "LEGACY_TEST_COUNT=$legacy_count" >> "$GITHUB_ENV"
 
