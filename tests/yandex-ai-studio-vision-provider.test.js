@@ -147,6 +147,12 @@ async function run() {
   assert.strictEqual(incompleteYandex.id, "openai", "incomplete Yandex settings must preserve the OpenAI fallback");
   assert.strictEqual(api.normalizedYandexAiStudioModel("bad/model"), "qwen3.6-35b-a3b");
 
+  const personalYandex = api.personalImageVisionProviderForConfig(yandexConfig, "gpt-5.4-nano-2026-03-17");
+  assert.strictEqual(personalYandex.id, "yandex_ai_studio", "personal/work-photo Vision must avoid the unavailable OpenAI route when Yandex is configured");
+  assert.strictEqual(personalYandex.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
+  const personalOpenAi = api.personalImageVisionProviderForConfig({ openaiApiKey: "openai-test-secret" }, "gpt-5.4-nano-2026-03-17");
+  assert.strictEqual(personalOpenAi.id, "openai", "OpenAI remains the fallback when Yandex is not configured");
+
   const calls = [];
   const http = {
     post: async (url, request) => {
@@ -209,12 +215,23 @@ async function run() {
   assert(receiptCall.request.data.text.format.schema.required.includes("date"));
 
   assert.strictEqual(calls.length, 4, "each isolated Vision path must make one provider call");
-  for (const call of calls.slice(0, 3)) {
-    assert.strictEqual(call.url, "https://api.openai.com/v1/responses", "non-receipt Vision must preserve the base OpenAI provider");
-    assert.strictEqual(call.request.headers.Authorization, "Bearer openai-test-secret");
+  const passiveClassificationCall = calls[0];
+  assert.strictEqual(passiveClassificationCall.url, "https://api.openai.com/v1/responses", "passive ImageClassificationV1 keeps its isolated OpenAI implementation");
+  assert.strictEqual(passiveClassificationCall.request.headers.Authorization, "Bearer openai-test-secret");
+  const passiveImage = passiveClassificationCall.request.data.input[0].content.find((part) => part.type === "input_image");
+  assert(passiveImage && passiveImage.image_url.startsWith("data:image/png;base64,"));
+  assert.strictEqual(passiveImage.detail, "high");
+
+  for (const call of calls.slice(1, 3)) {
+    assert.strictEqual(call.url, YANDEX_URL, "active personal/work-photo Vision must use the configured Yandex provider");
+    assert.strictEqual(call.request.headers.Authorization, "Api-Key yandex-test-secret");
+    assert.strictEqual(call.request.data.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
+    assert.strictEqual(call.request.data.store, false);
+    assert.strictEqual(call.request.data.reasoning.effort, "none");
+    assert.strictEqual(call.request.data.max_output_tokens, 4096, "Qwen needs a bounded reasoning/output budget");
     const image = call.request.data.input[0].content.find((part) => part.type === "input_image");
     assert(image && image.image_url.startsWith("data:image/png;base64,"));
-    assert.strictEqual(image.detail, "high", "non-receipt OpenAI image input must preserve base detail=high");
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(image, "detail"), false, "Yandex personal image input must use its compatible shape");
   }
   assert.strictEqual(receiptCall.url, YANDEX_URL);
   assert.strictEqual(receiptCall.request.headers.Authorization, "Api-Key yandex-test-secret");
@@ -381,10 +398,10 @@ async function run() {
     assert(!section.includes("receiptVisionProviderForConfig"), `${startMarker} must not use the receipt/Yandex provider selector`);
     assert(!section.includes("receiptVisionProviderConfigured"), `${startMarker} must not use receipt/Yandex provider availability`);
     assert(!section.includes("receiptVisionProviderCacheKey"), `${startMarker} must not use receipt/Yandex provider cache identity`);
-    assert(!section.includes("receiptVisionImageInput"), `${startMarker} must not use receipt/Yandex image request shaping`);
-    assert(!section.includes("yandexAiStudioApiKey"), `${startMarker} must not read Yandex AI Studio credentials`);
-    assert(!section.includes("YANDEX_AI_STUDIO_RESPONSES_URL"), `${startMarker} must not call Yandex AI Studio`);
   }
+  assert(sourceSection("async function requestOpenAiWorkPhotoCheckUncached", "const workPhotoCheckCache").includes("personalImageVisionProviderForConfig"), "dedicated work-photo Vision must use the independent personal provider selector");
+  assert(sourceSection("async function requestPrimaryImageTypeVision", "async function primaryVisionDecisionForImage").includes("personalImageVisionProviderForConfig"), "primary personal Vision must use the independent personal provider selector");
+  assert(sourceSection("async function personalImageKindForPreUploadUncached", "async function personalImageKindForPreUpload").includes("personalImageVisionProviderForConfig"), "pre-upload classification must accept the configured personal Vision provider");
   const receiptCheckSource = sourceSection("async function requestOpenAiReceiptCheck", "function normalizedDate");
   assert.match(receiptCheckSource, /receiptProviderAllowed = diagnosticRole === "receipt" \|\| diagnosticRole === "receipt_dispute"/, "Yandex selection must be explicitly receipt-scoped");
   assert.match(receiptCheckSource, /receiptProviderAllowed \? receiptVisionProviderForConfig\(config, openAiModel\) : openAiVisionProviderForConfig\(config, openAiModel\)/, "non-receipt callers must retain OpenAI-only provider selection");
@@ -398,7 +415,7 @@ async function run() {
   }
   assert(!source.includes("yandex-test-secret"), "test secret must not enter production source");
 
-  console.log("PASS: Yandex AI Studio is an isolated private Vision provider with unchanged OpenAI fallback");
+  console.log("PASS: Yandex AI Studio is primary for active personal/work-photo Vision while receipt scope and OpenAI fallback stay isolated");
 }
 
 run().catch((error) => {
