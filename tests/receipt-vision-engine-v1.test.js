@@ -38,6 +38,20 @@ function legacyReceipt(amount, overrides = {}) {
   };
 }
 
+function focusedReceiptFields(amount, overrides = {}) {
+  return {
+    date: requiredDate,
+    time: "17:14",
+    amount,
+    amount_text: amount === null ? null : `${amount} RUB`,
+    amount_label: amount === null ? null : "Сумма операции",
+    currency: amount === null ? "unknown" : "RUB",
+    confidence: 0.98,
+    ambiguity_reason: null,
+    ...overrides
+  };
+}
+
 function yandexText(amount, extraText = "") {
   return [
     "Банк",
@@ -54,7 +68,7 @@ function requestKind(options) {
   if (format && format.name === "receipt_vision_engine_v1") return "vision-engine";
   const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
   if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ")) return "date-focus";
-  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:")) return "amount-focus";
+  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ")) return "amount-focus";
   return "legacy-primary";
 }
 
@@ -86,7 +100,8 @@ function provider(scenario, calls, engineRequests) {
       const defaultAmount = visionAvailable ? scenario.vision.amount : scenario.ocrAmount;
       const amount = kind === "amount-focus" && Object.prototype.hasOwnProperty.call(scenario, "focusAmount") ? scenario.focusAmount : kind === "legacy-primary" && Object.prototype.hasOwnProperty.call(scenario, "legacyAmount") ? scenario.legacyAmount : defaultAmount;
       const date = kind === "date-focus" && scenario.focusDate ? scenario.focusDate : visionAvailable ? scenario.vision.operation_date : requiredDate;
-      return { statusCode: 200, data: { output_text: JSON.stringify(legacyReceipt(amount, { date })) } };
+      const value = kind === "amount-focus" || kind === "date-focus" ? focusedReceiptFields(amount, { date }) : legacyReceipt(amount, { date });
+      return { statusCode: 200, data: { output_text: JSON.stringify(value) } };
     }
   };
 }

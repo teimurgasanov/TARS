@@ -22,7 +22,7 @@ function engineResult(date, amount, confidence = 0.98) {
   };
 }
 
-function focusedResult(date, amount) {
+function primaryResult(date, amount) {
   return {
     is_receipt: true,
     has_readable_text: true,
@@ -36,6 +36,20 @@ function focusedResult(date, amount) {
     amount_label: amount === null ? null : "Сумма операции",
     status: "success",
     bank: "test-bank"
+  };
+}
+
+function focusedResult(date, amount, overrides = {}) {
+  return {
+    date,
+    time: "18:24",
+    amount,
+    amount_text: amount === null ? null : `${amount} RUB`,
+    amount_label: amount === null ? null : "Сумма операции",
+    currency: amount === null ? "unknown" : "RUB",
+    confidence: 0.98,
+    ambiguity_reason: null,
+    ...overrides
   };
 }
 
@@ -54,7 +68,7 @@ function requestKind(options) {
   if (format && format.name === "receipt_vision_engine_v1") return "engine";
   const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
   if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ")) return "date-focus";
-  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:")) return "amount-focus";
+  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ")) return "amount-focus";
   return "primary";
 }
 
@@ -77,7 +91,7 @@ async function runScenario(scenario) {
       }
       const kind = requestKind(options);
       calls.push(kind);
-      const result = kind === "engine" ? scenario.engine : kind === "date-focus" ? scenario.dateFocus : kind === "amount-focus" ? scenario.amountFocus : scenario.primary || focusedResult(scenario.ocrDate, scenario.ocrAmount);
+      const result = kind === "engine" ? scenario.engine : kind === "date-focus" ? scenario.dateFocus : kind === "amount-focus" ? scenario.amountFocus : scenario.primary || primaryResult(scenario.ocrDate, scenario.ocrAmount);
       if (result === "timeout") throw new Error("request timeout");
       if (result === "invalid") return { statusCode: 200, data: { output_text: "not-json" } };
       return { statusCode: 200, data: { output_text: JSON.stringify(result) } };
@@ -120,6 +134,30 @@ async function runScenario(scenario) {
   for (const invalid of ["amount 1900 RUB", "1900 USD", "руб.", "not money", "1900 RUB extra", "-1900 ₽", "1.2.3 ₽", "19,00,0 ₽"]) {
     assert.strictEqual(guard.normalizeReceiptAmount(invalid), undefined, `non-money input must be rejected: ${invalid}`);
   }
+
+  assert.deepStrictEqual(
+    Object.keys(guard.RECEIPT_FIELD_FOCUS_SCHEMA.properties),
+    ["date", "time", "amount", "amount_text", "amount_label", "currency", "confidence", "ambiguity_reason"],
+    "a focused field pass must not request receipt classification or screenshot veto fields"
+  );
+  const isolatedFocusedAmount = guard.receiptFieldFocusCandidateFromJson(
+    focusedResult(requiredDate, null, {
+      amount_text: "1 900 руб.",
+      amount_label: "Итого",
+      currency: "RUB",
+      confidence: 0.99,
+      is_screenshot_of_chat: true,
+      visual_type: "chat_screenshot"
+    }),
+    requiredDate
+  );
+  assert.strictEqual(isolatedFocusedAmount.receiptAmount, 1900, "FAIL-3: the focused transcription must reach safe amount normalization");
+  assert.strictEqual(isolatedFocusedAmount.containerRejection, "", "a field-only pass must be physically unable to veto receipt classification");
+  const lowConfidenceFocusedAmount = guard.receiptFieldFocusCandidateFromJson(
+    focusedResult(requiredDate, 1900, { confidence: 0.6 }),
+    requiredDate
+  );
+  assert.strictEqual(lowConfidenceFocusedAmount.receiptAmount, undefined, "a low-confidence focused pass must not guess an amount");
 
   const fail1Resolved = await runScenario({
     engine: engineResult("2024-09-03", 800),
@@ -185,12 +223,31 @@ async function runScenario(scenario) {
     engine: engineResult(requiredDate, 600, 0.5),
     ocrDate: requiredDate,
     ocrAmount: 2600,
-    primary: focusedResult(requiredDate, 600),
+    primary: primaryResult(requiredDate, 600),
     amountFocus: focusedResult(requiredDate, 600)
   });
   assert.strictEqual(legacyAmountConflict.result.ok, false);
   assert.match(legacyAmountConflict.result.reason, /СУММЫ ЧЕКА НЕ СОВПАЛИ/);
   assert.strictEqual(legacyAmountConflict.result.receiptAmount, undefined, "legacy conflict must not expose the first OCR candidate as a confirmed amount");
+
+  const fail3FocusedRecovery = await runScenario({
+    engine: "invalid",
+    ocrDate: requiredDate,
+    ocrAmount: null,
+    primary: primaryResult(requiredDate, null),
+    amountFocus: focusedResult(requiredDate, null, {
+      amount_text: "1 900 руб.",
+      amount_label: "Итого",
+      currency: "RUB",
+      confidence: 0.99,
+      is_screenshot_of_chat: true,
+      visual_type: "chat_screenshot"
+    })
+  });
+  assert.strictEqual(fail3FocusedRecovery.result.ok, true, "FAIL-3: a high-confidence focused amount may complete an independently confirmed receipt");
+  assert.strictEqual(fail3FocusedRecovery.result.receiptAmount, 1900);
+  assert.strictEqual(fail3FocusedRecovery.calls.filter((value) => value === "amount-focus").length, 1, "FAIL-3: exactly one amount-focused pass is allowed");
+  assert.doesNotMatch(String(fail3FocusedRecovery.result.reason || ""), /СКРИНШОТ|НЕ ПРИНЯТ/, "field extraction must not reclassify the receipt");
 
   for (const failedFocus of ["timeout", "invalid"]) {
     const result = await runScenario({

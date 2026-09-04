@@ -111,7 +111,21 @@ function runtimeScenario(guard, mode, suffix) {
         });
       }
       receiptCalls += 1;
-      providerCalls.push(prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ") ? "openai:date-focus" : prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:") ? "openai:amount-focus" : "openai:primary");
+      const focusedPass = prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ") ? "date-focus" : prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ") ? "amount-focus" : "";
+      providerCalls.push(focusedPass ? `openai:${focusedPass}` : "openai:primary");
+      if (focusedPass) {
+        const amount = mode === "unknown" ? null : 1200;
+        return openAiResponse({
+          date: mode === "unknown" ? null : observedDate,
+          time: null,
+          amount,
+          amount_text: amount === null ? null : "1200 RUB",
+          amount_label: amount === null ? null : "amount",
+          currency: amount === null ? "unknown" : "RUB",
+          confidence: mode === "unknown" ? 0.2 : 0.98,
+          ambiguity_reason: mode === "unknown" ? "unreadable" : null
+        });
+      }
       if (receiptCalls === 1 || mode === "unknown") {
         return openAiResponse({
           is_receipt: false,

@@ -2132,6 +2132,24 @@ var require_upload_duplicate_guard = __commonJS({
         bank: { anyOf: [{ type: "string" }, { type: "null" }] }
       }
     };
+    const RECEIPT_FIELD_FOCUS_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "date", "time", "amount", "amount_text", "amount_label",
+        "currency", "confidence", "ambiguity_reason"
+      ],
+      properties: {
+        date: { anyOf: [{ type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }, { type: "null" }] },
+        time: { anyOf: [{ type: "string", pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9])?$" }, { type: "null" }] },
+        amount: { anyOf: [{ type: "number" }, { type: "null" }] },
+        amount_text: { anyOf: [{ type: "string" }, { type: "null" }] },
+        amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
+        currency: { type: "string", enum: ["RUB", "unknown"] },
+        confidence: { type: "number", minimum: 0, maximum: 1 },
+        ambiguity_reason: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
     const RECEIPT_PRIMARY_VISION_SCHEMA = {
       type: "object",
       additionalProperties: false,
@@ -3688,6 +3706,26 @@ var require_upload_duplicate_guard = __commonJS({
       if (typeof parsed !== "object" || Array.isArray(parsed) || typeof parsed.is_receipt !== "boolean" || typeof parsed.visual_type !== "string") return "schema_mismatch";
       return "parsed";
     }
+    function receiptFieldFocusParserState(text, parsed) {
+      const source = String(text || "").trim();
+      if (!source) return "no_json";
+      if (!parsed) return source.indexOf("{") !== -1 ? "parse_error" : "no_json";
+      if (typeof parsed !== "object" || Array.isArray(parsed)) return "schema_mismatch";
+      const nullableString = (value) => value === null || typeof value === "string";
+      if (
+        !nullableString(parsed.date) ||
+        !nullableString(parsed.time) ||
+        !(parsed.amount === null || typeof parsed.amount === "number" && Number.isFinite(parsed.amount)) ||
+        !nullableString(parsed.amount_text) ||
+        !nullableString(parsed.amount_label) ||
+        ["RUB", "unknown"].indexOf(parsed.currency) === -1 ||
+        typeof parsed.confidence !== "number" || !Number.isFinite(parsed.confidence) || parsed.confidence < 0 || parsed.confidence > 1 ||
+        !nullableString(parsed.ambiguity_reason)
+      ) return "schema_mismatch";
+      if (parsed.date !== null && !/^20\d{2}-\d{2}-\d{2}$/.test(parsed.date)) return "schema_mismatch";
+      if (parsed.time !== null && !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(parsed.time)) return "schema_mismatch";
+      return "parsed";
+    }
     function openAiPrimaryVisionParserState(text, parsed) {
       const legacyState = openAiReceiptParserState(text, parsed);
       if (legacyState !== "parsed") return legacyState;
@@ -5182,7 +5220,29 @@ var require_upload_duplicate_guard = __commonJS({
         receiptAmount: receiptAmountFromAiValue(json.amount),
         statusRejection,
         containerRejection,
+        containerRejectionSource: containerRejection ? "vision_classifier" : "none",
         aiReceipt: true
+      };
+    }
+    function receiptFieldFocusCandidateFromJson(json, requiredDate, preserveDateYear = false) {
+      if (!json || typeof json !== "object") return void 0;
+      const confidence = Number(json.confidence);
+      const confident = Number.isFinite(confidence) && confidence >= RECEIPT_VISION_ENGINE_MIN_CONFIDENCE && !String(json.ambiguity_reason || "").trim();
+      const transcribedAmount = json.currency === "RUB" ? normalizeReceiptAmount(json.amount_text) : void 0;
+      const numericAmount = json.currency === "RUB" ? receiptAmountFromAiValue(json.amount) : void 0;
+      return {
+        text: JSON.stringify(json),
+        receiptDate: confident ? normalizeOpenAiDate(json.date, preserveDateYear ? void 0 : requiredDate) : void 0,
+        receiptTime: confident && /^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(String(json.time || "")) ? String(json.time) : void 0,
+        receiptAmount: confident ? isValidReceiptAmount(transcribedAmount) ? transcribedAmount : numericAmount : void 0,
+        receiptConfidence: Number.isFinite(confidence) ? confidence : void 0,
+        statusRejection: "",
+        // A focused field reader is not a classifier. It must never create or
+        // clear a receipt/document routing veto.
+        containerRejection: "",
+        containerRejectionSource: "none",
+        aiReceipt: true,
+        receiptFieldOnly: true
       };
     }
     function aiCandidateStronglyAcceptsReceipt(candidate, requiredDate) {
@@ -5261,8 +5321,9 @@ var require_upload_duplicate_guard = __commonJS({
     }
     async function requestOpenAiReceiptCheck(file, content, http, config, requiredDate, logger, retryAttempt = 0, focusAmount = false, focusDate = false, diagnostic, diagnosticRole = "", providerOverride, providerFallbackAttempted = false) {
       if (!config || !content || !content.length) return void 0;
+      const fieldFocus = focusAmount || focusDate;
       const primaryModel = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
-      const openAiModel = focusAmount || focusDate ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
+      const openAiModel = fieldFocus ? primaryModel === "gpt-4.1" ? "gpt-4.1-mini" : "gpt-4.1" : primaryModel;
       const receiptProviderAllowed = diagnosticRole === "receipt" || diagnosticRole === "receipt_dispute";
       const provider = providerOverride || (receiptProviderAllowed ? receiptVisionProviderForConfig(config, openAiModel) : openAiVisionProviderForConfig(config, openAiModel));
       if (!provider) return void 0;
@@ -5283,8 +5344,11 @@ var require_upload_duplicate_guard = __commonJS({
       const model = provider.model;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       const primaryVisionContract = diagnosticRole === "primary" && !focusAmount && !focusDate ? ' ОСНОВНАЯ КЛАССИФИКАЦИЯ ТИПА: дополнительно обязательно верни class:"receipt|bank_transfer|work_photo|mailing|document|unknown", service_kind:"hair|nails|pedicure|brows_lashes|other|none", confidence:"high|medium|low", has_payment_ui:boolean, has_receipt_layout:boolean, has_financial_document:boolean, has_qr_payment_document:boolean, has_financial_text:boolean, has_document_layout:boolean, has_visible_client:boolean, has_visible_hair_result:boolean, has_visible_nail_result:boolean, has_visible_brow_lash_result:boolean, has_salon_context:boolean, has_messaging_ui:boolean. confidence=high разрешено только когда тип непосредственно и однозначно виден. Для work_photo high требуется ясно видимый результат услуги; кресло, инструменты, зеркало, рабочая зона и интерьер не обязательны. Крупный план готовых ногтей, педикюра, бровей или ресниц достаточен без полного человека. Для hair должны быть видны клиент и выраженная форма стрижки, укладки или окрашивания. Work_photo блокируют только конкретные видимые признаки: банковский/payment UI, receipt layout, financial/document layout, QR/payment document или явный экран банковского приложения. Просто текст, логотип, телефон в кадре, человек или фон не блокируют work_photo без таких конкретных признаков. Обычный портрет без различимого результата услуги и пустой интерьер означают class=unknown. ' : "";
-      const focusedPrompt = focusDate ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ: не копируй предыдущий ответ и не подставляй дату загрузки. Документ может занимать небольшую часть фотографии и быть открыт на экране другого телефона. Сначала найди границы экрана телефона и область банковского документа внутри него, мысленно приблизь её и проверь верхнюю часть чека и строки Дата, Дата операции, Операция совершена, Чек по операции или Сформировано. Перепиши только реально видимую календарную дату операции в формате YYYY-MM-DD. Не принимай время в строке состояния телефона, дату сообщения или номер документа за дату чека. Остальные поля прочитай как обычно. " : focusAmount ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА: не копируй предыдущий ответ. Изображение может быть повёрнуто на 90, 180 или 270 градусов — мысленно разверни его и проверь все ориентации. Сначала найди на самом чеке подписи даты, статуса и итоговой суммы, затем верни JSON. Внимательно увеличь область с итогом и обязательно перечитай сумму операции. Ищи подписи ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания. Верни amount числом без пробелов и знака валюты. Не используй комиссию, баланс, время, номер карты, документа или квитанции. " : "Изображение чека может быть снято боком или вверх ногами. Перед чтением определи ориентацию и мысленно поверни его на 90, 180 или 270 градусов. Сначала прочитай видимые подписи даты, статуса и итоговой суммы на самом чеке; не делай вывод по имени файла или окружающей обстановке. ";
-      const amountFocusPrompt = focusedPrompt + "ВАЖНО: официальная надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод; для неё верни status=success. Оплата SberPay со статусом «Исполнено» также является успешной операцией. Не путай их с отдельным промежуточным статусом «Отправлен». ";
+      const focusedPrompt = focusDate ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ: не копируй предыдущий ответ и не подставляй дату загрузки. Документ может занимать небольшую часть фотографии и быть открыт на экране другого телефона. Сначала найди границы экрана телефона и область банковского документа внутри него, мысленно приблизь её и проверь верхнюю часть чека и строки Дата, Дата операции, Операция совершена, Чек по операции или Сформировано. Перепиши только реально видимую календарную дату операции в формате YYYY-MM-DD. Не принимай время в строке состояния телефона, дату сообщения или номер документа за дату чека. Не классифицируй тип изображения и не решай, является ли оно скриншотом. " : focusAmount ? "ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ: не копируй предыдущий ответ. Изображение может быть повёрнуто на 90, 180 или 270 градусов — мысленно разверни его и проверь все ориентации. Найди область банковского документа, включая документ на экране другого телефона, мысленно приблизь её и перечитай итоговую сумму операции. Ищи подписи ИТОГО, Сумма, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания. Верни amount числом без пробелов и знака валюты, а amount_text — дословной видимой строкой, например «1 900 руб.». Не используй комиссию, баланс, время, номер карты, документа или квитанции. Не классифицируй тип изображения и не решай, является ли оно скриншотом. " : "Изображение чека может быть снято боком или вверх ногами. Перед чтением определи ориентацию и мысленно поверни его на 90, 180 или 270 градусов. Сначала прочитай видимые подписи даты, статуса и итоговой суммы на самом чеке; не делай вывод по имени файла или окружающей обстановке. ";
+      const receiptStatusPrompt = "ВАЖНО: официальная надпись Сбербанка «Перевод отправлен» означает успешно выполненный перевод; для неё верни status=success. Оплата SberPay со статусом «Исполнено» также является успешной операцией. Не путай их с отдельным промежуточным статусом «Отправлен». ";
+      const fieldFocusContract = "Верни только JSON для чтения полей: date — дата операции YYYY-MM-DD или null; time — время операции HH:MM[:SS] или null; amount — итоговая сумма операции числом или null; amount_text — дословная строка суммы с валютой или null; amount_label — подпись непосредственно рядом с суммой или null; currency — RUB только при явных ₽/руб./RUB/RUR, иначе unknown; confidence — уверенность именно в прочитанных полях от 0 до 1; ambiguity_reason — краткая причина неоднозначности или null. Если поле не видно надёжно, верни null и не угадывай. ";
+      const fullReceiptContract = RECEIPT_VISUAL_CRITERIA + WORK_PHOTO_VISUAL_CRITERIA + "Ты проверяешь фото банковского чека салона. Верни только JSON без Markdown: {\"is_receipt\":boolean,\"has_readable_text\":boolean,\"visual_type\":\"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown\",\"is_mailing_proof\":boolean,\"service_type\":\"haircut|coloring|manicure|pedicure|brows|lashes|unknown\",\"is_screenshot_of_chat\":boolean,\"date\":\"YYYY-MM-DD|null\",\"amount\":number|null,\"amount_text\":\"точно переписанная строка суммы с чека|null\",\"amount_label\":\"подпись рядом с суммой|null\",\"status\":\"success|failed|pending|unknown\",\"bank\":\"string|null\"}." + primaryVisionContract + " Визуальный тип mailing_proof_screenshot: скрин Instagram/Direct/личных сообщений со списком получателей и статусами Отправлено, Просмотрено, Sent, Seen, Delivered, либо текстом что аккаунт не может получать сообщения. Такой скрин всегда is_receipt=false и is_mailing_proof=true. Для фото работы выбери hair_work_photo, nails_work_photo, pedicure_work_photo или brows_lashes_work_photo строго по критериям выше. is_receipt=true только для банковского чека, квитанции, справки по операции, перевода или платежа. Не выдумывай дату или сумму. Если видишь 17.08.2026, это 2026-08-17, не 2016. Сумма — итог операции в рублях рядом с ИТОГО, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания или Сумма в валюте операции. Дословно перепиши видимую строку суммы в amount_text, включая разделители тысяч и валюту, а её подпись — в amount_label. Не бери комиссию, баланс, время, номер карты, документа, телефона или код подтверждения как сумму. status=success только для Успешно, Исполнен, Исполнено, Выполнен, Оплачен, Completed, Success. status=pending для Ожидает подтверждения, В обработке, На подпись, К отправке, Черновик, Отправлен, request_sent, processing или pending.";
+      const requestPrompt = focusedPrompt + (fieldFocus ? fieldFocusContract : receiptStatusPrompt + fullReceiptContract);
       let response;
       try {
         response = await http.post(provider.url, {
@@ -5297,7 +5361,7 @@ var require_upload_duplicate_guard = __commonJS({
               content: [
                 {
                   type: "input_text",
-                  text: amountFocusPrompt + RECEIPT_VISUAL_CRITERIA + WORK_PHOTO_VISUAL_CRITERIA + "Ты проверяешь фото банковского чека салона. Верни только JSON без Markdown: {\"is_receipt\":boolean,\"has_readable_text\":boolean,\"visual_type\":\"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown\",\"is_mailing_proof\":boolean,\"service_type\":\"haircut|coloring|manicure|pedicure|brows|lashes|unknown\",\"is_screenshot_of_chat\":boolean,\"date\":\"YYYY-MM-DD|null\",\"amount\":number|null,\"amount_text\":\"точно переписанная строка суммы с чека|null\",\"amount_label\":\"подпись рядом с суммой|null\",\"status\":\"success|failed|pending|unknown\",\"bank\":\"string|null\"}." + primaryVisionContract + " Визуальный тип mailing_proof_screenshot: скрин Instagram/Direct/личных сообщений со списком получателей и статусами Отправлено, Просмотрено, Sent, Seen, Delivered, либо текстом что аккаунт не может получать сообщения. Такой скрин всегда is_receipt=false и is_mailing_proof=true. Для фото работы выбери hair_work_photo, nails_work_photo, pedicure_work_photo или brows_lashes_work_photo строго по критериям выше. is_receipt=true только для банковского чека, квитанции, справки по операции, перевода или платежа. Не выдумывай дату или сумму. Если видишь 17.08.2026, это 2026-08-17, не 2016. Сумма — итог операции в рублях рядом с ИТОГО, Сумма операции, Сумма перевода, Сумма платежа, Сумма списания или Сумма в валюте операции. Дословно перепиши видимую строку суммы в amount_text, включая разделители тысяч и валюту, а её подпись — в amount_label. Не бери комиссию, баланс, время, номер карты, документа, телефона или код подтверждения как сумму. status=success только для Успешно, Исполнен, Исполнено, Выполнен, Оплачен, Completed, Success. status=pending для Ожидает подтверждения, В обработке, На подпись, К отправке, Черновик, Отправлен, request_sent, processing или pending."
+                  text: requestPrompt
                 },
                 receiptVisionImageInput(provider, imageUrl)
               ]
@@ -5305,9 +5369,9 @@ var require_upload_duplicate_guard = __commonJS({
             text: {
               format: {
                 type: "json_schema",
-                name: diagnosticRole === "primary" && !focusAmount && !focusDate ? "tars_receipt_primary_vision_v1" : "tars_receipt_fields_v1",
+                name: diagnosticRole === "primary" && !fieldFocus ? "tars_receipt_primary_vision_v1" : fieldFocus ? "tars_receipt_field_focus_v1" : "tars_receipt_fields_v1",
                 strict: true,
-                schema: diagnosticRole === "primary" && !focusAmount && !focusDate ? RECEIPT_PRIMARY_VISION_SCHEMA : RECEIPT_VISION_SCHEMA
+                schema: diagnosticRole === "primary" && !fieldFocus ? RECEIPT_PRIMARY_VISION_SCHEMA : fieldFocus ? RECEIPT_FIELD_FOCUS_SCHEMA : RECEIPT_VISION_SCHEMA
               }
             },
             // Qwen 3.6 uses reasoning mode by default in Yandex AI Studio.
@@ -5348,11 +5412,13 @@ var require_upload_duplicate_guard = __commonJS({
       }
       const outputText = openAiReceiptOutputText(payload);
       const parsed = parseReceiptJson(outputText);
-      const candidate = openAiReceiptCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute");
-      const parserState = diagnosticRole === "primary" ? openAiPrimaryVisionParserState(outputText, parsed) : openAiReceiptParserState(outputText, parsed);
+      const parserState = diagnosticRole === "primary" ? openAiPrimaryVisionParserState(outputText, parsed) : fieldFocus ? receiptFieldFocusParserState(outputText, parsed) : openAiReceiptParserState(outputText, parsed);
+      const candidate = fieldFocus ? parserState === "parsed" ? receiptFieldFocusCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute") : void 0 : openAiReceiptCandidateFromJson(parsed, requiredDate, diagnosticRole === "receipt_dispute");
       if (candidate) {
-        const transcribedAmount = normalizeReceiptAmount(parsed && parsed.amount_text);
-        if (isValidReceiptAmount(transcribedAmount)) candidate.receiptAmount = transcribedAmount;
+        if (!fieldFocus) {
+          const transcribedAmount = normalizeReceiptAmount(parsed && parsed.amount_text);
+          if (isValidReceiptAmount(transcribedAmount)) candidate.receiptAmount = transcribedAmount;
+        }
         candidate.receiptAmountSource = `openai:${model}`;
         candidate.receiptProvider = provider.id;
         candidate.receiptPass = focusDate ? "date_focus" : focusAmount ? "amount_focus" : "primary";
@@ -5939,6 +6005,10 @@ var require_upload_duplicate_guard = __commonJS({
       const authority = String(value || "");
       return ["yandex_qwen", "openai_vision", "ocr_confirmed", "legacy_consensus", "control", "none"].indexOf(authority) !== -1 ? authority : "none";
     }
+    function normalizedReceiptReplayContainerVetoSource(value) {
+      const source = String(value || "");
+      return ["vision_classifier", "yandex_ocr", "ocr_combined", "none"].indexOf(source) !== -1 ? source : "none";
+    }
     function normalizedReceiptReplayPass(value) {
       const pass = String(value || "");
       return ["receipt_vision_engine", "ocr", "date_focus", "amount_focus", "decision"].indexOf(pass) !== -1 ? pass : "decision";
@@ -5967,6 +6037,7 @@ var require_upload_duplicate_guard = __commonJS({
         passes: [],
         disagreement: { date: false, amount: false },
         selectedAuthority: "none",
+        containerVetoSource: "none",
         decisionReasonCode: "unexpected",
         providerErrorCode: "none"
       };
@@ -6105,6 +6176,7 @@ var require_upload_duplicate_guard = __commonJS({
         },
         targeted_pass_result: passes.filter((pass) => pass.pass === "date_focus" || pass.pass === "amount_focus"),
         selected_authority: normalizedReceiptReplayAuthority(source.selectedAuthority || source.selected_authority),
+        container_veto_source: normalizedReceiptReplayContainerVetoSource(source.containerVetoSource || source.container_veto_source),
         replay_outcome: replayOutcome,
         strict_production_result: strictProductionResult,
         reason_code: normalizedReceiptReplayReasonCode(source.reasonCode || source.reason_code),
@@ -6222,6 +6294,7 @@ var require_upload_duplicate_guard = __commonJS({
           confidence: receiptReplaySelectedConfidence(trace, result),
           disagreement: trace.disagreement,
           selectedAuthority: trace.selectedAuthority,
+          containerVetoSource: trace.containerVetoSource,
           replayOutcome: receiptReplayOutcomeFromResult(result),
           strictProductionResult: strictProductionReplayResult(result, config),
           reasonCode: trace.decisionReasonCode !== "unexpected" ? trace.decisionReasonCode : receiptReplayReasonCodeFromResult(result),
@@ -6280,12 +6353,14 @@ var require_upload_duplicate_guard = __commonJS({
           if (candidates[index].combinedReceipt) candidates.splice(index, 1);
         }
         const combinedText = sourceCandidates.map((candidate) => candidate.text).join("\n");
+        const containerRejection = receiptContainerScreenshotRejection(combinedText);
         candidates.push({
           text: combinedText,
           receiptDate: extractReceiptDate(combinedText, requiredDate),
           receiptAmount: extractReceiptAmount(combinedText),
           statusRejection: receiptStatusRejection(combinedText),
-          containerRejection: receiptContainerScreenshotRejection(combinedText),
+          containerRejection,
+          containerRejectionSource: containerRejection ? "ocr_combined" : "none",
           combinedReceipt: true
         });
       };
@@ -6301,15 +6376,33 @@ var require_upload_duplicate_guard = __commonJS({
           text: [base.text, amountCandidate.text].filter(Boolean).join("\n"),
           receiptDate: base.receiptDate,
           receiptAmount: amountCandidate.receiptAmount,
+          receiptAmountSource: amountCandidate.receiptAmountSource,
+          receiptAmountFieldOnly: amountCandidate.receiptFieldOnly === true,
+          receiptConfidence: amountCandidate.receiptConfidence,
           statusRejection: base.statusRejection || amountCandidate.statusRejection || "",
           containerRejection: base.containerRejection || amountCandidate.containerRejection || "",
+          containerRejectionSource: base.containerRejection ? base.containerRejectionSource : amountCandidate.containerRejection ? amountCandidate.containerRejectionSource : "none",
           aiReceipt: base.aiReceipt || amountCandidate.aiReceipt,
           mergedReceipt: true
         };
       };
+      const focusedAmountCanCompleteReceipt = (candidate) => {
+        if (!candidate || candidate.receiptAmountFieldOnly !== true || candidate.receiptConfidence < RECEIPT_VISION_ENGINE_MIN_CONFIDENCE || !isValidReceiptAmount(candidate.receiptAmount)) return false;
+        const conflictingAmount = candidates.some((other) => {
+          if (!other || other === candidate || other.combinedReceipt || !isValidReceiptAmount(other.receiptAmount)) return false;
+          return !sameReceiptAmount(other.receiptAmount, candidate.receiptAmount);
+        });
+        if (conflictingAmount) return false;
+        return candidates.some((other) => {
+          if (!other || other === candidate || other.combinedReceipt || other.containerRejection || receiptStatusBlocks(other.statusRejection)) return false;
+          return other.receiptDate === requiredDate && candidateConfirmsFinancialDocument(other);
+        });
+      };
       const returnContainer = () => {
         const containerCandidate = mergeCandidateForDecision(candidates.find((candidate) => candidate.containerRejection));
         if (!containerCandidate) return void 0;
+        const replayTrace = receiptReplayContext(stageContext);
+        if (replayTrace) replayTrace.containerVetoSource = normalizedReceiptReplayContainerVetoSource(containerCandidate.containerRejectionSource);
         return withShadowEvidence({
           ok: false,
           reason: containerCandidate.containerRejection,
@@ -6320,15 +6413,20 @@ var require_upload_duplicate_guard = __commonJS({
       };
       const returnAccepted = () => {
         if (receiptAmountsDisagree(candidates, requiredDate, !hasYandex)) return void 0;
-        const accepted = mergeCandidateForDecision(candidates.find((candidate) => candidate.receiptDate === requiredDate && !receiptStatusBlocks(candidate.statusRejection) && (!candidate.aiReceipt || aiCandidateStronglyAcceptsReceipt(candidate, requiredDate)) && (!hasOpenAi || openAiUnavailable || receiptAmountHasIndependentConfirmation(candidates, candidate, requiredDate, !hasYandex))));
-        if (!accepted || !isValidReceiptAmount(accepted.receiptAmount) || receiptStatusBlocks(accepted.statusRejection)) return void 0;
-        return withShadowEvidence({
-          ok: true,
-          receiptDate: accepted.receiptDate,
-          receiptAmount: accepted.receiptAmount,
-          receiptIdentity: extractReceiptIdentity(accepted.text, accepted.receiptDate, accepted.receiptAmount),
-          receiptWarning: accepted.statusRejection || ""
-        });
+        for (const base of candidates) {
+          if (!base || base.receiptDate !== requiredDate || receiptStatusBlocks(base.statusRejection) || base.aiReceipt && !aiCandidateStronglyAcceptsReceipt(base, requiredDate)) continue;
+          const accepted = mergeCandidateForDecision(base);
+          if (!accepted || !isValidReceiptAmount(accepted.receiptAmount) || receiptStatusBlocks(accepted.statusRejection)) continue;
+          if (hasOpenAi && !openAiUnavailable && !receiptAmountHasIndependentConfirmation(candidates, accepted, requiredDate, !hasYandex) && !focusedAmountCanCompleteReceipt(accepted)) continue;
+          return withShadowEvidence({
+            ok: true,
+            receiptDate: accepted.receiptDate,
+            receiptAmount: accepted.receiptAmount,
+            receiptIdentity: extractReceiptIdentity(accepted.text, accepted.receiptDate, accepted.receiptAmount),
+            receiptWarning: accepted.statusRejection || ""
+          });
+        }
+        return void 0;
       };
       const returnStatus = () => {
         const statusCandidate = mergeCandidateForDecision(candidates.find((candidate) => receiptStatusBlocks(candidate.statusRejection)));
@@ -6470,6 +6568,7 @@ var require_upload_duplicate_guard = __commonJS({
             pass: "date_focus",
             amount: focusedCandidate.receiptAmount,
             date: focusedCandidate.receiptDate,
+            time: focusedCandidate.receiptTime,
             status: shadowOperationStatus(focusedCandidate),
             confidence: focusedCandidate.receiptConfidence,
             selectedAuthority: resolution.selectedAuthority === "primary_vision" ? receiptVisionSelectedAuthority() : resolution.selectedAuthority,
@@ -6508,6 +6607,7 @@ var require_upload_duplicate_guard = __commonJS({
             pass: "amount_focus",
             amount: focusedCandidate.receiptAmount,
             date: focusedCandidate.receiptDate,
+            time: focusedCandidate.receiptTime,
             status: shadowOperationStatus(focusedCandidate),
             confidence: focusedCandidate.receiptConfidence,
             selectedAuthority: resolution.selectedAuthority === "primary_vision" ? receiptVisionSelectedAuthority() : resolution.selectedAuthority,
@@ -6620,13 +6720,15 @@ var require_upload_duplicate_guard = __commonJS({
               const text = receiptOcrText(payload);
               if (text) {
                 yandexLayoutResult = "success";
+                const containerRejection = receiptContainerScreenshotRejection(text);
                 const candidate = {
                   text,
                   receiptDate: extractReceiptDate(text, requiredDate),
                   receiptAmount: extractReceiptAmount(text),
                   receiptAmountSource: `yandex:${model}`,
                   statusRejection: receiptStatusRejection(text),
-                  containerRejection: receiptContainerScreenshotRejection(text)
+                  containerRejection,
+                  containerRejectionSource: containerRejection ? "yandex_ocr" : "none"
                 };
                 candidates.push(candidate);
                 legacyOcrResults.push(shadowObservation(candidate, model));
@@ -6711,6 +6813,7 @@ var require_upload_duplicate_guard = __commonJS({
               pass: "amount_focus",
               amount: amountCandidate.receiptAmount,
               date: amountCandidate.receiptDate,
+              time: amountCandidate.receiptTime,
               status: shadowOperationStatus(amountCandidate),
               confidence: amountCandidate.receiptConfidence,
               selectedAuthority: "none",
@@ -6729,6 +6832,7 @@ var require_upload_duplicate_guard = __commonJS({
                 pass: "date_focus",
                 amount: dateCandidate.receiptAmount,
                 date: dateCandidate.receiptDate,
+                time: dateCandidate.receiptTime,
                 status: shadowOperationStatus(dateCandidate),
                 confidence: dateCandidate.receiptConfidence,
                 selectedAuthority: "none",
@@ -9027,6 +9131,7 @@ var require_upload_duplicate_guard = __commonJS({
       PRIMARY_IMAGE_VISION_SCHEMA,
       RECEIPT_VISION_ENGINE_MIN_CONFIDENCE,
       RECEIPT_VISION_ENGINE_SCHEMA,
+      RECEIPT_FIELD_FOCUS_SCHEMA,
       YANDEX_AI_STUDIO_RESPONSES_URL,
       YANDEX_AI_STUDIO_DEFAULT_MODEL,
       normalizedYandexAiStudioModel,
@@ -9040,6 +9145,8 @@ var require_upload_duplicate_guard = __commonJS({
       receiptVisionEngineIsAuthoritativeNonReceipt,
       requestOpenAiReceiptVisionEngineV1,
       normalizeReceiptAmount,
+      receiptFieldFocusParserState,
+      receiptFieldFocusCandidateFromJson,
       receiptFieldTelemetryPayload,
       receiptVisionAuthorityDisagreement,
       resolveReceiptVisionField,

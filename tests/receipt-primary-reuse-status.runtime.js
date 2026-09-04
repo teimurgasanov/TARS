@@ -12,7 +12,7 @@ function openAiPass(options) {
   if (format && format.name === "receipt_vision_engine_v1") return "vision-engine";
   const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
   if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ")) return "date-focus";
-  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:")) return "amount-focus";
+  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ")) return "amount-focus";
   return "primary";
 }
 
@@ -40,6 +40,19 @@ function receiptPayload(date) {
   };
 }
 
+function focusedPayload(date) {
+  return {
+    date,
+    time: null,
+    amount: 1200,
+    amount_text: "1200 RUB",
+    amount_label: "amount",
+    currency: "RUB",
+    confidence: 0.98,
+    ambiguity_reason: null
+  };
+}
+
 function provider(config, calls) {
   const requiredDate = config.requiredDate;
   return {
@@ -61,7 +74,7 @@ function provider(config, calls) {
           ambiguity_reason: "legacy regression scenario"
         }) } };
       }
-      return { statusCode: 200, data: { output_text: JSON.stringify(receiptPayload(requiredDate)) } };
+      return { statusCode: 200, data: { output_text: JSON.stringify(pass === "date-focus" || pass === "amount-focus" ? focusedPayload(requiredDate) : receiptPayload(requiredDate)) } };
     }
   };
 }

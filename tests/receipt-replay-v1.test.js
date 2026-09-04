@@ -26,18 +26,14 @@ function engineResult(date, amount, confidence = 0.98) {
 
 function focusedResult(date, amount) {
   return {
-    is_receipt: true,
-    has_readable_text: true,
-    visual_type: "bank_receipt",
-    is_mailing_proof: false,
-    service_type: "unknown",
-    is_screenshot_of_chat: false,
     date,
+    time: "18:24",
     amount,
     amount_text: `${amount} RUB`,
     amount_label: "Сумма операции",
-    status: "success",
-    bank: "test-bank"
+    currency: "RUB",
+    confidence: 0.98,
+    ambiguity_reason: null
   };
 }
 
@@ -56,7 +52,7 @@ function requestKind(options) {
   if (format && format.name === "receipt_vision_engine_v1") return "engine";
   const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
   if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ")) return "date-focus";
-  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА:")) return "amount-focus";
+  if (prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ")) return "amount-focus";
   return "primary";
 }
 
@@ -192,6 +188,7 @@ async function invokeReplay(loaded, scenario, sender, uploadOverrides) {
     assert.strictEqual(replay.result.strict_production_result, "date_mismatch", "historical replay outcome must remain separate from today's strict result");
     assert.strictEqual(replay.result.disagreement.date, true);
     assert.strictEqual(replay.result.selected_authority, "ocr_confirmed");
+    assert.strictEqual(replay.result.container_veto_source, "none");
     assert.strictEqual(replay.result.provider, "yandex_ocr");
     assert.strictEqual(replay.result.reason_code, "focused_confirms_ocr");
     assert(replay.result.targeted_pass_result.some((entry) => entry.pass === "date_focus" && entry.date === "2026-09-03"));

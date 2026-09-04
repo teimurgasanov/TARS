@@ -15,7 +15,8 @@ const request = source.slice(requestStart, requestEnd);
 const validation = source.slice(validationStart, validationEnd);
 
 assert.match(request, /focusAmount = false, focusDate = false/);
-assert.match(request, /focusAmount \|\| focusDate \? primaryModel === "gpt-4\.1" \? "gpt-4\.1-mini" : "gpt-4\.1" : primaryModel/);
+assert.match(request, /const fieldFocus = focusAmount \|\| focusDate/);
+assert.match(request, /fieldFocus \? primaryModel === "gpt-4\.1" \? "gpt-4\.1-mini" : "gpt-4\.1" : primaryModel/);
 assert.match(request, /ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА/);
 assert.match(request, /ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ/);
 assert.match(request, /не подставляй дату загрузки/);
@@ -24,7 +25,7 @@ assert.match(request, /Не используй комиссию, баланс, �
 assert.match(request, /Оплата SberPay со статусом «Исполнено» также является успешной операцией/);
 assert.match(request, /retryAttempt \+ 1, focusAmount, focusDate/);
 assert.doesNotMatch(validation, /if \(!aiCandidate \|\| !aiCandidateStronglyAcceptsReceipt\(aiCandidate, requiredDate\)/);
-assert.match(validation, /!candidate\.aiReceipt \|\| aiCandidateStronglyAcceptsReceipt\(candidate, requiredDate\)/);
+assert.match(validation, /base\.aiReceipt && !aiCandidateStronglyAcceptsReceipt\(base, requiredDate\)/);
 assert.match(validation, /receiptAmountHasIndependentConfirmation\(candidates, candidate, requiredDate, !hasYandex\)/);
 assert.match(source, /повёрнуто на 90, 180 или 270 градусов/);
 assert.match(source, /detail: "high"/);
