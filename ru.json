@@ -18,6 +18,8 @@
     "openai_receipt_model_description": "Например gpt-4.1-mini. Если пусто, используется gpt-4.1-mini",
     "image_classification_v1_shadow_enabled_label": "Пассивный shadow ImageClassificationV1",
     "image_classification_v1_shadow_enabled_description": "По умолчанию выключен. Выполняет безопасное обезличенное сравнение без изменения маршрутов и решений TARS",
+    "receipt_verification_v2_shadow_enabled_label": "Теневая проверка чеков Receipt Verification V2",
+    "receipt_verification_v2_shadow_enabled_description": "По умолчанию выключена. Сравнивает упрощённое решение Qwen и OCR, не изменяя production-обработку чеков",
     "scanner2_shadow_mode_label": "Режим теневого регистратора Scanner 2.0",
     "scanner2_shadow_mode_description": "По умолчанию OFF. RECORD_ONLY сохраняет обезличенные структурированные наблюдения, не меняя решений TARS",
     "scanner2_shadow_hmac_secret_label": "HMAC-секрет теневого регистратора Scanner 2.0",
