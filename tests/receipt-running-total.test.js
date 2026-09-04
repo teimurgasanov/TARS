@@ -62,6 +62,8 @@ const postStart = source.indexOf('async executePostMessageSent');
 const postEnd = source.indexOf('async receiptOcrConfig', postStart);
 const post = source.slice(postStart, postEnd);
 assert.match(post, /receiptWasAcceptedForMessage\(n, e\)[\s\S]*refreshFinancialReport: receiptAccepted/, 'normal receipt uploads must refresh the financial report only after acceptance');
+assert.doesNotMatch(post, /mediaV2\.result === ["']processed["']/, 'a generic processed image result must not be treated as an accepted receipt');
+assert.doesNotMatch(post, /result && result\.result === ["']processed["']/, 'manual image routing must not treat a generic processed result as an accepted receipt');
 
 const approvalStart = source.indexOf('async handleApproveReceiptCommand');
 const approvalEnd = source.indexOf('photoReportIntentAssociation', approvalStart);

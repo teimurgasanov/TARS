@@ -9951,7 +9951,7 @@ var C = class extends j.App {
         if (explicitTransferIntent) await this.clearTransferReportIntent(s, e.room);
         if (hasPersonalImageUpload && G.directFileIntent(e) !== "mailing") {
           const currentValidatedReceipts = Array.isArray(mediaV2.acceptedReceiptEntries) ? mediaV2.acceptedReceiptEntries : [];
-          const receiptAccepted = currentValidatedReceipts.length > 0 || mediaV2.result === "processed" || await this.receiptWasAcceptedForMessage(n, e);
+          const receiptAccepted = currentValidatedReceipts.length > 0 || await this.receiptWasAcceptedForMessage(n, e);
           await this.refreshPreliminaryReportAnalysis(n, s, r, e.sender, e.room, { refreshFinancialReport: receiptAccepted, currentValidatedReceipts });
         }
         return;
@@ -10435,7 +10435,7 @@ var C = class extends j.App {
         const result = await G.processPersonalMediaV2(sourceMessage, read, persistence, modify, this.getLogger(), http, config, "receipt", true);
         outcome = result && result.handled ? "receipt-processed" : "not-receipt";
         currentValidatedReceiptsForRefresh = result && Array.isArray(result.acceptedReceiptEntries) ? result.acceptedReceiptEntries : [];
-        receiptAcceptedForRefresh = Boolean(result && result.result === "processed") || await this.receiptWasAcceptedForMessage(read, sourceMessage);
+        receiptAcceptedForRefresh = currentValidatedReceiptsForRefresh.length > 0 || await this.receiptWasAcceptedForMessage(read, sourceMessage);
         if (!result || !result.handled) await this.publishManualImageSelectionText(read, modify, data.room, "⚠️ Это изображение не подтверждено как финансовый чек.");
       } else if (routedType === "photo") {
         statusMessageId = await this.publishManualImageSelectionText(read, modify, data.room, "⏳ Обрабатываю фото…");
