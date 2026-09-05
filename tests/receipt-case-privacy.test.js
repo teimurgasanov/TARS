@@ -43,7 +43,7 @@ const { loadReceiptCaseHelpers, createStore } = require("./receipt-case-v1-harne
 
   assert.deepStrictEqual(Object.keys(accepted), [
     "schemaVersion", "caseId", "sourceMessageCorrelation", "sourceUploadCorrelation",
-    "masterCorrelation", "state", "strictDecision", "controlReason",
+    "masterCorrelation", "statusCorrelation", "state", "strictDecision", "controlReason",
     "normalizedAmount", "normalizedDate", "createdAt", "updatedAt", "revision"
   ]);
   const serializedPersistence = JSON.stringify(Array.from(store.records.entries()));

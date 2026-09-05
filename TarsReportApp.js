@@ -1144,7 +1144,7 @@ var require_upload_duplicate_guard = __commonJS({
       "inbound_received", "media_resolution", "intent_gate", "primary_classification",
       "personal_media", "upload_read", "receipt_vision", "receipt_ocr",
       "strict_receipt_decision", "duplicate_exact", "duplicate_identity",
-      "routing_decision", "result_publish", "receipt_case", "claim_complete", "terminal_outcome"
+      "routing_decision", "result_publish", "receipt_case", "receipt_case_status", "claim_complete", "terminal_outcome"
     ];
     const TARS_TRACE_V1_REASON_CODES = [
       "ACCEPTED_RESULT_PUBLISHED", "ACCEPTED_RESULT_SKIPPED", "APP_MESSAGE_SKIPPED", "ARCHIVE_MESSAGE_SKIPPED",
@@ -1156,6 +1156,7 @@ var require_upload_duplicate_guard = __commonJS({
       "PRIMARY_CLASSIFICATION_FAILED", "PRIMARY_CLASSIFIED", "PRIMARY_EMPTY",
       "RECEIPT_CASE_ACCEPTED", "RECEIPT_CASE_CONTROL", "RECEIPT_CASE_DUPLICATE", "RECEIPT_CASE_FAILED",
       "RECEIPT_CASE_PERSISTENCE_FAILED", "RECEIPT_CASE_PROCESSING", "RECEIPT_CASE_RECEIVED",
+      "RECEIPT_STATUS_CREATED", "RECEIPT_STATUS_UPDATED", "RECEIPT_STATUS_UPDATE_FAILED",
       "RECEIPT_OCR_COMPLETED", "RECEIPT_OCR_INCOMPLETE", "RECEIPT_VISION_COMPLETED", "RECEIPT_VISION_HTTP_ERROR",
       "RECEIPT_VISION_INVALID_RESPONSE", "RECEIPT_VISION_UNAVAILABLE", "REJECTED_RESULT_PUBLISHED", "ROUTE_SELECTED",
       "ROUTE_UNRESOLVED", "STRICT_ACCEPT", "STRICT_REJECT", "UNHANDLED_EXCEPTION", "UNSPECIFIED", "UPLOAD_READ",
@@ -1204,7 +1205,7 @@ var require_upload_duplicate_guard = __commonJS({
         ts_ms: Date.now(),
         component: allowed(source.component, ["rocketchat", "media_resolver", "intent_gate", "vision", "ocr", "receipt_resolution", "receipt_case", "duplicate_guard", "routing", "publisher"], "rocketchat"),
         stage: allowed(source.stage, TARS_TRACE_V1_STAGES, "terminal_outcome"),
-        event: allowed(source.event, ["start", "attempt", "retry", "success", "decision", "skip", "error", "finish"], "finish"),
+        event: allowed(source.event, ["start", "attempt", "retry", "success", "decision", "skip", "error", "finish", "status_created", "status_updated", "status_update_failed"], "finish"),
         attempt,
         duration_ms: durationMs,
         outcome: allowed(source.outcome, ["ok", "accepted", "rejected", "control", "forwarded", "duplicate", "skipped", "failed", "unknown"], "unknown"),
@@ -1297,6 +1298,14 @@ var require_upload_duplicate_guard = __commonJS({
     function receiptCaseIndexAssociationV1() {
       return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, "receipt-case-v1:index");
     }
+    function receiptCaseStatusCorrelationV1(caseId) {
+      try {
+        const value = String(caseId || "");
+        return /^rcv1_[a-f0-9]{32}$/.test(value) ? `rcs_${sha256Bytes(utf8Bytes(`receipt-case-v1:status:${value}`)).slice(0, 32)}` : "";
+      } catch (_2) {
+        return "";
+      }
+    }
     function receiptCaseNormalizedAmountV1(value) {
       const source = value && typeof value === "object" ? value.value : value;
       const amount = Number(source);
@@ -1324,6 +1333,7 @@ var require_upload_duplicate_guard = __commonJS({
           sourceMessageCorrelation: correlation(source.sourceMessageCorrelation, /^rcm_[a-f0-9]{32}$/),
           sourceUploadCorrelation: correlation(source.sourceUploadCorrelation, /^rcu_[a-f0-9]{32}$/),
           masterCorrelation: correlation(source.masterCorrelation, /^rca_[a-f0-9]{32}$/),
+          statusCorrelation: correlation(source.statusCorrelation || receiptCaseStatusCorrelationV1(caseId), /^rcs_[a-f0-9]{32}$/),
           state: receiptCaseEnumV1(source.state, RECEIPT_CASE_V1_STATES, "RECEIVED"),
           strictDecision: receiptCaseEnumV1(source.strictDecision, ["unknown", "accept", "control", "duplicate", "failed"], "unknown"),
           controlReason: receiptCaseEnumV1(source.controlReason, controlReasons, source.state === "CONTROL" ? "unresolved" : "none"),
@@ -1411,6 +1421,13 @@ var require_upload_duplicate_guard = __commonJS({
         removedCases[entry.caseId] = true;
         const caseAssociation = receiptCaseAssociationV1(entry.caseId);
         if (caseAssociation) await persistence.removeByAssociation(caseAssociation);
+        const statusCorrelation = receiptCaseStatusCorrelationV1(entry.caseId);
+        if (statusCorrelation) {
+          try {
+            await persistence.removeByAssociation(receiptProcessingStatusAssociation(statusCorrelation));
+          } catch (_2) {
+          }
+        }
         for (const alias of entry.aliases || []) {
           const aliasAssociation = receiptCaseAliasAssociationV1(alias);
           if (aliasAssociation) await persistence.removeByAssociation(aliasAssociation);
@@ -1516,7 +1533,7 @@ var require_upload_duplicate_guard = __commonJS({
         return void 0;
       }
     }
-    function scheduleReceiptCaseV1(input, read, persistence, options = {}, logger, trace) {
+    function scheduleReceiptCaseV1(input, read, persistence, options = {}, logger, trace, statusManager) {
       try {
         if (options.enabled === false || !read || !persistence || receiptCaseV1QueueDepth >= RECEIPT_CASE_V1_QUEUE_LIMIT) return false;
         const source = input && typeof input === "object" ? input : {};
@@ -1536,8 +1553,10 @@ var require_upload_duplicate_guard = __commonJS({
         const run = async () => {
           try {
             const record = await findOrCreateReceiptCaseV1(scheduled, read, persistence, options, logger, trace);
-            if (!record || scheduled.state === "RECEIVED") return Boolean(record);
-            return Boolean(await transitionReceiptCaseV1(record.caseId, scheduled, read, persistence, options, logger, trace));
+            if (!record) return false;
+            const resolved = scheduled.state === "RECEIVED" ? record : await transitionReceiptCaseV1(record.caseId, scheduled, read, persistence, options, logger, trace);
+            if (resolved && statusManager && typeof statusManager.syncCase === "function") await statusManager.syncCase(resolved, trace);
+            return Boolean(resolved);
           } catch (_2) {
             return false;
           } finally {
@@ -2151,87 +2170,107 @@ var require_upload_duplicate_guard = __commonJS({
       });
     }
     const receiptProcessingStatusPromises = /* @__PURE__ */ new Map();
-    function receiptProcessingStatusAssociation(caseToken) {
-      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `receipt-processing-status-v1:${caseToken}`);
+    function receiptProcessingStatusAssociation(statusCorrelation) {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `receipt-case-status-v1:${statusCorrelation}`);
     }
-    function createReceiptProcessingStatusManager(message, read, persistence, modify, logger, allowPublish = true) {
+    function receiptCaseStatusTextV1(record) {
+      const state = receiptCaseEnumV1(record && record.state, RECEIPT_CASE_V1_STATES, "FAILED");
+      if (state === "PROCESSING" || state === "RECEIVED") return "⏳ Проверяем чек";
+      if (state === "CONTROL") return "⚠️ Чек требует проверки";
+      if (state === "DUPLICATE") return "🚫 Этот чек уже был отправлен";
+      if (state === "FAILED") return "⚠️ Не удалось завершить проверку";
+      const amount = Number(record && record.normalizedAmount && record.normalizedAmount.status === "recognized" ? record.normalizedAmount.value : 0);
+      if (state === "ACCEPTED" && Number.isFinite(amount) && amount > 0) {
+        const formatted = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(amount).replace(/[\u00a0\u202f]/g, " ");
+        return `✅ Чек ${formatted} ₽ принят`;
+      }
+      return state === "ACCEPTED" ? "✅ Чек принят" : "⚠️ Не удалось завершить проверку";
+    }
+    function createReceiptProcessingStatusManager(message, read, persistence, modify, logger, allowPublish = true, managerTrace) {
       const handles = /* @__PURE__ */ new Map();
       const ensure = async (file, content, validationContext) => {
         const context = validationContext || receiptStageContext(file, content, {});
         const caseToken = String(context && context.caseToken || "");
         if (!allowPublish || !caseToken || handles.has(caseToken)) return handles.get(caseToken);
-        const association = receiptProcessingStatusAssociation(caseToken);
-        const create = async () => {
-          const now = Date.now();
-          const records = (await read.getPersistenceReader().readByAssociation(association) || []).filter((record) => record && record.caseToken === caseToken && record.state === "active");
-          const existing = records.filter((record) => Number(record.expiresAt || 0) > now);
-          if (existing.length) {
-            const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
-            const handle = { caseToken, context, association, messageId: String(existing[0].messageId || ""), appUser, owned: true };
-            handles.set(caseToken, handle);
-            return handle;
-          }
+        const handle = { caseToken, context };
+        handles.set(caseToken, handle);
+        return handle;
+      };
+      const emitStatus = (trace, record, event, outcome, reasonCode, errorClass = "none") => {
+        emitTarsTraceV1(logger, trace || managerTrace, {
+          component: "publisher", stage: "receipt_case_status", event, outcome, reason_code: reasonCode, error_class: errorClass,
+          ids: { case: record && record.caseId }, attrs: { to_state: record && record.state || "NONE", intent: "receipt" }
+        });
+      };
+      const persistLink = async (association, value) => {
+        if (persistence && typeof persistence.updateByAssociation === "function") return persistence.updateByAssociation(association, value, true);
+        return persistence.createWithAssociation(value, association);
+      };
+      const syncCase = async (record, trace) => {
+        const statusCorrelation = String(record && record.statusCorrelation || receiptCaseStatusCorrelationV1(record && record.caseId));
+        if (!allowPublish || !/^rcs_[a-f0-9]{32}$/.test(statusCorrelation) || !message || !message.room) return void 0;
+        const association = receiptProcessingStatusAssociation(statusCorrelation);
+        const run = async () => {
+          const records = await read.getPersistenceReader().readByAssociation(association) || [];
+          const existing = records.filter((entry) => entry && entry.schemaVersion === "receipt-case-status-v1" && entry.statusCorrelation === statusCorrelation).sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))[0];
           const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
-          if (!appUser || !message || !message.room) return void 0;
-          for (const stale of records) {
-            const staleMessageId = String(stale.messageId || "");
-            if (!staleMessageId) continue;
-            try {
-              const updater = await modify.getUpdater().message(staleMessageId, appUser);
-              const staleMessage = updater && updater.getMessage ? updater.getMessage() : void 0;
-              if (staleMessage) await modify.getDeleter().deleteMessage(staleMessage, staleMessage.sender || appUser);
-            } catch (error) {
-              // Do not publish another status while an older one may still be
-              // visible. Receipt processing itself must continue fail-open.
-              if (logger) logger.warn(`RECEIPT_STAGE case=${caseToken} stage=processing_status_stale_cleanup elapsedMs=0 outcome=failed`);
-              return void 0;
-            }
+          if (!appUser) return void 0;
+          const text = receiptCaseStatusTextV1(record);
+          const textFingerprint = sha256Bytes(utf8Bytes(`receipt-case-status-v1:${text}`)).slice(0, 32);
+          if (existing && existing.statusMessageId) {
+            if (existing.state === record.state && existing.textFingerprint === textFingerprint) return existing;
+            const updaterApi = modify.getUpdater();
+            const builder = await updaterApi.message(existing.statusMessageId, appUser);
+            const statusMessage = builder && builder.getMessage ? builder.getMessage() : void 0;
+            if (!statusMessage || !builder || typeof builder.setText !== "function" || typeof updaterApi.finish !== "function") throw new Error("receipt status message is unavailable");
+            builder.setText(text);
+            await updaterApi.finish(builder);
+            const next = { ...existing, state: record.state, textFingerprint, updatedAt: Date.now() };
+            await persistLink(association, next);
+            emitStatus(trace, record, "status_updated", "ok", "RECEIPT_STATUS_UPDATED");
+            return next;
           }
-          if (records.length) {
-            try {
-              await persistence.removeByAssociation(association);
-            } catch (error) {
-              if (logger) logger.warn(`RECEIPT_STAGE case=${caseToken} stage=processing_status_stale_persistence_cleanup elapsedMs=0 outcome=failed`);
-              return void 0;
-            }
-          }
-          const builder = attachReceiptResultToMessage(
-            modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText("⏳ Чек проверяется…"),
-            message.id
-          );
+          const builder = modify.getCreator().startMessage().setSender(appUser).setRoom(message.room).setText(text);
           const statusMessageId = String(await modify.getCreator().finish(builder) || "");
-          if (!statusMessageId) return void 0;
+          if (!statusMessageId) throw new Error("receipt status message was not created");
+          const linkage = {
+            schemaVersion: "receipt-case-status-v1",
+            statusCorrelation,
+            statusMessageId,
+            roomId: String(message.room.id || ""),
+            sourceMessageId: String(message.id || ""),
+            userId: String(message.sender && message.sender.id || ""),
+            state: record.state,
+            textFingerprint,
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          };
           try {
-            await persistence.createWithAssociation({
-              caseToken,
-              messageId: statusMessageId,
-              state: "active",
-              createdAt: now,
-              expiresAt: now + 15 * 60 * 1e3
-            }, association);
+            await persistLink(association, linkage);
           } catch (error) {
             try {
-              const updater = await modify.getUpdater().message(statusMessageId, appUser);
-              const statusMessage = updater && updater.getMessage ? updater.getMessage() : void 0;
+              const updaterApi = modify.getUpdater();
+              const statusBuilder = await updaterApi.message(statusMessageId, appUser);
+              const statusMessage = statusBuilder && statusBuilder.getMessage ? statusBuilder.getMessage() : void 0;
               if (statusMessage) await modify.getDeleter().deleteMessage(statusMessage, statusMessage.sender || appUser);
             } catch (_6) {
             }
             throw error;
           }
-          const handle = { caseToken, context, association, messageId: statusMessageId, appUser, owned: true };
-          handles.set(caseToken, handle);
-          logReceiptStage(logger, context, "processing_status_published");
-          return handle;
+          emitStatus(trace, record, "status_created", "ok", "RECEIPT_STATUS_CREATED");
+          return linkage;
         };
-        const running = receiptProcessingStatusPromises.get(caseToken) || create();
-        receiptProcessingStatusPromises.set(caseToken, running);
+        const previous = receiptProcessingStatusPromises.get(statusCorrelation) || Promise.resolve();
+        const running = previous.then(run, run);
+        receiptProcessingStatusPromises.set(statusCorrelation, running);
         try {
           return await running;
         } catch (error) {
-          if (logger) logger.warn(`RECEIPT_STAGE case=${caseToken} stage=processing_status_publish elapsedMs=0 outcome=failed`);
+          if (logger) logger.warn(`RECEIPT_STATUS_UPDATE_FAILED state=${receiptCaseEnumV1(record && record.state, RECEIPT_CASE_V1_STATES, "FAILED")}`);
+          emitStatus(trace, record, "status_update_failed", "failed", "RECEIPT_STATUS_UPDATE_FAILED", "publisher");
           return void 0;
         } finally {
-          if (receiptProcessingStatusPromises.get(caseToken) === running) receiptProcessingStatusPromises.delete(caseToken);
+          if (receiptProcessingStatusPromises.get(statusCorrelation) === running) receiptProcessingStatusPromises.delete(statusCorrelation);
         }
       };
       const mark = (handle, stage, startedAt, outcome) => {
@@ -2241,31 +2280,8 @@ var require_upload_duplicate_guard = __commonJS({
         for (const handle of handles.values()) mark(handle, stage, void 0, outcome);
       };
       const clearAll = async () => {
-        for (const handle of handles.values()) {
-          if (!handle || !handle.owned) continue;
-          let messageCleared = !handle.messageId;
-          try {
-            const appUser = handle.appUser || await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
-            if (handle.messageId && appUser) {
-              const updater = await modify.getUpdater().message(handle.messageId, appUser);
-              const statusMessage = updater && updater.getMessage ? updater.getMessage() : void 0;
-              if (statusMessage) {
-                await modify.getDeleter().deleteMessage(statusMessage, statusMessage.sender || appUser);
-              }
-              messageCleared = true;
-            }
-          } catch (error) {
-            if (logger) logger.warn(`RECEIPT_STAGE case=${handle.caseToken} stage=processing_status_cleanup elapsedMs=0 outcome=failed`);
-          }
-          if (!messageCleared) continue;
-          try {
-            await persistence.removeByAssociation(handle.association);
-          } catch (error) {
-            if (logger) logger.warn(`RECEIPT_STAGE case=${handle.caseToken} stage=processing_status_persistence_cleanup elapsedMs=0 outcome=failed`);
-          }
-        }
       };
-      return { ensure, mark, markAll, clearAll };
+      return { ensure, syncCase, mark, markAll, clearAll };
     }
     function archiveObjectKey(file, receiptCheck, user, exact, now = Date.now()) {
       const date = String(receiptCheck && receiptCheck.receiptDate || "unknown"), parts = date.split("-"), username = String(user && user.username || user && user.id || "master").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "master", mime = String(file && file.type || "").toLowerCase(), extension = mime.indexOf("png") !== -1 ? "png" : "jpg";
@@ -8846,10 +8862,10 @@ var require_upload_duplicate_guard = __commonJS({
               masterId: message.sender && message.sender.id,
               sourceType: message.__mediaV2PreviewOnly === true ? "preview" : "original"
             };
-            scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "PROCESSING", strictDecision: "unknown" }, read, persistence, { enabled: true }, logger, trace);
+            scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "PROCESSING", strictDecision: "unknown" }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
           }
           if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) {
-            if (receiptCaseByUpload[messageFileId]) scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate" }, read, persistence, { enabled: true }, logger, trace);
+            if (receiptCaseByUpload[messageFileId]) scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate" }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
             return true;
           }
           const postedExact = exactHash(content);
@@ -8890,7 +8906,7 @@ var require_upload_duplicate_guard = __commonJS({
                 masterId: message.sender && message.sender.id,
                 sourceType: message.__mediaV2PreviewOnly === true ? "preview" : "original"
               };
-              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "PROCESSING", strictDecision: "unknown" }, read, persistence, { enabled: true }, logger, trace);
+              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "PROCESSING", strictDecision: "unknown" }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
             }
           }
           const processingStatusHandle = protectedRoom.kind === "receipt" && processingStatusManager ? await processingStatusManager.ensure(messageFile, content, receiptValidationContext) : void 0;
@@ -8941,7 +8957,7 @@ var require_upload_duplicate_guard = __commonJS({
                 component: "publisher", stage: "result_publish", event: "success", outcome: "rejected", reason_code: "REJECTED_RESULT_PUBLISHED",
                 ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
               });
-              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "CONTROL", strictDecision: "control", controlReason: "existing_control", normalizedAmount: exactMatch.receiptAmount, normalizedDate: exactMatch.receiptDate }, read, persistence, { enabled: true }, logger, trace);
+              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "CONTROL", strictDecision: "control", controlReason: "existing_control", normalizedAmount: exactMatch.receiptAmount, normalizedDate: exactMatch.receiptDate }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
               return true;
             }
             // The receipt index is shared by all master rooms. Once an exact
@@ -8985,7 +9001,7 @@ var require_upload_duplicate_guard = __commonJS({
               await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, "🚫 ПОВТОР ЧЕКА");
             }
             if (logger) logger.info(`Deleted posted exact duplicate receipt ${message.id || "unknown"}`);
-            scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: exactMatch.receiptAmount, normalizedDate: exactMatch.receiptDate }, read, persistence, { enabled: true }, logger, trace);
+            scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: exactMatch.receiptAmount, normalizedDate: exactMatch.receiptDate }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
             return true;
           }
           const isCurrentPreUpload = exactMatch && exactMatch.source === "pre" && exactMatch.roomId === (message.room && message.room.id || exactMatch.roomId) && (protectedRoom.kind === "receipt" || Date.now() - Number(exactMatch.uploadedAt || 0) < 30 * 60 * 1e3);
@@ -9029,7 +9045,7 @@ var require_upload_duplicate_guard = __commonJS({
                   component: "publisher", stage: "result_publish", event: "success", outcome: "control", reason_code: "CONTROL_RESULT_PUBLISHED",
                   ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
                 });
-                scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "CONTROL", strictDecision: "control", controlReason: receiptCaseControlReasonV1(receiptCheck), normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace);
+                scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "CONTROL", strictDecision: "control", controlReason: receiptCaseControlReasonV1(receiptCheck), normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
                 await recordShadowReceiptOutcome({
                   messageId: message.id,
                   uploadId: messageFileId,
@@ -9086,7 +9102,7 @@ var require_upload_duplicate_guard = __commonJS({
                   component: "publisher", stage: "result_publish", event: "success", outcome: "duplicate", reason_code: "DUPLICATE_RESULT_PUBLISHED",
                   ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
                 });
-                scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace);
+                scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
                 if (identityMatch) await recordShadowReceiptOutcome({
                   messageId: message.id,
                   uploadId: messageFileId,
@@ -9202,7 +9218,7 @@ var require_upload_duplicate_guard = __commonJS({
                 component: "publisher", stage: "result_publish", event: "success", outcome: "control", reason_code: "CONTROL_RESULT_PUBLISHED",
                 ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
               });
-              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "CONTROL", strictDecision: "control", controlReason: receiptCaseControlReasonV1(receiptCheck), normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace);
+              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "CONTROL", strictDecision: "control", controlReason: receiptCaseControlReasonV1(receiptCheck), normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
               await recordShadowReceiptOutcome({
                 messageId: message.id,
                 uploadId: messageFileId,
@@ -9255,7 +9271,7 @@ var require_upload_duplicate_guard = __commonJS({
                 component: "publisher", stage: "result_publish", event: "success", outcome: "duplicate", reason_code: "DUPLICATE_RESULT_PUBLISHED",
                 ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
               });
-              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace);
+              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
               if (identityMatch) await recordShadowReceiptOutcome({
                 messageId: message.id,
                 uploadId: messageFileId,
@@ -9365,7 +9381,7 @@ var require_upload_duplicate_guard = __commonJS({
           });
         } catch (postError) {
           const failedCase = receiptCaseByUpload[String(messageFile && (messageFile._id || messageFile.id) || "")];
-          if (failedCase) scheduleReceiptCaseV1({ ...failedCase, state: "FAILED", strictDecision: "failed" }, read, persistence, { enabled: true }, logger, trace);
+          if (failedCase) scheduleReceiptCaseV1({ ...failedCase, state: "FAILED", strictDecision: "failed" }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
           if (logger) logger.warn(`Duplicate post-check failed for upload ${messageFile._id || messageFile.id || "unknown"}: ${postError && postError.message || postError}`);
         }
       }
@@ -9401,7 +9417,7 @@ var require_upload_duplicate_guard = __commonJS({
           if (roomConfig.kind === "receipt") {
             for (const entry of scopedEntries) {
               const receiptCase = receiptCaseByUpload[String(entry && entry.uploadId || "")];
-              if (receiptCase) scheduleReceiptCaseV1({ ...receiptCase, state: "ACCEPTED", strictDecision: "accept", normalizedAmount: entry.receiptAmount, normalizedDate: entry.receiptDate }, read, persistence, { enabled: true }, logger, trace);
+              if (receiptCase) scheduleReceiptCaseV1({ ...receiptCase, state: "ACCEPTED", strictDecision: "accept", normalizedAmount: entry.receiptAmount, normalizedDate: entry.receiptDate }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
             }
           }
         }
@@ -9520,7 +9536,7 @@ var require_upload_duplicate_guard = __commonJS({
           return { handled: true, status: "work-photo-not-forwarded", result: false };
         }
       }
-      const processingStatusManager = createReceiptProcessingStatusManager(message, read, persistence, modify, logger, allowProcessingStatus);
+      const processingStatusManager = createReceiptProcessingStatusManager(message, read, persistence, modify, logger, allowProcessingStatus, trace);
       try {
         const resultContext = {};
         if (trace) resultContext.trace = trace;

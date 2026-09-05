@@ -145,6 +145,10 @@ async function verifyStatusIdempotency(guard) {
     }
   };
   const persistence = {
+    async updateByAssociation(association, value) {
+      records.set(associationKey(association), [value]);
+      return value;
+    },
     async createWithAssociation(value, association) {
       const key = associationKey(association);
       records.set(key, (records.get(key) || []).concat([value]));
@@ -177,8 +181,14 @@ async function verifyStatusIdempotency(guard) {
     getUpdater() {
       return {
         async message(id) {
-          return { getMessage() { return messages.get(String(id)); } };
-        }
+          const state = messages.get(String(id));
+          return {
+            getMessage() { return state; },
+            setText(value) { if (state) state.text = value; return this; },
+            __state: state
+          };
+        },
+        async finish(builder) { return builder && builder.__state && builder.__state.id; }
       };
     },
     getDeleter() {
@@ -197,40 +207,43 @@ async function verifyStatusIdempotency(guard) {
   const first = guard.createReceiptProcessingStatusManager(message, read, persistence, modify, { info() {}, warn() {} }, true);
   const second = guard.createReceiptProcessingStatusManager(message, read, persistence, modify, { info() {}, warn() {} }, true);
 
-  const [firstHandle, secondHandle] = await Promise.all([
-    first.ensure(file, content, context),
-    second.ensure(file, content, guard.receiptStageContext(file, content, {}))
-  ]);
+  const [firstHandle, secondHandle] = await Promise.all([first.ensure(file, content, context), second.ensure(file, content, context)]);
   assert.ok(firstHandle && secondHandle);
+  const receiptInput = { sourceMessageId: message.id, sourceUploadId: file.id, masterId: message.sender.id, sourceType: "original" };
+  guard.resetReceiptCaseV1ForTests();
+  guard.scheduleReceiptCaseV1({ ...receiptInput, state: "PROCESSING" }, read, persistence, { enabled: true }, undefined, undefined, first);
+  guard.scheduleReceiptCaseV1({ ...receiptInput, state: "PROCESSING" }, read, persistence, { enabled: true }, undefined, undefined, second);
+  await guard.flushReceiptCaseV1ForTests();
+  await Promise.all([first.clearAll(), second.clearAll()]);
   assert.strictEqual(published.length, 1, "preview/original race must create one processing status");
-  assert.strictEqual(published[0].text, "⏳ Чек проверяется…");
+  assert.strictEqual(published[0].text, "⏳ Проверяем чек");
+  assert.deepStrictEqual(deleted, [], "canonical status must survive finalization");
 
+  guard.scheduleReceiptCaseV1({ ...receiptInput, state: "ACCEPTED", strictDecision: "accept", normalizedAmount: 1200 }, read, persistence, { enabled: true }, undefined, undefined, second);
+  await guard.flushReceiptCaseV1ForTests();
   await second.clearAll();
-  assert.strictEqual(deleted.length, 0, "a non-owner event must not remove the active owner's status");
-  await first.clearAll();
-  assert.deepStrictEqual(deleted, [published[0].id], "finalization must remove the one processing status");
-  assert.strictEqual(records.size, 0, "processing status persistence must not survive successful finalization");
+  assert.strictEqual(published.length, 1, "terminal transition must update the canonical status");
+  assert.strictEqual(messages.get(published[0].id).text.replace(/[\u00a0\u202f]/g, " "), "✅ Чек 1 200 ₽ принят");
 
   const disabled = guard.createReceiptProcessingStatusManager(message, read, persistence, modify, { info() {}, warn() {} }, false);
   assert.strictEqual(await disabled.ensure(file, content, context), undefined);
-  assert.strictEqual(published.length, 1, "non-winning events must not publish a status");
+  assert.strictEqual(published.length, 1, "disabled status manager must not publish a status");
 
   const failingFile = { _id: "status-failure-upload", id: "status-failure-upload", name: "receipt.jpg", type: "image/jpeg" };
-  const failingContent = Buffer.from("receipt-processing-status-failure");
-  const failingManager = guard.createReceiptProcessingStatusManager(
-    message,
-    read,
-    { async createWithAssociation() { throw new Error("mock persistence failure"); }, async removeByAssociation() {} },
-    modify,
-    { info() {}, warn() {} },
-    true
-  );
-  assert.strictEqual(
-    await failingManager.ensure(failingFile, failingContent, guard.receiptStageContext(failingFile, failingContent, {})),
-    undefined,
-    "status infrastructure failure must not escape into the receipt path"
-  );
-  assert.strictEqual(deleted.length, 2, "a status whose persistence write failed must be removed best-effort");
+  const failingInput = { sourceMessageId: "failing-source-message", sourceUploadId: failingFile.id, masterId: message.sender.id, sourceType: "original" };
+  guard.resetReceiptCaseV1ForTests();
+  const failingPersistence = {
+    async updateByAssociation(association, value) {
+      if (associationKey(association).startsWith("receipt-case-status-v1:")) throw new Error("mock persistence failure");
+      records.set(associationKey(association), [value]);
+    },
+    async removeByAssociation() {}
+  };
+  const isolatedFailingManager = guard.createReceiptProcessingStatusManager(message, read, failingPersistence, modify, { info() {}, warn() {} }, true);
+  guard.scheduleReceiptCaseV1({ ...failingInput, state: "PROCESSING" }, read, failingPersistence, { enabled: true }, undefined, undefined, isolatedFailingManager);
+  await guard.flushReceiptCaseV1ForTests();
+  await isolatedFailingManager.clearAll();
+  assert.strictEqual(deleted.length, 1, "a status whose persistence write failed must be removed best-effort");
 }
 
 (async () => {
