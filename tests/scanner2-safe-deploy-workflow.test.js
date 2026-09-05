@@ -39,6 +39,8 @@ assert.match(workflow, /evaluateRules\|resolveConflicts\|makeDecision\|runOfflin
 assert.match(workflow, /for test_file in tests\/scanner2-\*\.test\.js/);
 assert.match(workflow, /test "\$scanner_count" -eq 22/);
 assert.match(workflow, /test "\$legacy_count" -eq 78/);
+assert.match(workflow, /Run TARS Memory V1 golden gate[\s\S]*node tests\/tars-memory-v1\.test\.js/);
+assert.match(workflow, /! -name 'tars-memory-v1\.test\.js'/);
 assert.match(workflow, /node --check tests\/scanner2-packaging\.test\.js/);
 assert.match(workflow, /git diff --check/);
 assert.match(workflow, /zsh -n build-tars\.sh/);

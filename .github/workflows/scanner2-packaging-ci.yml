@@ -196,6 +196,12 @@ jobs:
           node tests/receipt-replay-v1.test.js
           echo "RECEIPT_VISION_ENGINE_V1_TEST_COUNT=3" >> "$GITHUB_ENV"
 
+      - name: Run TARS Memory V1 golden gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/tars-memory-v1.test.js
+
       - name: Run 78 legacy TARS tests
         shell: bash
         run: |
@@ -205,7 +211,7 @@ jobs:
             echo "==> $test_file"
             node "$test_file"
             legacy_count=$((legacy_count + 1))
-          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' ! -name 'yandex-ai-studio-vision-provider.test.js' ! -name 'receipt-vision-engine-v1.test.js' ! -name 'receipt-extraction-fixes-v1.test.js' ! -name 'receipt-replay-v1.test.js' | sort)
+          done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' ! -name 'yandex-ai-studio-vision-provider.test.js' ! -name 'receipt-vision-engine-v1.test.js' ! -name 'receipt-extraction-fixes-v1.test.js' ! -name 'receipt-replay-v1.test.js' ! -name 'tars-memory-v1.test.js' | sort)
           test "$legacy_count" -eq 78
           echo "LEGACY_TEST_COUNT=$legacy_count" >> "$GITHUB_ENV"
 
