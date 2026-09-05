@@ -47,7 +47,8 @@ assert(handler.includes("hasInitialMediaSignal ? 750 : 400, hasInitialMediaSigna
 assert(handler.includes("G.isPersonalTarsRoom(e && e.room) && resolvedImages.length > 0"), "every branch must use messageImageFiles as the single image detector");
 assert(handler.includes("!G.messageImageFiles(e).length && recentPostMessageIds.has(messageId)"), "an attachment-only image event must never be suppressed by message-id deduplication");
 assert(handler.includes("await this.clearTransferReportIntent(s, e.room)"), "receipt intent must be cleared after successful processing");
-assert(handler.includes("ФАЙЛ НЕ ОБРАБОТАН"), "a terminal upload failure must be visible to the master");
+assert(!handler.includes("ФАЙЛ НЕ ОБРАБОТАН"), "a terminal upload failure must not publish a noisy user-facing message");
+assert.match(handler, /if \(e && e\.__mediaV2NotSettled && !hasPersonalImageUpload\) \{\s*return;\s*\}/, "a terminal upload failure must still stop processing after reconciliation is exhausted");
 assert(handler.includes("POST_PROBE_PREVIEW_FALLBACK"), "an imageUrl-only upload must enter guarded fallback processing after the original wait");
 assert(!handler.includes("POST_PROBE_SKIP_PREVIEW_ONLY"), "an imageUrl-only upload must not be silently discarded");
 assert(handler.includes("recentPostUploadIds.delete(uploadEventKey)"), "failed processing must release local upload deduplication immediately");
