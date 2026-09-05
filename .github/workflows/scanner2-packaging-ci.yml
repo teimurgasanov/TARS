@@ -202,7 +202,7 @@ jobs:
           set -euo pipefail
           node tests/tars-memory-v1.test.js
 
-      - name: Run 82 legacy TARS tests
+      - name: Run 83 legacy TARS tests
         shell: bash
         run: |
           set -euo pipefail
@@ -212,7 +212,7 @@ jobs:
             node "$test_file"
             legacy_count=$((legacy_count + 1))
           done < <(find tests -maxdepth 1 -type f -name '*.test.js' ! -name 'scanner2-*.test.js' ! -name 'image-classification-v1.test.js' ! -name 'image-classification-v1-runtime-shadow.test.js' ! -name 'yandex-ai-studio-vision-provider.test.js' ! -name 'receipt-vision-engine-v1.test.js' ! -name 'receipt-extraction-fixes-v1.test.js' ! -name 'receipt-replay-v1.test.js' ! -name 'tars-memory-v1.test.js' | sort)
-          test "$legacy_count" -eq 82
+          test "$legacy_count" -eq 83
           echo "LEGACY_TEST_COUNT=$legacy_count" >> "$GITHUB_ENV"
 
       - name: Build canonical package
