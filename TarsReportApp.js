@@ -1166,7 +1166,9 @@ var require_upload_duplicate_guard = __commonJS({
       return {
         traceId: `trc_${entropy.slice(0, 32)}`,
         startedAt,
-        tokenSalt: entropy.slice(32)
+        tokenSalt: entropy.slice(32),
+        memoryEvents: [],
+        memoryReceiptEvidence: []
       };
     }
     function tarsTraceIdentifierTokenV1(trace, kind, value) {
@@ -1223,9 +1225,15 @@ var require_upload_duplicate_guard = __commonJS({
     }
     function emitTarsTraceV1(logger, trace, input) {
       try {
-        if (!logger || typeof logger.info !== "function") return false;
         const event = sanitizeTarsTraceEventV1(trace, input);
         if (!event) return false;
+        if (trace && Array.isArray(trace.memoryEvents) && trace.memoryEvents.length < 32) trace.memoryEvents.push(event);
+        if (trace && !trace.memoryCaseToken) {
+          const rawIds = input && input.ids && typeof input.ids === "object" ? input.ids : {};
+          const stableSeed = String(rawIds.upload || rawIds.message || "").trim();
+          if (stableSeed) trace.memoryCaseToken = tarsMemoryCaseTokenV1(stableSeed);
+        }
+        if (!logger || typeof logger.info !== "function") return false;
         const serialized = JSON.stringify(event);
         if (serialized.length > 2048) return false;
         logger.info(`TARS_TRACE_V1 ${serialized}`);
@@ -1233,6 +1241,399 @@ var require_upload_duplicate_guard = __commonJS({
       } catch (_2) {
         return false;
       }
+    }
+    const TARS_MEMORY_V1_SCHEMA_VERSION = "tars-memory-v1";
+    const TARS_MEMORY_V1_DECISION_VERSION = 1;
+    const TARS_MEMORY_V1_APP_VERSION = "0.10.35";
+    const TARS_MEMORY_V1_MAX_RECORDS = 500;
+    const TARS_MEMORY_V1_MAX_LOOKUP = 50;
+    const TARS_MEMORY_V1_RETENTION_MS = 90 * 24 * 60 * 60 * 1e3;
+    const TARS_MEMORY_V1_QUEUE_LIMIT = 25;
+    const TARS_MEMORY_V1_GOLDEN_CATEGORIES = [
+      "receipt_amount", "receipt_date", "receipt_photo_classification", "duplicate",
+      "media_settle", "routing", "control", "provider_disagreement"
+    ];
+    let tarsMemoryV1QueueDepth = 0;
+    let tarsMemoryV1Queue = Promise.resolve();
+    function tarsMemoryCaseTokenV1(value) {
+      const raw = String(value || "").trim();
+      if (!raw) return "";
+      return `mem_${sha256Bytes(utf8Bytes(`tars-memory-v1:${raw}`)).slice(0, 32)}`;
+    }
+    function tarsMemoryAssociationV1(caseToken) {
+      const token = String(caseToken || "");
+      return /^mem_[a-f0-9]{32}$/.test(token) ? new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `tars-memory-v1:case:${token}`) : void 0;
+    }
+    function tarsMemoryIndexAssociationV1() {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, "tars-memory-v1:index");
+    }
+    function tarsMemoryRecommendationsAssociationV1() {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, "tars-memory-v1:recommendations");
+    }
+    function tarsMemoryEnumV1(value, allowed, fallback) {
+      const normalized = String(value || "").trim().toLowerCase();
+      return allowed.indexOf(normalized) !== -1 ? normalized : fallback;
+    }
+    function tarsMemoryDateV1(value) {
+      const normalized = String(value || "").trim();
+      return /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? normalized : null;
+    }
+    function tarsMemoryAmountV1(value) {
+      const amount = Number(value);
+      return Number.isFinite(amount) && amount > 0 && amount <= 1e7 ? Math.round(amount * 100) / 100 : null;
+    }
+    function tarsMemoryTraceTokenV1(value) {
+      const token = String(value || "");
+      return /^trc_[a-f0-9]{32}$/.test(token) ? token : null;
+    }
+    function sanitizeTarsMemoryEvidenceV1(input) {
+      const source = input && typeof input === "object" ? input : {};
+      return {
+        match_count: Math.max(0, Math.min(50, Math.floor(Number(source.match_count) || 0))),
+        similarity_bucket: tarsMemoryEnumV1(source.similarity_bucket, ["none", "low", "medium", "high"], "none"),
+        historical_outcome: tarsMemoryEnumV1(source.historical_outcome, ["accepted", "rejected", "control", "duplicate", "forwarded", "failed", "unknown"], "unknown"),
+        historical_error_pattern: tarsMemoryEnumV1(source.historical_error_pattern, ["amount", "date", "classification", "duplicate", "media_settle", "routing", "provider_disagreement", "none"], "none"),
+        memory_confidence: Math.max(0, Math.min(0.89, Number(source.memory_confidence) || 0))
+      };
+    }
+    function sanitizeTarsMemoryCaseV1(input) {
+      try {
+        const source = input && typeof input === "object" ? input : {};
+        const caseToken = /^mem_[a-f0-9]{32}$/.test(String(source.case_token || source.caseToken || "")) ? String(source.case_token || source.caseToken) : "";
+        if (!caseToken) return void 0;
+        const confirmationState = tarsMemoryEnumV1(source.confirmation_state || source.confirmationState, ["observed", "production_confirmed", "human_confirmed", "golden"], "observed");
+        const now = Math.max(0, Math.floor(Number(source.updated_at_ms || source.updatedAt || Date.now()) || Date.now()));
+        const trusted = confirmationState === "human_confirmed" || confirmationState === "golden";
+        const record = {
+          schema_version: TARS_MEMORY_V1_SCHEMA_VERSION,
+          decision_version: TARS_MEMORY_V1_DECISION_VERSION,
+          app_version: TARS_MEMORY_V1_APP_VERSION,
+          case_token: caseToken,
+          case_type: tarsMemoryEnumV1(source.case_type || source.caseType, ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "media_settle", "routing", "other"], "other"),
+          normalized_classification: tarsMemoryEnumV1(source.normalized_classification || source.classification, ["receipt", "work_photo", "mailing_proof", "report_or_screenshot", "other", "unknown"], "unknown"),
+          production_outcome: tarsMemoryEnumV1(source.production_outcome || source.outcome, ["accepted", "rejected", "control", "duplicate", "forwarded", "skipped", "failed", "unknown"], "unknown"),
+          reason_code: tarsMemoryEnumV1(source.reason_code || source.reasonCode, ["strict_accept", "strict_reject", "strict_control", "exact_duplicate", "identity_duplicate", "visual_duplicate", "work_photo_forwarded", "media_unsettled", "primary_classification_failed", "publish_failed", "unhandled_exception", "manual_correction", "provider_disagreement", "observed", "unknown"], "unknown"),
+          provider_outcome: tarsMemoryEnumV1(source.provider_outcome || source.providerOutcome, ["success", "partial", "unavailable", "failed", "not_used", "unknown"], "unknown"),
+          agreement: tarsMemoryEnumV1(source.agreement, ["agree", "disagree", "missing", "unknown"], "unknown"),
+          normalized_amount: tarsMemoryAmountV1(source.normalized_amount !== void 0 ? source.normalized_amount : source.amount),
+          normalized_date: tarsMemoryDateV1(source.normalized_date || source.date),
+          normalized_status: tarsMemoryEnumV1(source.normalized_status || source.status, ["success", "failed", "pending", "unknown"], "unknown"),
+          confirmation_state: confirmationState,
+          trusted,
+          correction_kind: trusted ? tarsMemoryEnumV1(source.correction_kind || source.correctionKind, ["amount", "date", "classification", "outcome", "duplicate", "none"], "none") : "none",
+          source_trace_token: tarsMemoryTraceTokenV1(source.source_trace_token || source.sourceTraceToken),
+          created_at_ms: Math.max(0, Math.floor(Number(source.created_at_ms || source.createdAt || now) || now)),
+          updated_at_ms: now,
+          occurrence_count: Math.max(1, Math.min(1e4, Math.floor(Number(source.occurrence_count || source.occurrenceCount) || 1))),
+          memory_evidence: sanitizeTarsMemoryEvidenceV1(source.memory_evidence || source.memoryEvidence)
+        };
+        const serialized = JSON.stringify(record);
+        return serialized.length <= 2048 ? record : void 0;
+      } catch (_2) {
+        return void 0;
+      }
+    }
+    function tarsMemoryReceiptStatusV1(result) {
+      if (result && result.ok) return "success";
+      const reason = String(result && result.reason || "").toLowerCase().replace(/ё/g, "е");
+      if (/ожидан|pending|обработ/.test(reason)) return "pending";
+      if (/отмен|ошиб|не выполн|не исполн|failed|declined|rejected/.test(reason)) return "failed";
+      return "unknown";
+    }
+    function tarsMemoryReceiptAgreementV1(result) {
+      const evidence = result && result.shadowEvidence;
+      if (!evidence || !Array.isArray(evidence.legacyOcrResults) || !Array.isArray(evidence.legacyVisionResults)) return "missing";
+      const ocr = evidence.legacyOcrResults;
+      const vision = evidence.legacyVisionResults;
+      if (!ocr.length || !vision.length) return "missing";
+      const amount = tarsMemoryAmountV1(result.receiptAmount);
+      const date = tarsMemoryDateV1(result.receiptDate);
+      const normalized = (item) => ({ amount: tarsMemoryAmountV1(item && item.amount && item.amount.value !== void 0 ? item.amount.value : item && item.amount), date: tarsMemoryDateV1(item && item.date) });
+      const ocrValues = ocr.map(normalized);
+      const visionValues = vision.map(normalized);
+      const valueMatches = (candidate) => (!amount || candidate.amount === amount) && (!date || candidate.date === date);
+      return ocrValues.some(valueMatches) && visionValues.some(valueMatches) ? "agree" : "disagree";
+    }
+    function captureTarsMemoryReceiptEvidenceV1(trace, result, diagnostic) {
+      try {
+        if (!trace || !Array.isArray(trace.memoryReceiptEvidence)) return false;
+        const transport = String(diagnostic && diagnostic.receipt_openai_transport || "");
+        const yandex = String(diagnostic && diagnostic.yandex_layout_result || "");
+        const providerOutcome = transport === "2xx" || yandex === "success" ? "success" : ["429", "5xx", "timeout"].indexOf(transport) !== -1 && yandex !== "success" ? "unavailable" : transport || yandex ? "failed" : "unknown";
+        trace.memoryReceiptEvidence.push({
+          amount: tarsMemoryAmountV1(result && result.receiptAmount),
+          date: tarsMemoryDateV1(result && result.receiptDate),
+          status: tarsMemoryReceiptStatusV1(result),
+          provider_outcome: providerOutcome,
+          agreement: tarsMemoryReceiptAgreementV1(result),
+          outcome: result && result.ok ? "accepted" : /(?:НУЖНА ПРОВЕРКА|НЕ РАСПОЗНАНА)/i.test(String(result && result.reason || "")) ? "control" : "rejected"
+        });
+        if (trace.memoryReceiptEvidence.length > 4) trace.memoryReceiptEvidence.shift();
+        return true;
+      } catch (_2) {
+        return false;
+      }
+    }
+    function tarsMemoryCaseFromTraceV1(trace) {
+      try {
+        if (!trace || !Array.isArray(trace.memoryEvents)) return void 0;
+        const events = trace.memoryEvents;
+        const reasons = events.map((event) => event.reason_code);
+        const has = (reason) => reasons.indexOf(reason) !== -1;
+        const receiptEvidence = Array.isArray(trace.memoryReceiptEvidence) && trace.memoryReceiptEvidence.length ? trace.memoryReceiptEvidence[trace.memoryReceiptEvidence.length - 1] : void 0;
+        const receiptSeen = Boolean(receiptEvidence || events.some((event) => event.stage === "receipt_vision" || event.stage === "receipt_ocr" || event.stage === "strict_receipt_decision"));
+        const workPhotoSeen = has("WORK_PHOTO_FORWARDED") || has("WORK_PHOTO_NOT_FORWARDED");
+        const mediaUnsettled = has("MEDIA_UNSETTLED");
+        const primaryFailed = has("PRIMARY_CLASSIFICATION_FAILED");
+        if (!receiptSeen && !workPhotoSeen && !mediaUnsettled && !primaryFailed) return void 0;
+        let outcome = receiptEvidence && receiptEvidence.outcome || "unknown";
+        let reason = receiptEvidence ? receiptEvidence.outcome === "accepted" ? "strict_accept" : receiptEvidence.outcome === "control" ? "strict_control" : "strict_reject" : "observed";
+        let caseType = receiptSeen ? "receipt" : workPhotoSeen ? "work_photo" : mediaUnsettled ? "media_settle" : "routing";
+        let classification = receiptSeen ? "receipt" : workPhotoSeen ? "work_photo" : "unknown";
+        if (has("IDENTITY_DUPLICATE")) outcome = "duplicate", reason = "identity_duplicate";
+        else if (has("VISUAL_DUPLICATE")) outcome = "duplicate", reason = "visual_duplicate";
+        else if (has("EXACT_DUPLICATE")) outcome = "duplicate", reason = "exact_duplicate";
+        else if (has("WORK_PHOTO_FORWARDED")) outcome = "forwarded", reason = "work_photo_forwarded";
+        else if (mediaUnsettled) outcome = "failed", reason = "media_unsettled";
+        else if (primaryFailed) outcome = "failed", reason = "primary_classification_failed";
+        if (events.some((event) => event.error_class === "publisher")) outcome = "failed", reason = "publish_failed";
+        if (has("UNHANDLED_EXCEPTION")) outcome = "failed", reason = "unhandled_exception";
+        const caseToken = /^mem_[a-f0-9]{32}$/.test(String(trace.memoryCaseToken || "")) ? trace.memoryCaseToken : tarsMemoryCaseTokenV1(trace.traceId);
+        return sanitizeTarsMemoryCaseV1({
+          caseToken,
+          caseType,
+          classification,
+          outcome,
+          reasonCode: receiptEvidence && receiptEvidence.agreement === "disagree" ? "provider_disagreement" : reason,
+          providerOutcome: receiptEvidence && receiptEvidence.provider_outcome || (primaryFailed ? "failed" : "not_used"),
+          agreement: receiptEvidence && receiptEvidence.agreement || "unknown",
+          amount: receiptEvidence && receiptEvidence.amount,
+          date: receiptEvidence && receiptEvidence.date,
+          status: receiptEvidence && receiptEvidence.status,
+          confirmationState: outcome === "accepted" || outcome === "duplicate" ? "production_confirmed" : "observed",
+          sourceTraceToken: trace.traceId,
+          createdAt: trace.startedAt,
+          updatedAt: Date.now()
+        });
+      } catch (_2) {
+        return void 0;
+      }
+    }
+    async function readTarsMemoryIndexV1(read) {
+      if (!read || !read.getPersistenceReader) return [];
+      const records = await read.getPersistenceReader().readByAssociation(tarsMemoryIndexAssociationV1());
+      const latest = (records || []).filter((record) => record && Array.isArray(record.entries)).sort((left, right) => Number(right.updated_at_ms || 0) - Number(left.updated_at_ms || 0))[0];
+      return latest ? latest.entries.filter((entry) => entry && /^mem_[a-f0-9]{32}$/.test(String(entry.case_token || ""))).slice(0, TARS_MEMORY_V1_MAX_RECORDS) : [];
+    }
+    async function retrieveTarsMemoryV1(read, query, options = {}) {
+      try {
+        if (!options.enabled || !read) return sanitizeTarsMemoryEvidenceV1({});
+        const safeQuery = sanitizeTarsMemoryCaseV1(query);
+        if (!safeQuery) return sanitizeTarsMemoryEvidenceV1({});
+        const index = (await readTarsMemoryIndexV1(read)).slice(0, TARS_MEMORY_V1_MAX_LOOKUP);
+        const matches = [];
+        for (const entry of index) {
+          if (!entry.trusted || entry.case_type !== safeQuery.case_type) continue;
+          let score = 1;
+          if (entry.normalized_classification === safeQuery.normalized_classification) score += 2;
+          if (entry.reason_code === safeQuery.reason_code) score += 2;
+          if (entry.agreement === safeQuery.agreement) score += 1;
+          if (entry.normalized_status === safeQuery.normalized_status) score += 1;
+          if (safeQuery.normalized_amount && entry.normalized_amount === safeQuery.normalized_amount) score += 1;
+          matches.push({ entry, score });
+        }
+        matches.sort((left, right) => right.score - left.score);
+        const best = matches[0];
+        if (!best) return sanitizeTarsMemoryEvidenceV1({});
+        const pattern = best.entry.correction_kind !== "none" ? best.entry.correction_kind : best.entry.agreement === "disagree" ? "provider_disagreement" : best.entry.case_type === "receipt" ? "amount" : best.entry.case_type === "media_settle" ? "media_settle" : "routing";
+        return sanitizeTarsMemoryEvidenceV1({
+          match_count: matches.length,
+          similarity_bucket: best.score >= 7 ? "high" : best.score >= 5 ? "medium" : "low",
+          historical_outcome: best.entry.production_outcome,
+          historical_error_pattern: pattern,
+          memory_confidence: Math.min(0.89, best.score / 10)
+        });
+      } catch (_2) {
+        return sanitizeTarsMemoryEvidenceV1({});
+      }
+    }
+    async function writeTarsMemoryCaseV1(record, read, persistence, options = {}) {
+      try {
+        const safe = sanitizeTarsMemoryCaseV1(record);
+        if (!safe || !read || !persistence) return false;
+        if (options.retrievalEnabled) safe.memory_evidence = await retrieveTarsMemoryV1(read, safe, { enabled: true });
+        const association = tarsMemoryAssociationV1(safe.case_token);
+        if (!association) return false;
+        const existingRecords = await read.getPersistenceReader().readByAssociation(association);
+        const existing = (existingRecords || []).filter((entry) => entry && entry.schema_version === TARS_MEMORY_V1_SCHEMA_VERSION)[0];
+        if (existing) {
+          safe.created_at_ms = Number(existing.created_at_ms || safe.created_at_ms);
+          safe.occurrence_count = Math.min(1e4, Number(existing.occurrence_count || 1) + 1);
+          if (existing.trusted && !safe.trusted) {
+            safe.trusted = true;
+            safe.confirmation_state = existing.confirmation_state;
+            safe.correction_kind = existing.correction_kind;
+            safe.normalized_classification = existing.normalized_classification;
+            safe.production_outcome = existing.production_outcome;
+            safe.reason_code = existing.reason_code;
+            safe.provider_outcome = existing.provider_outcome;
+            safe.agreement = existing.agreement;
+            safe.normalized_amount = existing.normalized_amount;
+            safe.normalized_date = existing.normalized_date;
+            safe.normalized_status = existing.normalized_status;
+          }
+        }
+        await persistence.updateByAssociation(association, safe, true);
+        const now = Date.now();
+        const currentIndex = await readTarsMemoryIndexV1(read);
+        const byToken = {};
+        for (const entry of currentIndex) {
+          if (Number(entry.updated_at_ms || 0) >= now - TARS_MEMORY_V1_RETENTION_MS) byToken[entry.case_token] = entry;
+        }
+        byToken[safe.case_token] = safe;
+        const ordered = Object.keys(byToken).map((key) => byToken[key]).sort((left, right) => Number(right.updated_at_ms || 0) - Number(left.updated_at_ms || 0));
+        const retained = ordered.slice(0, TARS_MEMORY_V1_MAX_RECORDS);
+        const removed = ordered.slice(TARS_MEMORY_V1_MAX_RECORDS);
+        for (const entry of removed) {
+          const removedAssociation = tarsMemoryAssociationV1(entry.case_token);
+          if (removedAssociation) await persistence.removeByAssociation(removedAssociation);
+        }
+        await persistence.updateByAssociation(tarsMemoryIndexAssociationV1(), {
+          schema_version: TARS_MEMORY_V1_SCHEMA_VERSION,
+          updated_at_ms: now,
+          entries: retained
+        }, true);
+        return true;
+      } catch (_2) {
+        return false;
+      }
+    }
+    function scheduleTarsMemoryCaseV1(record, read, persistence, options = {}, logger) {
+      try {
+        if (!options.writeEnabled) return false;
+        const safe = sanitizeTarsMemoryCaseV1(record);
+        if (!safe || !read || !persistence || tarsMemoryV1QueueDepth >= TARS_MEMORY_V1_QUEUE_LIMIT) return false;
+        tarsMemoryV1QueueDepth += 1;
+        const run = async () => {
+          try {
+            return await writeTarsMemoryCaseV1(safe, read, persistence, options);
+          } catch (_2) {
+            return false;
+          } finally {
+            tarsMemoryV1QueueDepth = Math.max(0, tarsMemoryV1QueueDepth - 1);
+          }
+        };
+        tarsMemoryV1Queue = tarsMemoryV1Queue.then(run, run).then(() => void 0, () => void 0);
+        return true;
+      } catch (_2) {
+        return false;
+      }
+    }
+    function scheduleTarsMemoryFromTraceV1(trace, read, persistence, logger) {
+      try {
+        const config = trace && trace.memoryConfig;
+        if (!config || !config.writeEnabled) return false;
+        const record = tarsMemoryCaseFromTraceV1(trace);
+        return record ? scheduleTarsMemoryCaseV1(record, read, persistence, config, logger) : false;
+      } catch (_2) {
+        return false;
+      }
+    }
+    function scheduleTarsMemoryHumanReceiptConfirmationV1(entry, amount, date, read, persistence, config) {
+      try {
+        const source = entry && typeof entry === "object" ? entry : {};
+        return scheduleTarsMemoryCaseV1({
+          caseToken: tarsMemoryCaseTokenV1(source.uploadId || source.messageId || source.exact),
+          caseType: "receipt",
+          classification: "receipt",
+          outcome: "accepted",
+          reasonCode: "manual_correction",
+          providerOutcome: "not_used",
+          agreement: "unknown",
+          amount,
+          date,
+          status: "success",
+          confirmationState: "human_confirmed",
+          correctionKind: "outcome"
+        }, read, persistence, {
+          writeEnabled: config && config.tarsMemoryV1WriteEnabled === true,
+          retrievalEnabled: config && config.tarsMemoryV1RetrievalAdvisoryEnabled === true
+        });
+      } catch (_2) {
+        return false;
+      }
+    }
+    function tarsMemoryRecommendationForGroupV1(group) {
+      const source = group && typeof group === "object" ? group : {};
+      const reason = tarsMemoryEnumV1(source.reason_code, ["strict_reject", "strict_control", "exact_duplicate", "identity_duplicate", "visual_duplicate", "media_unsettled", "primary_classification_failed", "publish_failed", "unhandled_exception", "provider_disagreement", "unknown"], "unknown");
+      const severity = /duplicate/.test(reason) || reason === "provider_disagreement" ? "p0" : /strict_|media_unsettled|primary_classification_failed|publish_failed/.test(reason) ? "p1" : "p2";
+      const investigation = /duplicate/.test(reason) ? "duplicate_guard" : /strict_/.test(reason) || reason === "provider_disagreement" ? "receipt_resolution" : reason === "media_unsettled" ? "media_resolver" : reason === "publish_failed" ? "publisher" : "routing";
+      const regression = /duplicate/.test(reason) ? "receipt_duplicate_idempotency" : reason === "provider_disagreement" ? "receipt_provider_disagreement" : /strict_/.test(reason) ? "receipt_strict_decision" : reason === "media_unsettled" ? "media_settle" : reason === "publish_failed" ? "publisher_fail_open" : "routing_parity";
+      return {
+        severity,
+        case_count: Math.max(1, Math.min(1e4, Math.floor(Number(source.case_count) || 1))),
+        affected_stage: investigation,
+        reason_code: reason,
+        suggested_regression_test: regression,
+        suggested_investigation_area: investigation
+      };
+    }
+    function analyzeTarsMemoryCasesV1(cases) {
+      try {
+        const groups = {};
+        for (const raw of Array.isArray(cases) ? cases.slice(0, TARS_MEMORY_V1_MAX_RECORDS) : []) {
+          const record = sanitizeTarsMemoryCaseV1(raw);
+          if (!record) continue;
+          const key = `${record.case_type}:${record.reason_code}`;
+          groups[key] = groups[key] || { reason_code: record.reason_code, case_count: 0 };
+          groups[key].case_count += Math.max(1, record.occurrence_count);
+        }
+        return Object.keys(groups).map((key) => tarsMemoryRecommendationForGroupV1(groups[key])).filter((item) => item.case_count >= 2).sort((left, right) => right.case_count - left.case_count).slice(0, 20);
+      } catch (_2) {
+        return [];
+      }
+    }
+    async function runTarsMemoryBackgroundAnalysisV1(read, persistence, options = {}) {
+      try {
+        if (!options.enabled || !read || !persistence) return false;
+        const cases = await readTarsMemoryIndexV1(read);
+        const recommendations = analyzeTarsMemoryCasesV1(cases);
+        await persistence.updateByAssociation(tarsMemoryRecommendationsAssociationV1(), {
+          schema_version: TARS_MEMORY_V1_SCHEMA_VERSION,
+          decision_version: TARS_MEMORY_V1_DECISION_VERSION,
+          generated_at_ms: Date.now(),
+          recommendations
+        }, true);
+        return true;
+      } catch (_2) {
+        return false;
+      }
+    }
+    function tarsMemoryGoldenDatasetV1() {
+      return [
+        { golden_case: "amount_currency_suffix_1900", category: "receipt_amount", expected_safety: "preserve_production", expected_normalized_amount: 1900 },
+        { golden_case: "date_provider_disagreement", category: "receipt_date", expected_safety: "control" },
+        { golden_case: "receipt_photo_classification", category: "receipt_photo_classification", expected_safety: "preserve_production" },
+        { golden_case: "duplicate_cannot_be_overridden", category: "duplicate", expected_safety: "duplicate" },
+        { golden_case: "unsettled_media_fail_open", category: "media_settle", expected_safety: "preserve_production" },
+        { golden_case: "routing_cannot_be_overridden", category: "routing", expected_safety: "preserve_production" },
+        { golden_case: "strict_control_cannot_be_accepted", category: "control", expected_safety: "control" },
+        { golden_case: "provider_disagreement_requires_control", category: "provider_disagreement", expected_safety: "control" }
+      ].map((golden) => ({ schema_version: TARS_MEMORY_V1_SCHEMA_VERSION, ...golden }));
+    }
+    function evaluateTarsMemoryGoldenDatasetV1(evaluator) {
+      try {
+        if (typeof evaluator !== "function") return { pass: false, total: 0, failed: TARS_MEMORY_V1_GOLDEN_CATEGORIES.length };
+        const cases = tarsMemoryGoldenDatasetV1();
+        const failed = cases.filter((golden) => evaluator(golden) !== golden.expected_safety);
+        return { pass: failed.length === 0, total: cases.length, failed: failed.length };
+      } catch (_2) {
+        return { pass: false, total: 0, failed: TARS_MEMORY_V1_GOLDEN_CATEGORIES.length };
+      }
+    }
+    function resetTarsMemoryV1ForTests() {
+      tarsMemoryV1QueueDepth = 0;
+      tarsMemoryV1Queue = Promise.resolve();
     }
     function hexBytes(value) {
       const hex = String(value || ""), bytes = new Uint8Array(Math.floor(hex.length / 2));
@@ -7124,6 +7525,7 @@ var require_upload_duplicate_guard = __commonJS({
         emitTarsTraceV1(logger, stageContext && stageContext.trace, {
           component: "receipt_resolution", stage: "strict_receipt_decision", event: "decision", outcome: result && result.ok ? "accepted" : /(?:НУЖНА ПРОВЕРКА|НЕ РАСПОЗНАНА)/i.test(String(result && result.reason || "")) ? "control" : "rejected", reason_code: result && result.ok ? "STRICT_ACCEPT" : "STRICT_REJECT", duration_ms: Date.now() - strictStartedAt, ids: { upload: file && (file._id || file.id) }
         });
+        captureTarsMemoryReceiptEvidenceV1(stageContext && stageContext.trace, result, diagnostic);
         return result;
       }
       const key = `${expectedReceiptDate(config)}:${receiptVisionProviderCacheKey(config)}:${exactHash(content)}`;
@@ -7138,6 +7540,7 @@ var require_upload_duplicate_guard = __commonJS({
         emitTarsTraceV1(logger, stageContext && stageContext.trace, {
           component: "receipt_resolution", stage: "strict_receipt_decision", event: "decision", outcome: result && result.ok ? "accepted" : /(?:НУЖНА ПРОВЕРКА|НЕ РАСПОЗНАНА)/i.test(String(result && result.reason || "")) ? "control" : "rejected", reason_code: result && result.ok ? "STRICT_ACCEPT" : "STRICT_REJECT", duration_ms: Date.now() - strictStartedAt, ids: { upload: file && (file._id || file.id) }, attrs: { cache: "hit" }
         });
+        captureTarsMemoryReceiptEvidenceV1(stageContext && stageContext.trace, result, diagnostic);
         return result;
       }
       const promise = (async () => {
@@ -7161,6 +7564,7 @@ var require_upload_duplicate_guard = __commonJS({
         emitTarsTraceV1(logger, stageContext && stageContext.trace, {
           component: "receipt_resolution", stage: "strict_receipt_decision", event: "decision", outcome: result && result.ok ? "accepted" : /(?:НУЖНА ПРОВЕРКА|НЕ РАСПОЗНАНА)/i.test(String(result && result.reason || "")) ? "control" : "rejected", reason_code: result && result.ok ? "STRICT_ACCEPT" : "STRICT_REJECT", duration_ms: Date.now() - strictStartedAt, ids: { upload: file && (file._id || file.id) }, attrs: { cache: "miss" }
         });
+        captureTarsMemoryReceiptEvidenceV1(stageContext && stageContext.trace, result, diagnostic);
         return result;
       } catch (error) {
         strictReceiptValidationCache.delete(key);
@@ -9386,6 +9790,21 @@ var require_upload_duplicate_guard = __commonJS({
       tarsTraceIdentifierTokenV1,
       sanitizeTarsTraceEventV1,
       emitTarsTraceV1,
+      tarsMemoryCaseTokenV1,
+      sanitizeTarsMemoryEvidenceV1,
+      sanitizeTarsMemoryCaseV1,
+      captureTarsMemoryReceiptEvidenceV1,
+      tarsMemoryCaseFromTraceV1,
+      retrieveTarsMemoryV1,
+      writeTarsMemoryCaseV1,
+      scheduleTarsMemoryCaseV1,
+      scheduleTarsMemoryFromTraceV1,
+      scheduleTarsMemoryHumanReceiptConfirmationV1,
+      analyzeTarsMemoryCasesV1,
+      runTarsMemoryBackgroundAnalysisV1,
+      tarsMemoryGoldenDatasetV1,
+      evaluateTarsMemoryGoldenDatasetV1,
+      resetTarsMemoryV1ForTests,
       guardUpload,
       rejectDuplicateMessage,
       messageImageFiles,
@@ -9667,6 +10086,33 @@ var C = class extends j.App {
       i18nDescription: "image_classification_v1_shadow_enabled_description"
     });
     await e.settings.provideSetting({
+      id: "tars_memory_v1_write_enabled",
+      type: z.SettingType.BOOLEAN,
+      packageValue: false,
+      required: false,
+      public: false,
+      i18nLabel: "tars_memory_v1_write_enabled_label",
+      i18nDescription: "tars_memory_v1_write_enabled_description"
+    });
+    await e.settings.provideSetting({
+      id: "tars_memory_v1_retrieval_advisory_enabled",
+      type: z.SettingType.BOOLEAN,
+      packageValue: false,
+      required: false,
+      public: false,
+      i18nLabel: "tars_memory_v1_retrieval_advisory_enabled_label",
+      i18nDescription: "tars_memory_v1_retrieval_advisory_enabled_description"
+    });
+    await e.settings.provideSetting({
+      id: "tars_memory_v1_background_enabled",
+      type: z.SettingType.BOOLEAN,
+      packageValue: false,
+      required: false,
+      public: false,
+      i18nLabel: "tars_memory_v1_background_enabled_label",
+      i18nDescription: "tars_memory_v1_background_enabled_description"
+    });
+    await e.settings.provideSetting({
       id: "scanner2_shadow_mode",
       type: z.SettingType.STRING,
       packageValue: "OFF",
@@ -9844,6 +10290,14 @@ var C = class extends j.App {
       startupSetting: {
         type: J.StartupType.RECURRING,
         interval: "10 minutes",
+        skipImmediate: true
+      }
+    }, {
+      id: "tars-memory-v1-background",
+      processor: async (jobContext, read, modify, http, persistence) => this.tarsMemoryV1BackgroundJob(jobContext, read, modify, http, persistence),
+      startupSetting: {
+        type: J.StartupType.RECURRING,
+        interval: "60 minutes",
         skipImmediate: true
       }
     }, {
@@ -10045,6 +10499,12 @@ var C = class extends j.App {
         // Do not let the financial post-message claim suppress ordinary personal
         // work-photo forwarding. Receipt/financial processing claims below.
         const i = await this.receiptOcrConfig(n);
+        if (trace) {
+          trace.memoryConfig = {
+            writeEnabled: i.tarsMemoryV1WriteEnabled === true,
+            retrievalEnabled: i.tarsMemoryV1RetrievalAdvisoryEnabled === true
+          };
+        }
         const resolvedImages = G.messageImageFiles(e);
         let visionRoute = "";
         let primaryRoutingDiagnostic;
@@ -10259,6 +10719,7 @@ var C = class extends j.App {
         duration_ms: trace && trace.startedAt ? Date.now() - trace.startedAt : null,
         ids: { message: e && e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e && e.room && e.room.id, sender: e && e.sender && e.sender.id }
       });
+      G.scheduleTarsMemoryFromTraceV1(trace, n, s, traceLogger);
     }
   }
   async receiptOcrConfig(e) {
@@ -10267,6 +10728,9 @@ var C = class extends j.App {
     const cutoffSetting = await n.getValueById("receipt_workday_cutoff");
     const archiveEnabledSetting = await n.getValueById("receipt_archive_enabled");
     const imageClassificationV1ShadowEnabledSetting = await n.getValueById("image_classification_v1_shadow_enabled");
+    const memoryWriteEnabledSetting = await n.getValueById("tars_memory_v1_write_enabled");
+    const memoryRetrievalEnabledSetting = await n.getValueById("tars_memory_v1_retrieval_advisory_enabled");
+    const memoryBackgroundEnabledSetting = await n.getValueById("tars_memory_v1_background_enabled");
     return {
       apiKey: String(await n.getValueById("yandex_ocr_api_key") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       folderId: String(await n.getValueById("yandex_ocr_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
@@ -10276,6 +10740,9 @@ var C = class extends j.App {
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
       openaiReceiptModel: String(await n.getValueById("openai_receipt_model") || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
       imageClassificationV1ShadowEnabled: imageClassificationV1ShadowEnabledSetting === true || String(imageClassificationV1ShadowEnabledSetting || "").toLowerCase() === "true",
+      tarsMemoryV1WriteEnabled: memoryWriteEnabledSetting === true || String(memoryWriteEnabledSetting || "").toLowerCase() === "true",
+      tarsMemoryV1RetrievalAdvisoryEnabled: memoryRetrievalEnabledSetting === true || String(memoryRetrievalEnabledSetting || "").toLowerCase() === "true",
+      tarsMemoryV1BackgroundEnabled: memoryBackgroundEnabledSetting === true || String(memoryBackgroundEnabledSetting || "").toLowerCase() === "true",
       scanner2ShadowMode: String(await n.getValueById("scanner2_shadow_mode") || "OFF").toUpperCase() === "RECORD_ONLY" ? "RECORD_ONLY" : "OFF",
       scanner2ShadowHmacSecret: String(await n.getValueById("scanner2_shadow_hmac_secret") || ""),
       scanner2ShadowTokenKeyVersion: String(await n.getValueById("scanner2_shadow_token_key_version") || "k1").trim() || "k1",
@@ -10428,6 +10895,7 @@ var C = class extends j.App {
     entry.approvedAt = Date.now();
     entry.validationVersion = 11;
     await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+    G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, targetAmount, targetDate, e, t, config);
     if (entry.roomId) {
       try {
         const masterRoom = await e.getRoomReader().getById(entry.roomId);
@@ -10488,6 +10956,7 @@ var C = class extends j.App {
     entry.approvedAt = Date.now();
     entry.validationVersion = 11;
     await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+    G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, amount, targetDate, e, t, config);
     if (entry.roomId) {
       try {
         const masterRoom = await e.getRoomReader().getById(entry.roomId);
@@ -11364,6 +11833,14 @@ var C = class extends j.App {
       }
     }
     return false;
+  }
+  async tarsMemoryV1BackgroundJob(e, n, t, s, r) {
+    try {
+      const config = await this.receiptOcrConfig(n);
+      return await G.runTarsMemoryBackgroundAnalysisV1(n, r, { enabled: config.tarsMemoryV1BackgroundEnabled === true });
+    } catch (_2) {
+      return false;
+    }
   }
   async scheduledReportRemindersJob(e, n, t, s, r) {
     if (!n || !t || !r) return;

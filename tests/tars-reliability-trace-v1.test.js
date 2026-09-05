@@ -115,7 +115,7 @@ assert.deepStrictEqual(helpers.TARS_TRACE_V1_STAGES, [
 ]);
 
 const emitterStart = source.indexOf("function emitTarsTraceV1");
-const emitterEnd = source.indexOf("function hexBytes", emitterStart);
+const emitterEnd = source.indexOf("const TARS_MEMORY_V1_SCHEMA_VERSION", emitterStart);
 const emitterSource = source.slice(emitterStart, emitterEnd);
 assert(!/\bawait\b/.test(emitterSource), "trace emitter must remain synchronous");
 assert(!/https?:|persistence|createWithAssociation|updateByAssociation/i.test(emitterSource), "trace emitter must not use network or persistence");
