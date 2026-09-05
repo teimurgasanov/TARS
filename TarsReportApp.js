@@ -11562,14 +11562,14 @@ var C = class extends j.App {
     if (!o) return;
     const c = this.reportWorkday(new Date(a)), d = this.reportScheduledReminderAssociation(c), m = await n.getPersistenceReader().readByAssociation(d), u = {};
     for (const x of m || []) {
-      if (x && x.userId && x.slot) u[`${x.userId}:${x.slot}`] = true;
+      if (x && x.userId) u[x.userId] = true;
     }
     const I = await n.getPersistenceReader().readByAssociation(this.privateCashRoomsAssociation()), f = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();
     if (!f) return;
     const h = [];
     for (const x of I || []) {
       if (!x || !x.roomId || !x.masterUserId) continue;
-      const v = `${x.masterUserId}:${o}`;
+      const v = x.masterUserId;
       if (u[v]) continue;
       try {
         const C = await n.getRoomReader().getById(x.roomId);
@@ -11680,7 +11680,9 @@ var C = class extends j.App {
     const I = this.parseSubmittedReport(o.formData, t.reportType);
     if (!I) return { ...t, lastReminderCheckedAt: s, updatedAt: s };
     const f = await this.receiptOcrConfig(e), h = await G.confirmedTransferSummaryForUser(e, f, t.userId, t.workday, void 0, void 0, u.id), O = await this.mailingProofStatus(e, c, t.workday), P = await this.reportPhotoStatus(e, c, t.workday), x = this.payrollRule(t.reportType, I.rows, I.mailings, O), v = this.preliminaryReportIssues(P, O, x, h);
-    if (!v.length) return { ...t, lastReminderCheckedAt: s, updatedAt: s };
+    if (!v.length) return { ...t, lastReminderIssues: [], lastReminderCheckedAt: s, updatedAt: s };
+    const reminderIssuesKey = v.join("\n"), previousReminderIssuesKey = Array.isArray(t.lastReminderIssues) ? t.lastReminderIssues.join("\n") : "";
+    if (previousReminderIssuesKey === reminderIssuesKey) return { ...t, lastReminderCheckedAt: s, updatedAt: s };
     const C = await e.getUserReader().getByUsername("tars") || await e.getUserReader().getAppUser();
     if (!C) return { ...t, lastReminderCheckedAt: s, updatedAt: s };
     const A = `⏰ Напоминание по отчёту\nДо 21:00 по Астрахани можно догрузить без вычета.\nНе хватает: ${v.join(", ")}.\nПосле 21:00 будет финальная проверка.`;
