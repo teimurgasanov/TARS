@@ -1144,7 +1144,7 @@ var require_upload_duplicate_guard = __commonJS({
       "inbound_received", "media_resolution", "intent_gate", "primary_classification",
       "personal_media", "upload_read", "receipt_vision", "receipt_ocr",
       "strict_receipt_decision", "duplicate_exact", "duplicate_identity",
-      "routing_decision", "result_publish", "claim_complete", "terminal_outcome"
+      "routing_decision", "result_publish", "receipt_case", "claim_complete", "terminal_outcome"
     ];
     const TARS_TRACE_V1_REASON_CODES = [
       "ACCEPTED_RESULT_PUBLISHED", "ACCEPTED_RESULT_SKIPPED", "APP_MESSAGE_SKIPPED", "ARCHIVE_MESSAGE_SKIPPED",
@@ -1154,6 +1154,8 @@ var require_upload_duplicate_guard = __commonJS({
       "MEDIA_ALREADY_SETTLED", "MEDIA_RESOLVED", "MEDIA_UNSETTLED", "NO_IMAGE", "NO_MEDIA_SIGNAL",
       "PERSONAL_MEDIA_HANDLED", "PERSONAL_MEDIA_STARTED", "PERSONAL_MEDIA_UNCLASSIFIED", "POST_MESSAGE_FINISHED",
       "PRIMARY_CLASSIFICATION_FAILED", "PRIMARY_CLASSIFIED", "PRIMARY_EMPTY",
+      "RECEIPT_CASE_ACCEPTED", "RECEIPT_CASE_CONTROL", "RECEIPT_CASE_DUPLICATE", "RECEIPT_CASE_FAILED",
+      "RECEIPT_CASE_PERSISTENCE_FAILED", "RECEIPT_CASE_PROCESSING", "RECEIPT_CASE_RECEIVED",
       "RECEIPT_OCR_COMPLETED", "RECEIPT_OCR_INCOMPLETE", "RECEIPT_VISION_COMPLETED", "RECEIPT_VISION_HTTP_ERROR",
       "RECEIPT_VISION_INVALID_RESPONSE", "RECEIPT_VISION_UNAVAILABLE", "REJECTED_RESULT_PUBLISHED", "ROUTE_SELECTED",
       "ROUTE_UNRESOLVED", "STRICT_ACCEPT", "STRICT_REJECT", "UNHANDLED_EXCEPTION", "UNSPECIFIED", "UPLOAD_READ",
@@ -1179,7 +1181,8 @@ var require_upload_duplicate_guard = __commonJS({
         origin_message: "msg",
         upload: "upl",
         room: "room",
-        sender: "usr"
+        sender: "usr",
+        case: "rcc"
       }[kind];
       if (!prefix) return null;
       return `${prefix}_${sha256Bytes(utf8Bytes(`${trace.tokenSalt}:${kind}:${raw}`)).slice(0, 16)}`;
@@ -1199,7 +1202,7 @@ var require_upload_duplicate_guard = __commonJS({
         schema_version: "tars-trace-v1",
         trace_id: trace.traceId,
         ts_ms: Date.now(),
-        component: allowed(source.component, ["rocketchat", "media_resolver", "intent_gate", "vision", "ocr", "receipt_resolution", "duplicate_guard", "routing", "publisher"], "rocketchat"),
+        component: allowed(source.component, ["rocketchat", "media_resolver", "intent_gate", "vision", "ocr", "receipt_resolution", "receipt_case", "duplicate_guard", "routing", "publisher"], "rocketchat"),
         stage: allowed(source.stage, TARS_TRACE_V1_STAGES, "terminal_outcome"),
         event: allowed(source.event, ["start", "attempt", "retry", "success", "decision", "skip", "error", "finish"], "finish"),
         attempt,
@@ -1212,14 +1215,17 @@ var require_upload_duplicate_guard = __commonJS({
           origin_message: tarsTraceIdentifierTokenV1(trace, "origin_message", rawIds.origin_message),
           upload: tarsTraceIdentifierTokenV1(trace, "upload", rawIds.upload),
           room: tarsTraceIdentifierTokenV1(trace, "room", rawIds.room),
-          sender: tarsTraceIdentifierTokenV1(trace, "sender", rawIds.sender)
+          sender: tarsTraceIdentifierTokenV1(trace, "sender", rawIds.sender),
+          case: tarsTraceIdentifierTokenV1(trace, "case", rawIds.case)
         },
         attrs: {
           source_type: allowed(rawAttrs.source_type, ["original", "preview_fallback", "unknown"], "unknown"),
           intent: allowed(rawAttrs.intent, ["photo", "receipt", "mailing", "none", "ambiguous"], "none"),
           provider: allowed(rawAttrs.provider, ["yandex_ai_studio", "yandex_ocr", "openai", "none", "unknown"], "none"),
           pass: allowed(rawAttrs.pass, ["primary", "receipt_engine", "ocr", "date_focus", "amount_focus", "none"], "none"),
-          cache: allowed(rawAttrs.cache, ["hit", "miss", "na"], "na")
+          cache: allowed(rawAttrs.cache, ["hit", "miss", "na"], "na"),
+          from_state: allowed(rawAttrs.from_state, ["NONE", "RECEIVED", "PROCESSING", "ACCEPTED", "CONTROL", "DUPLICATE", "FAILED"], "NONE"),
+          to_state: allowed(rawAttrs.to_state, ["RECEIVED", "PROCESSING", "ACCEPTED", "CONTROL", "DUPLICATE", "FAILED", "NONE"], "NONE")
         }
       };
     }
@@ -1241,6 +1247,315 @@ var require_upload_duplicate_guard = __commonJS({
       } catch (_2) {
         return false;
       }
+    }
+    const RECEIPT_CASE_V1_SCHEMA_VERSION = "receipt-case-v1";
+    const RECEIPT_CASE_V1_STATES = ["RECEIVED", "PROCESSING", "ACCEPTED", "CONTROL", "DUPLICATE", "FAILED"];
+    const RECEIPT_CASE_V1_TERMINAL_STATES = ["ACCEPTED", "CONTROL", "DUPLICATE", "FAILED"];
+    const RECEIPT_CASE_V1_MAX_RECORDS = 500;
+    const RECEIPT_CASE_V1_RETENTION_MS = 90 * 24 * 60 * 60 * 1e3;
+    const RECEIPT_CASE_V1_QUEUE_LIMIT = 25;
+    let receiptCaseV1QueueDepth = 0;
+    let receiptCaseV1Queue = Promise.resolve();
+    function receiptCaseCorrelationTokenV1(kind, value) {
+      try {
+        const raw = String(value || "").trim();
+        const prefix = { message: "rcm", upload: "rcu", master: "rca" }[kind];
+        if (!raw || !prefix) return "";
+        return `${prefix}_${sha256Bytes(utf8Bytes(`receipt-case-v1:${kind}:${raw}`)).slice(0, 32)}`;
+      } catch (_2) {
+        return "";
+      }
+    }
+    function receiptCaseCorrelationsV1(input) {
+      try {
+        const source = input && typeof input === "object" ? input : {};
+        const messageTokens = [source.sourceOriginMessageId, source.sourceMessageId].map((value) => receiptCaseCorrelationTokenV1("message", value)).filter(Boolean);
+        const uploadToken = receiptCaseCorrelationTokenV1("upload", source.sourceUploadId);
+        const masterToken = receiptCaseCorrelationTokenV1("master", source.masterId);
+        const aliases = [];
+        for (const token of messageTokens.concat(uploadToken ? [uploadToken] : [])) {
+          if (aliases.indexOf(token) === -1) aliases.push(token);
+        }
+        return {
+          sourceMessageCorrelation: messageTokens[0] || null,
+          sourceUploadCorrelation: uploadToken || null,
+          masterCorrelation: masterToken || null,
+          aliases
+        };
+      } catch (_2) {
+        return { sourceMessageCorrelation: null, sourceUploadCorrelation: null, masterCorrelation: null, aliases: [] };
+      }
+    }
+    function receiptCaseAssociationV1(caseId) {
+      const value = String(caseId || "");
+      return /^rcv1_[a-f0-9]{32}$/.test(value) ? new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `receipt-case-v1:case:${value}`) : void 0;
+    }
+    function receiptCaseAliasAssociationV1(correlation) {
+      const value = String(correlation || "");
+      return /^rc[mu]_[a-f0-9]{32}$/.test(value) ? new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `receipt-case-v1:alias:${value}`) : void 0;
+    }
+    function receiptCaseIndexAssociationV1() {
+      return new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, "receipt-case-v1:index");
+    }
+    function receiptCaseNormalizedAmountV1(value) {
+      const source = value && typeof value === "object" ? value.value : value;
+      const amount = Number(source);
+      return Number.isFinite(amount) && amount > 0 && amount <= 1e7 ? { status: "recognized", value: Math.round(amount * 100) / 100 } : { status: "missing", value: null };
+    }
+    function receiptCaseNormalizedDateV1(value) {
+      const source = String(value && typeof value === "object" ? value.value || "" : value || "").trim();
+      return /^\d{4}-\d{2}-\d{2}$/.test(source) ? { status: "recognized", value: source } : { status: "missing", value: null };
+    }
+    function receiptCaseEnumV1(value, allowed, fallback) {
+      const normalized = String(value || "").trim();
+      return allowed.indexOf(normalized) !== -1 ? normalized : fallback;
+    }
+    function sanitizeReceiptCaseV1(input) {
+      try {
+        const source = input && typeof input === "object" ? input : {};
+        const caseId = /^rcv1_[a-f0-9]{32}$/.test(String(source.caseId || "")) ? String(source.caseId) : "";
+        if (!caseId) return void 0;
+        const correlation = (value, expression) => expression.test(String(value || "")) ? String(value) : null;
+        const now = Math.max(0, Math.floor(Number(source.updatedAt || Date.now()) || Date.now()));
+        const controlReasons = ["none", "amount_missing", "date_missing", "wrong_date", "status_invalid", "provider_unavailable", "existing_control", "unresolved"];
+        const record = {
+          schemaVersion: RECEIPT_CASE_V1_SCHEMA_VERSION,
+          caseId,
+          sourceMessageCorrelation: correlation(source.sourceMessageCorrelation, /^rcm_[a-f0-9]{32}$/),
+          sourceUploadCorrelation: correlation(source.sourceUploadCorrelation, /^rcu_[a-f0-9]{32}$/),
+          masterCorrelation: correlation(source.masterCorrelation, /^rca_[a-f0-9]{32}$/),
+          state: receiptCaseEnumV1(source.state, RECEIPT_CASE_V1_STATES, "RECEIVED"),
+          strictDecision: receiptCaseEnumV1(source.strictDecision, ["unknown", "accept", "control", "duplicate", "failed"], "unknown"),
+          controlReason: receiptCaseEnumV1(source.controlReason, controlReasons, source.state === "CONTROL" ? "unresolved" : "none"),
+          normalizedAmount: receiptCaseNormalizedAmountV1(source.normalizedAmount),
+          normalizedDate: receiptCaseNormalizedDateV1(source.normalizedDate),
+          createdAt: Math.max(0, Math.floor(Number(source.createdAt || now) || now)),
+          updatedAt: now,
+          revision: Math.max(1, Math.min(1e6, Math.floor(Number(source.revision) || 1)))
+        };
+        const serialized = JSON.stringify(record);
+        return serialized.length <= 2048 ? record : void 0;
+      } catch (_2) {
+        return void 0;
+      }
+    }
+    function receiptCaseControlReasonV1(result, fallback = "unresolved") {
+      try {
+        const reason = String(result && result.reason || "").toLowerCase().replace(/ё/g, "е");
+        if (/сумм.*не распознан|amount.*(?:missing|conflict|unknown)/.test(reason)) return "amount_missing";
+        if (/дата.*не распознан|date.*(?:missing|unknown)/.test(reason)) return "date_missing";
+        if (/дат[аы].*(?:не совпал|неверн|сегодня)|wrong.*date/.test(reason)) return "wrong_date";
+        if (/статус|отмен|не выполн|не исполн|failed|declined|pending/.test(reason)) return "status_invalid";
+        if (/provider|vision|ocr|429|timeout|недоступ|не удалось проверить/.test(reason)) return "provider_unavailable";
+        return receiptCaseEnumV1(fallback, ["amount_missing", "date_missing", "wrong_date", "status_invalid", "provider_unavailable", "existing_control", "unresolved"], "unresolved");
+      } catch (_2) {
+        return "unresolved";
+      }
+    }
+    function receiptCaseIdFromCorrelationsV1(correlations) {
+      const seed = correlations && (correlations.sourceUploadCorrelation || correlations.sourceMessageCorrelation || correlations.aliases && correlations.aliases[0]);
+      return seed ? `rcv1_${sha256Bytes(utf8Bytes(`receipt-case-v1:case:${seed}`)).slice(0, 32)}` : "";
+    }
+    async function readReceiptCaseV1(caseId, read) {
+      try {
+        const association = receiptCaseAssociationV1(caseId);
+        if (!association || !read || !read.getPersistenceReader) return void 0;
+        const records = await read.getPersistenceReader().readByAssociation(association);
+        return (records || []).map(sanitizeReceiptCaseV1).filter(Boolean).sort((left, right) => Number(right.revision || 0) - Number(left.revision || 0))[0];
+      } catch (_2) {
+        return void 0;
+      }
+    }
+    function emitReceiptCaseTransitionV1(logger, trace, caseId, fromState, toState) {
+      const reasonCode = {
+        RECEIVED: "RECEIPT_CASE_RECEIVED",
+        PROCESSING: "RECEIPT_CASE_PROCESSING",
+        ACCEPTED: "RECEIPT_CASE_ACCEPTED",
+        CONTROL: "RECEIPT_CASE_CONTROL",
+        DUPLICATE: "RECEIPT_CASE_DUPLICATE",
+        FAILED: "RECEIPT_CASE_FAILED"
+      }[toState] || "RECEIPT_CASE_PERSISTENCE_FAILED";
+      const outcome = { ACCEPTED: "accepted", CONTROL: "control", DUPLICATE: "duplicate", FAILED: "failed" }[toState] || "ok";
+      emitTarsTraceV1(logger, trace, {
+        component: "receipt_case", stage: "receipt_case", event: "decision", outcome, reason_code: reasonCode,
+        ids: { case: caseId }, attrs: { from_state: fromState || "NONE", to_state: toState || "NONE", intent: "receipt" }
+      });
+    }
+    async function readReceiptCaseIndexV1(read) {
+      if (!read || !read.getPersistenceReader) return [];
+      const records = await read.getPersistenceReader().readByAssociation(receiptCaseIndexAssociationV1());
+      const latest = (records || []).filter((record) => record && Array.isArray(record.entries)).sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))[0];
+      return latest ? latest.entries.filter((entry) => entry && /^rcv1_[a-f0-9]{32}$/.test(String(entry.caseId || ""))).slice(0, RECEIPT_CASE_V1_MAX_RECORDS) : [];
+    }
+    async function updateReceiptCaseIndexV1(record, aliases, read, persistence, options = {}) {
+      const now = Date.now();
+      const retentionMs = Math.max(60 * 1e3, Math.min(RECEIPT_CASE_V1_RETENTION_MS, Number(options.retentionMs) || RECEIPT_CASE_V1_RETENTION_MS));
+      const maxRecords = Math.max(1, Math.min(RECEIPT_CASE_V1_MAX_RECORDS, Math.floor(Number(options.maxRecords) || RECEIPT_CASE_V1_MAX_RECORDS)));
+      const current = await readReceiptCaseIndexV1(read);
+      const byCase = {};
+      for (const entry of current) {
+        if (Number(entry.updatedAt || 0) >= now - retentionMs) byCase[entry.caseId] = entry;
+      }
+      const previous = byCase[record.caseId];
+      const mergedAliases = [];
+      for (const alias of (previous && previous.aliases || []).concat(aliases || [])) {
+        if (/^rc[mu]_[a-f0-9]{32}$/.test(String(alias || "")) && mergedAliases.indexOf(alias) === -1) mergedAliases.push(alias);
+      }
+      byCase[record.caseId] = { caseId: record.caseId, updatedAt: record.updatedAt, aliases: mergedAliases.slice(0, 4) };
+      const ordered = Object.keys(byCase).map((key) => byCase[key]).sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0));
+      const retained = ordered.slice(0, maxRecords);
+      const removed = ordered.slice(maxRecords).concat(current.filter((entry) => Number(entry.updatedAt || 0) < now - retentionMs));
+      const removedCases = {};
+      for (const entry of removed) {
+        if (!entry || removedCases[entry.caseId] || retained.some((kept) => kept.caseId === entry.caseId)) continue;
+        removedCases[entry.caseId] = true;
+        const caseAssociation = receiptCaseAssociationV1(entry.caseId);
+        if (caseAssociation) await persistence.removeByAssociation(caseAssociation);
+        for (const alias of entry.aliases || []) {
+          const aliasAssociation = receiptCaseAliasAssociationV1(alias);
+          if (aliasAssociation) await persistence.removeByAssociation(aliasAssociation);
+        }
+      }
+      await persistence.updateByAssociation(receiptCaseIndexAssociationV1(), {
+        schemaVersion: RECEIPT_CASE_V1_SCHEMA_VERSION,
+        updatedAt: now,
+        entries: retained
+      }, true);
+    }
+    async function findOrCreateReceiptCaseV1(input, read, persistence, options = {}, logger, trace) {
+      try {
+        if (!read || !persistence || !read.getPersistenceReader || !persistence.updateByAssociation) return void 0;
+        const correlations = receiptCaseCorrelationsV1(input);
+        if (!correlations.aliases.length) return void 0;
+        let caseId = "";
+        for (const alias of correlations.aliases) {
+          const association = receiptCaseAliasAssociationV1(alias);
+          if (!association) continue;
+          const links = await read.getPersistenceReader().readByAssociation(association);
+          const link = (links || []).filter((entry) => entry && entry.schemaVersion === RECEIPT_CASE_V1_SCHEMA_VERSION && /^rcv1_[a-f0-9]{32}$/.test(String(entry.caseId || "")))[0];
+          if (link) { caseId = link.caseId; break; }
+        }
+        if (!caseId) caseId = receiptCaseIdFromCorrelationsV1(correlations);
+        if (!caseId) return void 0;
+        let record = await readReceiptCaseV1(caseId, read);
+        const isNew = !record;
+        if (!record) {
+          record = sanitizeReceiptCaseV1({
+            caseId,
+            sourceMessageCorrelation: correlations.sourceMessageCorrelation,
+            sourceUploadCorrelation: correlations.sourceUploadCorrelation,
+            masterCorrelation: correlations.masterCorrelation,
+            state: "RECEIVED",
+            strictDecision: "unknown",
+            controlReason: "none",
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            revision: 1
+          });
+        } else {
+          const shouldPromoteOriginal = String(input && input.sourceType || "") === "original" && correlations.sourceUploadCorrelation && record.sourceUploadCorrelation !== correlations.sourceUploadCorrelation;
+          const next = sanitizeReceiptCaseV1({
+            ...record,
+            sourceMessageCorrelation: record.sourceMessageCorrelation || correlations.sourceMessageCorrelation,
+            sourceUploadCorrelation: shouldPromoteOriginal ? correlations.sourceUploadCorrelation : record.sourceUploadCorrelation || correlations.sourceUploadCorrelation,
+            masterCorrelation: record.masterCorrelation || correlations.masterCorrelation,
+            updatedAt: shouldPromoteOriginal ? Date.now() : record.updatedAt,
+            revision: shouldPromoteOriginal ? record.revision + 1 : record.revision
+          });
+          record = next || record;
+        }
+        const caseAssociation = receiptCaseAssociationV1(caseId);
+        await persistence.updateByAssociation(caseAssociation, record, true);
+        for (const alias of correlations.aliases) {
+          const aliasAssociation = receiptCaseAliasAssociationV1(alias);
+          if (!aliasAssociation) continue;
+          await persistence.updateByAssociation(aliasAssociation, {
+            schemaVersion: RECEIPT_CASE_V1_SCHEMA_VERSION,
+            caseId,
+            correlation: alias,
+            updatedAt: Date.now()
+          }, true);
+        }
+        await updateReceiptCaseIndexV1(record, correlations.aliases, read, persistence, options);
+        if (isNew) emitReceiptCaseTransitionV1(logger, trace, caseId, "NONE", "RECEIVED");
+        return record;
+      } catch (_2) {
+        emitTarsTraceV1(logger, trace, { component: "receipt_case", stage: "receipt_case", event: "error", outcome: "failed", reason_code: "RECEIPT_CASE_PERSISTENCE_FAILED", error_class: "persistence" });
+        return void 0;
+      }
+    }
+    async function transitionReceiptCaseV1(caseId, input, read, persistence, options = {}, logger, trace) {
+      try {
+        const existing = await readReceiptCaseV1(caseId, read);
+        if (!existing || !persistence || !persistence.updateByAssociation) return void 0;
+        const requestedState = receiptCaseEnumV1(input && input.state, RECEIPT_CASE_V1_STATES, existing.state);
+        if (RECEIPT_CASE_V1_TERMINAL_STATES.indexOf(existing.state) !== -1 && requestedState !== existing.state) return existing;
+        const allowed = existing.state === "RECEIVED" ? ["RECEIVED", "PROCESSING"] : existing.state === "PROCESSING" ? ["PROCESSING"].concat(RECEIPT_CASE_V1_TERMINAL_STATES) : [existing.state];
+        const nextState = allowed.indexOf(requestedState) !== -1 ? requestedState : existing.state;
+        const amount = input && Object.prototype.hasOwnProperty.call(input, "normalizedAmount") ? input.normalizedAmount : existing.normalizedAmount;
+        const date = input && Object.prototype.hasOwnProperty.call(input, "normalizedDate") ? input.normalizedDate : existing.normalizedDate;
+        const next = sanitizeReceiptCaseV1({
+          ...existing,
+          state: nextState,
+          strictDecision: input && input.strictDecision !== void 0 ? input.strictDecision : existing.strictDecision,
+          controlReason: nextState === "CONTROL" ? input && input.controlReason || existing.controlReason : "none",
+          normalizedAmount: amount,
+          normalizedDate: date,
+          updatedAt: Date.now(),
+          revision: existing.revision + 1
+        });
+        if (!next) return existing;
+        const comparable = (record) => JSON.stringify({ state: record.state, strictDecision: record.strictDecision, controlReason: record.controlReason, normalizedAmount: record.normalizedAmount, normalizedDate: record.normalizedDate });
+        if (comparable(existing) === comparable(next)) return existing;
+        await persistence.updateByAssociation(receiptCaseAssociationV1(caseId), next, true);
+        await updateReceiptCaseIndexV1(next, [], read, persistence, options);
+        emitReceiptCaseTransitionV1(logger, trace, caseId, existing.state, next.state);
+        return next;
+      } catch (_2) {
+        emitTarsTraceV1(logger, trace, { component: "receipt_case", stage: "receipt_case", event: "error", outcome: "failed", reason_code: "RECEIPT_CASE_PERSISTENCE_FAILED", error_class: "persistence" });
+        return void 0;
+      }
+    }
+    function scheduleReceiptCaseV1(input, read, persistence, options = {}, logger, trace) {
+      try {
+        if (options.enabled === false || !read || !persistence || receiptCaseV1QueueDepth >= RECEIPT_CASE_V1_QUEUE_LIMIT) return false;
+        const source = input && typeof input === "object" ? input : {};
+        const scheduled = {
+          sourceMessageId: source.sourceMessageId,
+          sourceOriginMessageId: source.sourceOriginMessageId,
+          sourceUploadId: source.sourceUploadId,
+          masterId: source.masterId,
+          sourceType: source.sourceType,
+          state: receiptCaseEnumV1(source.state, RECEIPT_CASE_V1_STATES, "PROCESSING"),
+          strictDecision: source.strictDecision,
+          controlReason: source.controlReason,
+          normalizedAmount: source.normalizedAmount,
+          normalizedDate: source.normalizedDate
+        };
+        receiptCaseV1QueueDepth += 1;
+        const run = async () => {
+          try {
+            const record = await findOrCreateReceiptCaseV1(scheduled, read, persistence, options, logger, trace);
+            if (!record || scheduled.state === "RECEIVED") return Boolean(record);
+            return Boolean(await transitionReceiptCaseV1(record.caseId, scheduled, read, persistence, options, logger, trace));
+          } catch (_2) {
+            return false;
+          } finally {
+            receiptCaseV1QueueDepth = Math.max(0, receiptCaseV1QueueDepth - 1);
+          }
+        };
+        receiptCaseV1Queue = receiptCaseV1Queue.then(run, run).then(() => void 0, () => void 0);
+        return true;
+      } catch (_2) {
+        return false;
+      }
+    }
+    function flushReceiptCaseV1ForTests() {
+      return receiptCaseV1Queue;
+    }
+    function resetReceiptCaseV1ForTests() {
+      receiptCaseV1QueueDepth = 0;
+      receiptCaseV1Queue = Promise.resolve();
     }
     const TARS_MEMORY_V1_SCHEMA_VERSION = "tars-memory-v1";
     const TARS_MEMORY_V1_DECISION_VERSION = 1;
@@ -8491,6 +8806,7 @@ var require_upload_duplicate_guard = __commonJS({
       const acceptedEntries = [];
       const acceptedShadowRecords = [];
       const receiptStageByUpload = {};
+      const receiptCaseByUpload = {};
       let duplicate = false;
       let rejectionText = "";
       for (const messageFile of imageFiles) {
@@ -8522,7 +8838,20 @@ var require_upload_duplicate_guard = __commonJS({
             attrs: { source_type: message.__mediaV2PreviewOnly === true ? "preview_fallback" : "original", intent: intent || "none" }
           });
           capturePersonalImageSourceTelemetry(personalImageDiagnostic, messageFile, content);
-          if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;
+          if (personalRoom && intent === "receipt") {
+            receiptCaseByUpload[messageFileId] = {
+              sourceMessageId: message.id,
+              sourceOriginMessageId: message.__mediaV2OriginMessageId,
+              sourceUploadId: messageFileId,
+              masterId: message.sender && message.sender.id,
+              sourceType: message.__mediaV2PreviewOnly === true ? "preview" : "original"
+            };
+            scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "PROCESSING", strictDecision: "unknown" }, read, persistence, { enabled: true }, logger, trace);
+          }
+          if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) {
+            if (receiptCaseByUpload[messageFileId]) scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate" }, read, persistence, { enabled: true }, logger, trace);
+            return true;
+          }
           const postedExact = exactHash(content);
           let preclassifiedRoom;
           if (personalRoom && intent !== "mailing") {
@@ -8552,6 +8881,18 @@ var require_upload_duplicate_guard = __commonJS({
           }
           const receiptValidationContext = protectedRoom.kind === "receipt" ? protectedRoom.receiptValidationContext || receiptStageContext(messageFile, content, ocrConfig) : void 0;
           if (receiptValidationContext && trace) receiptValidationContext.trace = trace;
+          if (protectedRoom.kind === "receipt") {
+            if (!receiptCaseByUpload[messageFileId]) {
+              receiptCaseByUpload[messageFileId] = {
+                sourceMessageId: message.id,
+                sourceOriginMessageId: message.__mediaV2OriginMessageId,
+                sourceUploadId: messageFileId,
+                masterId: message.sender && message.sender.id,
+                sourceType: message.__mediaV2PreviewOnly === true ? "preview" : "original"
+              };
+              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "PROCESSING", strictDecision: "unknown" }, read, persistence, { enabled: true }, logger, trace);
+            }
+          }
           const processingStatusHandle = protectedRoom.kind === "receipt" && processingStatusManager ? await processingStatusManager.ensure(messageFile, content, receiptValidationContext) : void 0;
           if (processingStatusHandle) receiptStageByUpload[messageFileId] = processingStatusHandle;
           const exact = exactHash(content);
@@ -8600,6 +8941,7 @@ var require_upload_duplicate_guard = __commonJS({
                 component: "publisher", stage: "result_publish", event: "success", outcome: "rejected", reason_code: "REJECTED_RESULT_PUBLISHED",
                 ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
               });
+              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "CONTROL", strictDecision: "control", controlReason: "existing_control", normalizedAmount: exactMatch.receiptAmount, normalizedDate: exactMatch.receiptDate }, read, persistence, { enabled: true }, logger, trace);
               return true;
             }
             // The receipt index is shared by all master rooms. Once an exact
@@ -8643,6 +8985,7 @@ var require_upload_duplicate_guard = __commonJS({
               await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, "🚫 ПОВТОР ЧЕКА");
             }
             if (logger) logger.info(`Deleted posted exact duplicate receipt ${message.id || "unknown"}`);
+            scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: exactMatch.receiptAmount, normalizedDate: exactMatch.receiptDate }, read, persistence, { enabled: true }, logger, trace);
             return true;
           }
           const isCurrentPreUpload = exactMatch && exactMatch.source === "pre" && exactMatch.roomId === (message.room && message.room.id || exactMatch.roomId) && (protectedRoom.kind === "receipt" || Date.now() - Number(exactMatch.uploadedAt || 0) < 30 * 60 * 1e3);
@@ -8686,6 +9029,7 @@ var require_upload_duplicate_guard = __commonJS({
                   component: "publisher", stage: "result_publish", event: "success", outcome: "control", reason_code: "CONTROL_RESULT_PUBLISHED",
                   ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
                 });
+                scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "CONTROL", strictDecision: "control", controlReason: receiptCaseControlReasonV1(receiptCheck), normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace);
                 await recordShadowReceiptOutcome({
                   messageId: message.id,
                   uploadId: messageFileId,
@@ -8742,6 +9086,7 @@ var require_upload_duplicate_guard = __commonJS({
                   component: "publisher", stage: "result_publish", event: "success", outcome: "duplicate", reason_code: "DUPLICATE_RESULT_PUBLISHED",
                   ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
                 });
+                scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace);
                 if (identityMatch) await recordShadowReceiptOutcome({
                   messageId: message.id,
                   uploadId: messageFileId,
@@ -8857,6 +9202,7 @@ var require_upload_duplicate_guard = __commonJS({
                 component: "publisher", stage: "result_publish", event: "success", outcome: "control", reason_code: "CONTROL_RESULT_PUBLISHED",
                 ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
               });
+              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "CONTROL", strictDecision: "control", controlReason: receiptCaseControlReasonV1(receiptCheck), normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace);
               await recordShadowReceiptOutcome({
                 messageId: message.id,
                 uploadId: messageFileId,
@@ -8909,6 +9255,7 @@ var require_upload_duplicate_guard = __commonJS({
                 component: "publisher", stage: "result_publish", event: "success", outcome: "duplicate", reason_code: "DUPLICATE_RESULT_PUBLISHED",
                 ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
               });
+              scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: receiptCheck.receiptAmount, normalizedDate: receiptCheck.receiptDate }, read, persistence, { enabled: true }, logger, trace);
               if (identityMatch) await recordShadowReceiptOutcome({
                 messageId: message.id,
                 uploadId: messageFileId,
@@ -9017,6 +9364,8 @@ var require_upload_duplicate_guard = __commonJS({
             receiptIdentity
           });
         } catch (postError) {
+          const failedCase = receiptCaseByUpload[String(messageFile && (messageFile._id || messageFile.id) || "")];
+          if (failedCase) scheduleReceiptCaseV1({ ...failedCase, state: "FAILED", strictDecision: "failed" }, read, persistence, { enabled: true }, logger, trace);
           if (logger) logger.warn(`Duplicate post-check failed for upload ${messageFile._id || messageFile.id || "unknown"}: ${postError && postError.message || postError}`);
         }
       }
@@ -9049,6 +9398,12 @@ var require_upload_duplicate_guard = __commonJS({
             }
           }
           await writeIndex(persistence, indexName, scopedIndex);
+          if (roomConfig.kind === "receipt") {
+            for (const entry of scopedEntries) {
+              const receiptCase = receiptCaseByUpload[String(entry && entry.uploadId || "")];
+              if (receiptCase) scheduleReceiptCaseV1({ ...receiptCase, state: "ACCEPTED", strictDecision: "accept", normalizedAmount: entry.receiptAmount, normalizedDate: entry.receiptDate }, read, persistence, { enabled: true }, logger, trace);
+            }
+          }
         }
         const receiptEntries = Object.keys(acceptedByIndex).reduce((list, indexName) => {
           const roomConfig = roomCache[indexName];
@@ -9790,6 +10145,13 @@ var require_upload_duplicate_guard = __commonJS({
       tarsTraceIdentifierTokenV1,
       sanitizeTarsTraceEventV1,
       emitTarsTraceV1,
+      receiptCaseCorrelationsV1,
+      sanitizeReceiptCaseV1,
+      findOrCreateReceiptCaseV1,
+      transitionReceiptCaseV1,
+      scheduleReceiptCaseV1,
+      flushReceiptCaseV1ForTests,
+      resetReceiptCaseV1ForTests,
       tarsMemoryCaseTokenV1,
       sanitizeTarsMemoryEvidenceV1,
       sanitizeTarsMemoryCaseV1,
