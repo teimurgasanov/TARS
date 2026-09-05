@@ -304,8 +304,14 @@ function runtimeScenario(guard, mode, suffix) {
     getUpdater() {
       return {
         async message(id) {
-          return { getMessage() { return publishedMessageById.get(String(id)); } };
-        }
+          const state = publishedMessageById.get(String(id));
+          return {
+            getMessage() { return state; },
+            setText(value) { if (state) state.text = value; return this; },
+            __state: state
+          };
+        },
+        async finish(builder) { return builder && builder.__state && builder.__state.id; }
       };
     }
   };
@@ -345,6 +351,7 @@ async function receiptIndex(guard, scenario) {
     rejected.message, rejected.read, rejected.persistence, rejected.modify,
     { info() {}, warn() {}, error() {} }, rejected.http, rejected.config
   );
+  await rejectedGuard.flushReceiptCaseV1ForTests();
   assert.strictEqual(rejectedResult.handled, true);
   let index = await receiptIndex(rejectedGuard, rejected);
   assert.strictEqual(index.photos.length, 1);
@@ -360,10 +367,10 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(rejectedSummary.total, 0);
   assert.strictEqual(rejected.receiptCalls(), 4, "an inconclusive classifier must preserve the legacy strict primary plus focused checks");
   assert.strictEqual(rejected.dedicatedCalls(), 2);
-  const rejectedStatuses = rejected.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…");
-  assert.strictEqual(rejectedStatuses.length, 1, "rejected receipt must publish one processing status");
-  assert.strictEqual(rejectedStatuses[0].threadId, rejected.message.id, "receipt status must be attached to its source upload message");
-  assert.ok(rejected.deletedMessages.includes(rejectedStatuses[0].id), "rejected result must clear its processing status");
+  const rejectedStatuses = rejected.publishedMessages.filter((item) => item.text === "⚠️ Чек требует проверки");
+  assert.strictEqual(rejectedStatuses.length, 1, "rejected receipt must retain one canonical control status");
+  assert.strictEqual(rejectedStatuses[0].room.id, rejected.message.room.id, "receipt status must remain in the master's personal room");
+  assert.ok(!rejected.deletedMessages.includes(rejectedStatuses[0].id), "canonical receipt status must survive finalization");
   const rejectedDetails = rejected.publishedMessages.find((item) => /^👁️ ЧЕК НА КОНТРОЛЬ/.test(String(item.text || "")));
   assert.ok(rejectedDetails, "rejected receipt must publish control details");
   assert.strictEqual(rejectedDetails.threadId, "control-message-control-upload-1", "control details must be attached to the corresponding receipt image");
@@ -375,11 +382,12 @@ async function receiptIndex(guard, scenario) {
     rejected.message, rejected.read, rejected.persistence, rejected.modify,
     { info() {}, warn() {}, error() {} }, rejected.http, rejected.config
   );
+  await rejectedGuard.flushReceiptCaseV1ForTests();
   index = await receiptIndex(rejectedGuard, rejected);
   assert.strictEqual(index.photos.length, 1);
   assert.strictEqual(rejected.controlUploads.length, 1, "the same rejected receipt must not be republished");
   assert.strictEqual(rejected.receiptCalls(), 4, "repeat event must not call providers again");
-  assert.strictEqual(rejected.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…").length, 1, "repeat event must not duplicate the status");
+  assert.strictEqual(rejected.publishedMessages.filter((item) => item.text === "⚠️ Чек требует проверки").length, 1, "repeat event must not duplicate the status");
 
   // Combined integration. The initial classifier remains unknown, then
   // independent Yandex and primary OpenAI agree on the previous date. The
@@ -421,7 +429,7 @@ async function receiptIndex(guard, scenario) {
   index = await receiptIndex(unknownGuard, unknown);
   assert.strictEqual(index.photos.length, 0);
   assert.strictEqual(unknown.controlUploads.length, 0);
-  assert.strictEqual(unknown.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…").length, 0, "ordinary unknown images must not publish receipt status");
+  assert.strictEqual(unknown.publishedMessages.filter((item) => /Проверяем чек|Чек требует проверки|Чек .* принят|Этот чек уже был отправлен|Не удалось завершить проверку/.test(String(item.text || ""))).length, 0, "ordinary unknown images must not publish receipt status");
 
   // C. A valid receipt through the same fallback keeps the existing accepted
   // index and 1 / 1200 RUB running-total path.
@@ -431,6 +439,7 @@ async function receiptIndex(guard, scenario) {
     accepted.message, accepted.read, accepted.persistence, accepted.modify,
     { info() {}, warn() {}, error() {} }, accepted.http, accepted.config
   );
+  await acceptedGuard.flushReceiptCaseV1ForTests();
   assert.strictEqual(acceptedResult.handled, true);
   index = await receiptIndex(acceptedGuard, accepted);
   assert.strictEqual(index.photos.length, 1);
@@ -441,10 +450,10 @@ async function receiptIndex(guard, scenario) {
   assert.ok(summaryMessages.some((text) => /Чеков: 1/.test(text) && /Общая сумма чеков: 1 200 ₽/.test(text)));
   assert.strictEqual(accepted.receiptCalls(), 3, "valid fallback must reuse its strict two-pass result");
   assert.strictEqual(accepted.dedicatedCalls(), 2);
-  const acceptedStatuses = accepted.publishedMessages.filter((item) => item.text === "⏳ Чек проверяется…");
-  assert.strictEqual(acceptedStatuses.length, 1, "accepted receipt must publish one processing status");
-  assert.strictEqual(acceptedStatuses[0].threadId, accepted.message.id, "accepted receipt status must be attached to its source upload message");
-  assert.ok(accepted.deletedMessages.includes(acceptedStatuses[0].id), "accepted result must clear its processing status");
+  const acceptedStatuses = accepted.publishedMessages.filter((item) => String(item.text || "").replace(/[\u00a0\u202f]/g, " ") === "✅ Чек 1 200 ₽ принят");
+  assert.strictEqual(acceptedStatuses.length, 1, "accepted receipt must retain one canonical accepted status");
+  assert.strictEqual(acceptedStatuses[0].room.id, accepted.message.room.id, "accepted status must remain in the master's personal room");
+  assert.ok(!accepted.deletedMessages.includes(acceptedStatuses[0].id), "accepted status must survive finalization");
   const acceptedDetails = accepted.publishedMessages.find((item) => /^✅ ЧЕК ПРИНЯТ/.test(String(item.text || "")));
   assert.ok(acceptedDetails, "accepted receipt must publish its result");
   assert.strictEqual(acceptedDetails.threadId, accepted.message.id, "accepted result must be attached to the corresponding receipt image");

@@ -112,7 +112,7 @@ assert.deepStrictEqual(helpers.TARS_TRACE_V1_STAGES, [
   "inbound_received", "media_resolution", "intent_gate", "primary_classification",
   "personal_media", "upload_read", "receipt_vision", "receipt_ocr",
   "strict_receipt_decision", "duplicate_exact", "duplicate_identity",
-  "routing_decision", "result_publish", "receipt_case", "claim_complete", "terminal_outcome"
+  "routing_decision", "result_publish", "receipt_case", "receipt_case_status", "claim_complete", "terminal_outcome"
 ]);
 
 const emitterStart = source.indexOf("function emitTarsTraceV1");
