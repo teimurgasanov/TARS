@@ -17,7 +17,8 @@ const raw = {
   origin_message: "raw-origin-message-id",
   upload: "raw-upload-id",
   room: "raw-room-id",
-  sender: "raw-sender-id"
+  sender: "raw-sender-id",
+  case: "raw-case-id"
 };
 const event = helpers.sanitizeTarsTraceEventV1(trace, {
   component: "receipt_resolution",
@@ -44,8 +45,8 @@ assert.deepStrictEqual(Object.keys(event), [
   "schema_version", "trace_id", "ts_ms", "component", "stage", "event", "attempt",
   "duration_ms", "outcome", "reason_code", "error_class", "ids", "attrs"
 ]);
-assert.deepStrictEqual(Object.keys(event.ids), ["message", "origin_message", "upload", "room", "sender"]);
-assert.deepStrictEqual(Object.keys(event.attrs), ["source_type", "intent", "provider", "pass", "cache"]);
+assert.deepStrictEqual(Object.keys(event.ids), ["message", "origin_message", "upload", "room", "sender", "case"]);
+assert.deepStrictEqual(Object.keys(event.attrs), ["source_type", "intent", "provider", "pass", "cache", "from_state", "to_state"]);
 assert.strictEqual(event.attempt, 20, "attempt must be bounded");
 assert.strictEqual(event.duration_ms, 600000, "duration must be bounded");
 assert.strictEqual(event.reason_code, "STRICT_ACCEPT", "known Phase 1A reason code must remain observable");
@@ -111,11 +112,11 @@ assert.deepStrictEqual(helpers.TARS_TRACE_V1_STAGES, [
   "inbound_received", "media_resolution", "intent_gate", "primary_classification",
   "personal_media", "upload_read", "receipt_vision", "receipt_ocr",
   "strict_receipt_decision", "duplicate_exact", "duplicate_identity",
-  "routing_decision", "result_publish", "claim_complete", "terminal_outcome"
+  "routing_decision", "result_publish", "receipt_case", "claim_complete", "terminal_outcome"
 ]);
 
 const emitterStart = source.indexOf("function emitTarsTraceV1");
-const emitterEnd = source.indexOf("const TARS_MEMORY_V1_SCHEMA_VERSION", emitterStart);
+const emitterEnd = source.indexOf("const RECEIPT_CASE_V1_SCHEMA_VERSION", emitterStart);
 const emitterSource = source.slice(emitterStart, emitterEnd);
 assert(!/\bawait\b/.test(emitterSource), "trace emitter must remain synchronous");
 assert(!/https?:|persistence|createWithAssociation|updateByAssociation/i.test(emitterSource), "trace emitter must not use network or persistence");
