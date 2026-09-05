@@ -9,7 +9,7 @@ assert(
   "post-message claims must receive Apps Engine persistence"
 );
 assert(
-  source.includes("G.completePostMessageClaim(e, postMessageClaimToken, s, this.getLogger())"),
+  source.includes("G.completePostMessageClaim(e, postMessageClaimToken, s, this.getLogger(), trace)"),
   "completed post-message claims must be written through Apps Engine persistence"
 );
 assert(
@@ -17,7 +17,7 @@ assert(
   "message modify must never be passed as persistence to claimPostMessage"
 );
 assert(
-  !source.includes("G.completePostMessageClaim(e, postMessageClaimToken, r, this.getLogger())"),
+  !source.includes("G.completePostMessageClaim(e, postMessageClaimToken, r, this.getLogger()"),
   "message modify must never be passed as persistence to completePostMessageClaim"
 );
 

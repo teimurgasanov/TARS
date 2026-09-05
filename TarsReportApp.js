@@ -1139,6 +1139,101 @@ var require_upload_duplicate_guard = __commonJS({
       }
       return new Uint8Array(bytes);
     }
+    let tarsTraceSequenceV1 = 0;
+    const TARS_TRACE_V1_STAGES = [
+      "inbound_received", "media_resolution", "intent_gate", "primary_classification",
+      "personal_media", "upload_read", "receipt_vision", "receipt_ocr",
+      "strict_receipt_decision", "duplicate_exact", "duplicate_identity",
+      "routing_decision", "result_publish", "claim_complete", "terminal_outcome"
+    ];
+    const TARS_TRACE_V1_REASON_CODES = [
+      "ACCEPTED_RESULT_PUBLISHED", "ACCEPTED_RESULT_SKIPPED", "APP_MESSAGE_SKIPPED", "ARCHIVE_MESSAGE_SKIPPED",
+      "CLAIM_COMPLETED", "CLAIM_COMPLETE_FAILED", "CONTROL_RESULT_PUBLISHED", "DUPLICATE_RESULT_PUBLISHED",
+      "EVENT_RECEIVED", "EXACT_CLEAR", "EXACT_DUPLICATE", "IDENTITY_CLEAR", "IDENTITY_DUPLICATE",
+      "INTENT_MISSING_OR_AMBIGUOUS", "INTENT_SELECTED", "LOCAL_DUPLICATE_EVENT",
+      "MEDIA_ALREADY_SETTLED", "MEDIA_RESOLVED", "MEDIA_UNSETTLED", "NO_IMAGE", "NO_MEDIA_SIGNAL",
+      "PERSONAL_MEDIA_HANDLED", "PERSONAL_MEDIA_STARTED", "PERSONAL_MEDIA_UNCLASSIFIED", "POST_MESSAGE_FINISHED",
+      "PRIMARY_CLASSIFICATION_FAILED", "PRIMARY_CLASSIFIED", "PRIMARY_EMPTY",
+      "RECEIPT_OCR_COMPLETED", "RECEIPT_OCR_INCOMPLETE", "RECEIPT_VISION_COMPLETED", "RECEIPT_VISION_HTTP_ERROR",
+      "RECEIPT_VISION_INVALID_RESPONSE", "RECEIPT_VISION_UNAVAILABLE", "REJECTED_RESULT_PUBLISHED", "ROUTE_SELECTED",
+      "ROUTE_UNRESOLVED", "STRICT_ACCEPT", "STRICT_REJECT", "UNHANDLED_EXCEPTION", "UNSPECIFIED", "UPLOAD_READ",
+      "VISUAL_DUPLICATE", "WORK_PHOTO_FORWARDED", "WORK_PHOTO_NOT_FORWARDED"
+    ];
+    function createTarsTraceV1() {
+      const startedAt = Date.now();
+      tarsTraceSequenceV1 = (tarsTraceSequenceV1 + 1) % 1e6;
+      const entropy = sha256Bytes(utf8Bytes(`${startedAt}:${tarsTraceSequenceV1}:${Math.random()}`));
+      return {
+        traceId: `trc_${entropy.slice(0, 32)}`,
+        startedAt,
+        tokenSalt: entropy.slice(32)
+      };
+    }
+    function tarsTraceIdentifierTokenV1(trace, kind, value) {
+      const raw = String(value || "").trim();
+      if (!trace || !trace.tokenSalt || !raw) return null;
+      const prefix = {
+        message: "msg",
+        origin_message: "msg",
+        upload: "upl",
+        room: "room",
+        sender: "usr"
+      }[kind];
+      if (!prefix) return null;
+      return `${prefix}_${sha256Bytes(utf8Bytes(`${trace.tokenSalt}:${kind}:${raw}`)).slice(0, 16)}`;
+    }
+    function sanitizeTarsTraceEventV1(trace, input) {
+      if (!trace || !/^trc_[a-f0-9]{32}$/.test(String(trace.traceId || ""))) return void 0;
+      const source = input && typeof input === "object" ? input : {};
+      const allowed = (value, values, fallback) => values.indexOf(String(value || "")) !== -1 ? String(value) : fallback;
+      const rawIds = source.ids && typeof source.ids === "object" ? source.ids : {};
+      const rawAttrs = source.attrs && typeof source.attrs === "object" ? source.attrs : {};
+      const attempt = Number.isFinite(Number(source.attempt)) ? Math.max(0, Math.min(20, Math.floor(Number(source.attempt)))) : 0;
+      const durationValue = Number(source.duration_ms);
+      const durationMs = Number.isFinite(durationValue) ? Math.max(0, Math.min(6e5, Math.floor(durationValue))) : null;
+      const reasonValue = String(source.reason_code || "");
+      const reasonCode = TARS_TRACE_V1_REASON_CODES.indexOf(reasonValue) !== -1 ? reasonValue : "UNSPECIFIED";
+      return {
+        schema_version: "tars-trace-v1",
+        trace_id: trace.traceId,
+        ts_ms: Date.now(),
+        component: allowed(source.component, ["rocketchat", "media_resolver", "intent_gate", "vision", "ocr", "receipt_resolution", "duplicate_guard", "routing", "publisher"], "rocketchat"),
+        stage: allowed(source.stage, TARS_TRACE_V1_STAGES, "terminal_outcome"),
+        event: allowed(source.event, ["start", "attempt", "retry", "success", "decision", "skip", "error", "finish"], "finish"),
+        attempt,
+        duration_ms: durationMs,
+        outcome: allowed(source.outcome, ["ok", "accepted", "rejected", "control", "forwarded", "duplicate", "skipped", "failed", "unknown"], "unknown"),
+        reason_code: reasonCode,
+        error_class: allowed(source.error_class, ["none", "timeout", "rate_limit", "provider_4xx", "provider_5xx", "parse", "upload_unsettled", "persistence", "publisher", "permission", "unknown"], "none"),
+        ids: {
+          message: tarsTraceIdentifierTokenV1(trace, "message", rawIds.message),
+          origin_message: tarsTraceIdentifierTokenV1(trace, "origin_message", rawIds.origin_message),
+          upload: tarsTraceIdentifierTokenV1(trace, "upload", rawIds.upload),
+          room: tarsTraceIdentifierTokenV1(trace, "room", rawIds.room),
+          sender: tarsTraceIdentifierTokenV1(trace, "sender", rawIds.sender)
+        },
+        attrs: {
+          source_type: allowed(rawAttrs.source_type, ["original", "preview_fallback", "unknown"], "unknown"),
+          intent: allowed(rawAttrs.intent, ["photo", "receipt", "mailing", "none", "ambiguous"], "none"),
+          provider: allowed(rawAttrs.provider, ["yandex_ai_studio", "yandex_ocr", "openai", "none", "unknown"], "none"),
+          pass: allowed(rawAttrs.pass, ["primary", "receipt_engine", "ocr", "date_focus", "amount_focus", "none"], "none"),
+          cache: allowed(rawAttrs.cache, ["hit", "miss", "na"], "na")
+        }
+      };
+    }
+    function emitTarsTraceV1(logger, trace, input) {
+      try {
+        if (!logger || typeof logger.info !== "function") return false;
+        const event = sanitizeTarsTraceEventV1(trace, input);
+        if (!event) return false;
+        const serialized = JSON.stringify(event);
+        if (serialized.length > 2048) return false;
+        logger.info(`TARS_TRACE_V1 ${serialized}`);
+        return true;
+      } catch (_2) {
+        return false;
+      }
+    }
     function hexBytes(value) {
       const hex = String(value || ""), bytes = new Uint8Array(Math.floor(hex.length / 2));
       for (let i = 0; i < bytes.length; i += 1) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -1315,7 +1410,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (logger) logger.info(`CLAIM_PROBE key=${claimKey} token=${token.slice(0, 12)} winner=${String(winner && winner.token || "").slice(0, 12)} result=${won ? "process" : "skip-lost"}`);
       return won ? token : "";
     }
-    async function completePostMessageClaim(message, token, persistence, logger) {
+    async function completePostMessageClaim(message, token, persistence, logger, trace) {
       const claimKey = postMessageClaimKey(message);
       const association = postMessageClaimAssociation(message);
       if (!claimKey || !association || !token) return;
@@ -1326,6 +1421,18 @@ var require_upload_duplicate_guard = __commonJS({
         completedAt: Date.now()
       }, association);
       if (logger) logger.info(`CLAIM_PROBE key=${claimKey} result=completed`);
+      emitTarsTraceV1(logger, trace, {
+        component: "rocketchat",
+        stage: "claim_complete",
+        event: "success",
+        outcome: "ok",
+        reason_code: "CLAIM_COMPLETED",
+        ids: {
+          message: message && message.id,
+          room: message && message.room && message.room.id,
+          sender: message && message.sender && message.sender.id
+        }
+      });
     }
     const receiptProcessingStatusPromises = /* @__PURE__ */ new Map();
     function receiptProcessingStatusAssociation(caseToken) {
@@ -3381,8 +3488,9 @@ var require_upload_duplicate_guard = __commonJS({
       const text = String(message && message.text || "").trim();
       return /(?:^|[\s/\\])[^\s/\\]+\.(?:jpe?g|png|webp|gif|heic|heif)(?:$|[?#\s])/i.test(text);
     }
-    async function resolvePersonalImageMessageV2(initialMessage, read, logger, maxAttempts = 16, delayMs = 750, expectMedia = true) {
+    async function resolvePersonalImageMessageV2(initialMessage, read, logger, maxAttempts = 16, delayMs = 750, expectMedia = true, trace) {
       if (!initialMessage || !isPersonalTarsRoom(initialMessage.room)) return initialMessage;
+      const traceStartedAt = trace ? Date.now() : 0;
       const isGeneratedPreviewReference = (file) => {
         if (!file) return false;
         const title = file.title;
@@ -3412,7 +3520,13 @@ var require_upload_duplicate_guard = __commonJS({
       // A normal file/file-list or title.link is already the original upload.
       // imageUrl-only messages are generated previews and must wait for the
       // canonical Rocket.Chat message instead of starting OCR themselves.
-      if (initialImages.length && !isPreviewOnlyMessage(initialMessage)) return initialMessage;
+      if (initialImages.length && !isPreviewOnlyMessage(initialMessage)) {
+        if (trace) emitTarsTraceV1(logger, trace, {
+          component: "media_resolver", stage: "media_resolution", event: "success", outcome: "ok", reason_code: "MEDIA_ALREADY_SETTLED",
+          duration_ms: Date.now() - traceStartedAt, ids: { message: initialMessage.id, upload: initialImages[0] && (initialImages[0]._id || initialImages[0].id), room: initialMessage.room && initialMessage.room.id, sender: initialMessage.sender && initialMessage.sender.id }, attrs: { source_type: "original" }
+        });
+        return initialMessage;
+      }
       const messageId = String(initialMessage.id || "");
       const roomId = String(initialMessage.room && initialMessage.room.id || "");
       if (!messageId || !roomId) return initialMessage;
@@ -3431,6 +3545,10 @@ var require_upload_duplicate_guard = __commonJS({
           if (direct) bestMessage = direct;
           if (direct && messageImageFiles(direct).length && !isPreviewOnlyMessage(direct)) {
             if (logger) logger.info(`MEDIA_V2_SETTLED source=message-reader message=${messageId} attempt=${attempt + 1} images=${messageImageFiles(direct).length}`);
+            emitTarsTraceV1(logger, trace, {
+              component: "media_resolver", stage: "media_resolution", event: "success", attempt: attempt + 1, outcome: "ok", reason_code: "MEDIA_RESOLVED",
+              duration_ms: Date.now() - traceStartedAt, ids: { message: direct.id, origin_message: initialMessage.id, upload: messageImageFiles(direct)[0] && (messageImageFiles(direct)[0]._id || messageImageFiles(direct)[0].id), room: direct.room && direct.room.id, sender: direct.sender && direct.sender.id }, attrs: { source_type: "original" }
+            });
             return direct;
           }
         } catch (error) {
@@ -3447,6 +3565,10 @@ var require_upload_duplicate_guard = __commonJS({
           if (roomMessage) bestMessage = roomMessage;
           if (roomMessage && messageImageFiles(roomMessage).length && !isPreviewOnlyMessage(roomMessage)) {
             if (logger) logger.info(`MEDIA_V2_SETTLED source=room-history message=${messageId} attempt=${attempt + 1} images=${messageImageFiles(roomMessage).length}`);
+            emitTarsTraceV1(logger, trace, {
+              component: "media_resolver", stage: "media_resolution", event: "success", attempt: attempt + 1, outcome: "ok", reason_code: "MEDIA_RESOLVED",
+              duration_ms: Date.now() - traceStartedAt, ids: { message: roomMessage.id, origin_message: initialMessage.id, upload: messageImageFiles(roomMessage)[0] && (messageImageFiles(roomMessage)[0]._id || messageImageFiles(roomMessage)[0].id), room: roomMessage.room && roomMessage.room.id, sender: roomMessage.sender && roomMessage.sender.id }, attrs: { source_type: "original" }
+            });
             return roomMessage;
           }
           // Some Rocket.Chat mobile clients finalize the uploaded file in a
@@ -3469,6 +3591,10 @@ var require_upload_duplicate_guard = __commonJS({
             : siblingCandidates.length === 1 ? siblingCandidates[0] : void 0;
           if (siblingMessage) {
             if (logger) logger.info(`MEDIA_V2_SETTLED source=sibling-message origin=${messageId} message=${String(siblingMessage.id || "")} attempt=${attempt + 1} images=${messageImageFiles(siblingMessage).length}`);
+            emitTarsTraceV1(logger, trace, {
+              component: "media_resolver", stage: "media_resolution", event: "success", attempt: attempt + 1, outcome: "ok", reason_code: "MEDIA_RESOLVED",
+              duration_ms: Date.now() - traceStartedAt, ids: { message: siblingMessage.id, origin_message: initialMessage.id, upload: messageImageFiles(siblingMessage)[0] && (messageImageFiles(siblingMessage)[0]._id || messageImageFiles(siblingMessage)[0].id), room: siblingMessage.room && siblingMessage.room.id, sender: siblingMessage.sender && siblingMessage.sender.id }, attrs: { source_type: "original" }
+            });
             return siblingMessage;
           }
         } catch (error) {
@@ -3476,6 +3602,11 @@ var require_upload_duplicate_guard = __commonJS({
         }
       }
       if (logger) logger.warn(`MEDIA_V2_NOT_SETTLED message=${messageId} images=${messageImageFiles(bestMessage).length}`);
+      if (trace) emitTarsTraceV1(logger, trace, {
+        component: "media_resolver", stage: "media_resolution", event: "finish", attempt: maxAttempts, outcome: expectMedia ? "failed" : "skipped", reason_code: expectMedia ? "MEDIA_UNSETTLED" : "NO_MEDIA_SIGNAL",
+        error_class: expectMedia ? "upload_unsettled" : "none", duration_ms: Date.now() - traceStartedAt,
+        ids: { message: bestMessage && bestMessage.id, origin_message: initialMessage.id, room: initialMessage.room && initialMessage.room.id, sender: initialMessage.sender && initialMessage.sender.id }, attrs: { source_type: isPreviewOnlyMessage(bestMessage) ? "preview_fallback" : "unknown" }
+      });
       // A short probe also runs for opaque personal messages because mobile
       // Rocket.Chat can hide every upload marker. Exhausting that probe does
       // not mean an ordinary text message failed to upload a file.
@@ -5082,7 +5213,7 @@ var require_upload_duplicate_guard = __commonJS({
     function receiptVisionEngineRetryableStatus(statusCode) {
       return statusCode === 429 || statusCode >= 500 && statusCode <= 599;
     }
-    async function requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt = 0, providerOverride, providerFallbackAttempted = false) {
+    async function requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt = 0, providerOverride, providerFallbackAttempted = false, trace) {
       if (!config || !content || !content.length || !http) return void 0;
       const openAiModel = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
       const provider = providerOverride || receiptVisionProviderForConfig(config, openAiModel);
@@ -5091,7 +5222,7 @@ var require_upload_duplicate_guard = __commonJS({
       const useFallbackProvider = async (reason) => {
         if (!fallbackProvider) return void 0;
         if (logger) logger.warn(`RECEIPT_VISION_ENGINE_V1 provider_fallback=yandex_ai_studio_to_openai reason=${reason}`);
-        return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, 0, fallbackProvider, true);
+        return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, 0, fallbackProvider, true, trace);
       };
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
@@ -5121,20 +5252,28 @@ var require_upload_duplicate_guard = __commonJS({
         const timeout = /(?:timeout|timed\s*out|etimedout)/i.test(String(error && (error.code || error.message) || error || ""));
         if (timeout && attempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt + 1, provider, providerFallbackAttempted);
+          return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt + 1, provider, providerFallbackAttempted, trace);
         }
         if (fallbackProvider) return useFallbackProvider(timeout ? "timeout" : "transport");
         if (logger) logger.warn(`RECEIPT_VISION_ENGINE_V1 unavailable provider=${provider.id} class=${timeout ? "timeout" : "other"}`);
+        emitTarsTraceV1(logger, trace, {
+          component: "vision", stage: "receipt_vision", event: "finish", attempt: attempt + 1, outcome: "failed", reason_code: "RECEIPT_VISION_UNAVAILABLE",
+          error_class: timeout ? "timeout" : "unknown", attrs: { provider: provider.id, pass: "receipt_engine" }
+        });
         return void 0;
       }
       const statusCode = Number(response && response.statusCode || 0);
       if (statusCode < 200 || statusCode >= 300) {
         if (receiptVisionEngineRetryableStatus(statusCode) && attempt < 1) {
           await new Promise((resolve) => setTimeout(resolve, 900));
-          return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt + 1, provider, providerFallbackAttempted);
+          return requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, attempt + 1, provider, providerFallbackAttempted, trace);
         }
         if (fallbackProvider) return useFallbackProvider(statusCode === 429 ? "429" : statusCode >= 500 ? "5xx" : "http_error");
         if (logger) logger.warn(`RECEIPT_VISION_ENGINE_V1 unavailable provider=${provider.id} status=${statusCode || "unknown"}`);
+        emitTarsTraceV1(logger, trace, {
+          component: "vision", stage: "receipt_vision", event: "finish", attempt: attempt + 1, outcome: "failed", reason_code: "RECEIPT_VISION_HTTP_ERROR",
+          error_class: statusCode === 429 ? "rate_limit" : statusCode >= 500 ? "provider_5xx" : "provider_4xx", attrs: { provider: provider.id, pass: "receipt_engine" }
+        });
         return void 0;
       }
       let payload = response.data || response.content || response;
@@ -5143,11 +5282,15 @@ var require_upload_duplicate_guard = __commonJS({
           payload = JSON.parse(payload);
         } catch (_2) {
           if (fallbackProvider) return useFallbackProvider("invalid_response");
+          emitTarsTraceV1(logger, trace, { component: "vision", stage: "receipt_vision", event: "finish", outcome: "failed", reason_code: "RECEIPT_VISION_INVALID_RESPONSE", error_class: "parse", attrs: { provider: provider.id, pass: "receipt_engine" } });
           return void 0;
         }
       }
       const parsed = parseReceiptVisionEngineV1(openAiReceiptOutputText(payload));
       if (!parsed && fallbackProvider) return useFallbackProvider("invalid_response");
+      emitTarsTraceV1(logger, trace, {
+        component: "vision", stage: "receipt_vision", event: "finish", attempt: attempt + 1, outcome: parsed ? "ok" : "failed", reason_code: parsed ? "RECEIPT_VISION_COMPLETED" : "RECEIPT_VISION_INVALID_RESPONSE", error_class: parsed ? "none" : "parse", attrs: { provider: provider.id, pass: "receipt_engine" }
+      });
       return parsed ? { ...parsed, providerId: provider.id } : void 0;
     }
     function normalizeOpenAiStatus(value) {
@@ -6699,7 +6842,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (hasOpenAi) {
           const visionStartedAt = Date.now();
           logReceiptStage(logger, stageContext, "receipt_vision_engine_start");
-          const visionResult = await requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger);
+          const visionResult = await requestOpenAiReceiptVisionEngineV1(file, content, http, config, logger, 0, void 0, false, stageContext && stageContext.trace);
           logReceiptStage(logger, stageContext, "receipt_vision_engine_end", visionStartedAt, visionResult ? "ok" : "fallback");
           if (visionResult) recordReceiptReplayPass(stageContext, {
             provider: visionResult.providerId,
@@ -6815,6 +6958,10 @@ var require_upload_duplicate_guard = __commonJS({
           addCombinedCandidate();
           if (diagnostic) diagnostic.yandex_layout_result = yandexLayoutResult;
           logReceiptStage(logger, stageContext, "yandex_validation_end", yandexStartedAt, failures.length ? "partial" : "ok");
+          emitTarsTraceV1(logger, stageContext && stageContext.trace, {
+            component: "ocr", stage: "receipt_ocr", event: "finish", outcome: yandexLayoutResult === "success" ? "ok" : "failed", reason_code: yandexLayoutResult === "success" ? "RECEIPT_OCR_COMPLETED" : "RECEIPT_OCR_INCOMPLETE",
+            duration_ms: Date.now() - yandexStartedAt, ids: { upload: file && (file._id || file.id) }, attrs: { provider: "yandex_ocr", pass: "ocr" }
+          });
         }
         if (receiptVisionAuthority) {
           const fieldDisagreement = logReceiptVisionEngineDisagreement();
@@ -6974,6 +7121,9 @@ var require_upload_duplicate_guard = __commonJS({
         const result = await validateReceiptDate(file, content, http, config, logger, 0, stageContext, diagnostic);
         if (diagnostic) diagnostic.strict_result = personalImageStrictResult(result);
         logReceiptStage(logger, stageContext, "strict_validation_done", strictStartedAt, result && result.ok ? "accepted" : "rejected");
+        emitTarsTraceV1(logger, stageContext && stageContext.trace, {
+          component: "receipt_resolution", stage: "strict_receipt_decision", event: "decision", outcome: result && result.ok ? "accepted" : /(?:НУЖНА ПРОВЕРКА|НЕ РАСПОЗНАНА)/i.test(String(result && result.reason || "")) ? "control" : "rejected", reason_code: result && result.ok ? "STRICT_ACCEPT" : "STRICT_REJECT", duration_ms: Date.now() - strictStartedAt, ids: { upload: file && (file._id || file.id) }
+        });
         return result;
       }
       const key = `${expectedReceiptDate(config)}:${receiptVisionProviderCacheKey(config)}:${exactHash(content)}`;
@@ -6985,6 +7135,9 @@ var require_upload_duplicate_guard = __commonJS({
         mergePersonalImageReceiptTelemetry(diagnostic, cached.diagnostic);
         if (diagnostic) diagnostic.strict_result = personalImageStrictResult(result);
         logReceiptStage(logger, stageContext, "strict_validation_done", strictStartedAt, result && result.ok ? "accepted_cached" : "rejected_cached");
+        emitTarsTraceV1(logger, stageContext && stageContext.trace, {
+          component: "receipt_resolution", stage: "strict_receipt_decision", event: "decision", outcome: result && result.ok ? "accepted" : /(?:НУЖНА ПРОВЕРКА|НЕ РАСПОЗНАНА)/i.test(String(result && result.reason || "")) ? "control" : "rejected", reason_code: result && result.ok ? "STRICT_ACCEPT" : "STRICT_REJECT", duration_ms: Date.now() - strictStartedAt, ids: { upload: file && (file._id || file.id) }, attrs: { cache: "hit" }
+        });
         return result;
       }
       const promise = (async () => {
@@ -7005,6 +7158,9 @@ var require_upload_duplicate_guard = __commonJS({
         const result = await promise;
         if (diagnostic) diagnostic.strict_result = personalImageStrictResult(result);
         logReceiptStage(logger, stageContext, "strict_validation_done", strictStartedAt, result && result.ok ? "accepted" : "rejected");
+        emitTarsTraceV1(logger, stageContext && stageContext.trace, {
+          component: "receipt_resolution", stage: "strict_receipt_decision", event: "decision", outcome: result && result.ok ? "accepted" : /(?:НУЖНА ПРОВЕРКА|НЕ РАСПОЗНАНА)/i.test(String(result && result.reason || "")) ? "control" : "rejected", reason_code: result && result.ok ? "STRICT_ACCEPT" : "STRICT_REJECT", duration_ms: Date.now() - strictStartedAt, ids: { upload: file && (file._id || file.id) }, attrs: { cache: "miss" }
+        });
         return result;
       } catch (error) {
         strictReceiptValidationCache.delete(key);
@@ -7885,6 +8041,7 @@ var require_upload_duplicate_guard = __commonJS({
       return true;
     }
     async function rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", processingStatusManager, personalImageDiagnostic, resultContext = {}) {
+      const trace = resultContext && resultContext.trace;
       if (await isKnownArchiveRoom(message && message.room, read)) return false;
       const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
       if (isTarsAppMessage(message, appUser)) return false;
@@ -7955,6 +8112,11 @@ var require_upload_duplicate_guard = __commonJS({
           if (!content || !content.length) {
             throw new Error(`UploadReader did not provide ${messageFileId} after settle retries: ${uploadReadError && uploadReadError.message || "empty upload"}`);
           }
+          if (trace) emitTarsTraceV1(logger, trace, {
+            component: "rocketchat", stage: "upload_read", event: "success", outcome: "ok", reason_code: "UPLOAD_READ",
+            ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id },
+            attrs: { source_type: message.__mediaV2PreviewOnly === true ? "preview_fallback" : "original", intent: intent || "none" }
+          });
           capturePersonalImageSourceTelemetry(personalImageDiagnostic, messageFile, content);
           if (personalRoom && await rememberOrDeletePostedPersonalImageDuplicate(message, messageFile, content, read, persistence, modify, logger)) return true;
           const postedExact = exactHash(content);
@@ -7971,6 +8133,11 @@ var require_upload_duplicate_guard = __commonJS({
             }
           }
           protectedRoom = preclassifiedRoom || await protectedRoomForPersonalFile(message, messageFile, content, intent, fallbackProtectedRoom, http, ocrConfig, logger, personalImageDiagnostic);
+          if (trace) emitTarsTraceV1(logger, trace, {
+            component: "routing", stage: "routing_decision", event: "decision", outcome: protectedRoom ? "ok" : "skipped", reason_code: protectedRoom ? "ROUTE_SELECTED" : "ROUTE_UNRESOLVED",
+            ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id },
+            attrs: { intent: intent || "none" }
+          });
           if (!protectedRoom) continue;
           const prevalidatedReceiptCheck = protectedRoom.prevalidatedReceiptCheck;
           const index = await getScopedIndex(protectedRoom);
@@ -7980,11 +8147,17 @@ var require_upload_duplicate_guard = __commonJS({
             continue;
           }
           const receiptValidationContext = protectedRoom.kind === "receipt" ? protectedRoom.receiptValidationContext || receiptStageContext(messageFile, content, ocrConfig) : void 0;
+          if (receiptValidationContext && trace) receiptValidationContext.trace = trace;
           const processingStatusHandle = protectedRoom.kind === "receipt" && processingStatusManager ? await processingStatusManager.ensure(messageFile, content, receiptValidationContext) : void 0;
           if (processingStatusHandle) receiptStageByUpload[messageFileId] = processingStatusHandle;
           const exact = exactHash(content);
           const visual = visualHash(messageFile, content);
           const exactMatch = protectedRoom.kind === "photo" ? findDuplicate(index, exact, visual) : findExactDuplicate(index, exact);
+          emitTarsTraceV1(logger, trace, {
+            component: "duplicate_guard", stage: "duplicate_exact", event: "decision", outcome: exactMatch && exactMatch.source !== "pre" ? "duplicate" : "ok", reason_code: exactMatch && exactMatch.source !== "pre" ? "EXACT_DUPLICATE" : "EXACT_CLEAR",
+            ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id },
+            attrs: { intent: protectedRoom.kind === "receipt" ? "receipt" : "photo" }
+          });
           const isSameConfirmedMessage = exactMatch && exactMatch.messageId && message.id && exactMatch.messageId === message.id;
           const isSameConfirmedUpload = exactMatch && exactMatch.uploadId && messageFileId && String(exactMatch.uploadId) === String(messageFileId) && exactMatch.source !== "duplicate" && exactMatch.source !== "rejected";
           if (isSameConfirmedMessage || isSameConfirmedUpload) {
@@ -8019,6 +8192,10 @@ var require_upload_duplicate_guard = __commonJS({
                 await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, reason);
               }
               if (logger) logger.info(`Deleted posted rejected receipt ${message.id || "unknown"} with original reason`);
+              emitTarsTraceV1(logger, trace, {
+                component: "publisher", stage: "result_publish", event: "success", outcome: "rejected", reason_code: "REJECTED_RESULT_PUBLISHED",
+                ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
+              });
               return true;
             }
             // The receipt index is shared by all master rooms. Once an exact
@@ -8101,6 +8278,10 @@ var require_upload_duplicate_guard = __commonJS({
                 }
                 await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, exactMatch.invalidReason);
                 if (logger) logger.info(`Deleted unconfirmed receipt ${message.id || "unknown"}; exact photo fingerprint locked: ${exactMatch.invalidReason}`);
+                emitTarsTraceV1(logger, trace, {
+                  component: "publisher", stage: "result_publish", event: "success", outcome: "control", reason_code: "CONTROL_RESULT_PUBLISHED",
+                  ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
+                });
                 await recordShadowReceiptOutcome({
                   messageId: message.id,
                   uploadId: messageFileId,
@@ -8119,6 +8300,10 @@ var require_upload_duplicate_guard = __commonJS({
               const duplicateStartedAt = Date.now();
               const identityMatch = findReceiptIdentityDuplicate(index, receiptCheck.receiptIdentity, exactMatch);
               const receiptVisualMatch = findReceiptVisualDuplicate(index, visual, receiptCheck, exactMatch);
+              emitTarsTraceV1(logger, trace, {
+                component: "duplicate_guard", stage: "duplicate_identity", event: "decision", outcome: identityMatch || receiptVisualMatch ? "duplicate" : "ok", reason_code: identityMatch ? "IDENTITY_DUPLICATE" : receiptVisualMatch ? "VISUAL_DUPLICATE" : "IDENTITY_CLEAR",
+                ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
+              });
               if (processingStatusManager) processingStatusManager.mark(processingStatusHandle, "identity_duplicate_done", duplicateStartedAt, identityMatch || receiptVisualMatch ? "duplicate" : "clear");
               if (identityMatch || receiptVisualMatch) {
                 // The receipt identity (document/operation number) is the
@@ -8149,6 +8334,10 @@ var require_upload_duplicate_guard = __commonJS({
                   await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, "\u{1F6AB} \u041F\u041E\u0412\u0422\u041E\u0420 \u0427\u0415\u041A\u0410");
                 }
                 if (logger) logger.info(`Deleted proven duplicate receipt message ${message.id || "unknown"}`);
+                emitTarsTraceV1(logger, trace, {
+                  component: "publisher", stage: "result_publish", event: "success", outcome: "duplicate", reason_code: "DUPLICATE_RESULT_PUBLISHED",
+                  ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
+                });
                 if (identityMatch) await recordShadowReceiptOutcome({
                   messageId: message.id,
                   uploadId: messageFileId,
@@ -8260,6 +8449,10 @@ var require_upload_duplicate_guard = __commonJS({
               if (message.id && message.sender) await deleteReceiptMessage(message, read, modify, logger);
               await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, rejectedEntry.invalidReason);
               if (logger) logger.info(`Deleted suspicious receipt ${message.id || "unknown"} without pre-upload reservation: ${rejectedEntry.invalidReason}`);
+              emitTarsTraceV1(logger, trace, {
+                component: "publisher", stage: "result_publish", event: "success", outcome: "control", reason_code: "CONTROL_RESULT_PUBLISHED",
+                ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
+              });
               await recordShadowReceiptOutcome({
                 messageId: message.id,
                 uploadId: messageFileId,
@@ -8278,6 +8471,10 @@ var require_upload_duplicate_guard = __commonJS({
             const duplicateStartedAt = Date.now();
             const identityMatch = findReceiptIdentityDuplicate(index, receiptCheck.receiptIdentity);
             const receiptVisualMatch = findReceiptVisualDuplicate(index, visual, receiptCheck);
+            emitTarsTraceV1(logger, trace, {
+              component: "duplicate_guard", stage: "duplicate_identity", event: "decision", outcome: identityMatch || receiptVisualMatch ? "duplicate" : "ok", reason_code: identityMatch ? "IDENTITY_DUPLICATE" : receiptVisualMatch ? "VISUAL_DUPLICATE" : "IDENTITY_CLEAR",
+              ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
+            });
             if (processingStatusManager) processingStatusManager.mark(processingStatusHandle, "identity_duplicate_done", duplicateStartedAt, identityMatch || receiptVisualMatch ? "duplicate" : "clear");
             if (identityMatch || receiptVisualMatch) {
               index.photos.push({
@@ -8304,6 +8501,10 @@ var require_upload_duplicate_guard = __commonJS({
                 await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, "🚫 ПОВТОР ЧЕКА");
               }
               if (logger) logger.info(`Deleted duplicate receipt ${message.id || "unknown"} without pre-upload reservation`);
+              emitTarsTraceV1(logger, trace, {
+                component: "publisher", stage: "result_publish", event: "success", outcome: "duplicate", reason_code: "DUPLICATE_RESULT_PUBLISHED",
+                ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
+              });
               if (identityMatch) await recordShadowReceiptOutcome({
                 messageId: message.id,
                 uploadId: messageFileId,
@@ -8425,6 +8626,10 @@ var require_upload_duplicate_guard = __commonJS({
             for (const entry of scopedEntries) {
               try {
                 const published = await publishAcceptedReceipt(entry, message, read, modify, ocrConfig, logger);
+                emitTarsTraceV1(logger, trace, {
+                  component: "publisher", stage: "result_publish", event: published || entry && entry.resultMessageId ? "success" : "skip", outcome: published || entry && entry.resultMessageId ? "accepted" : "skipped", reason_code: published || entry && entry.resultMessageId ? "ACCEPTED_RESULT_PUBLISHED" : "ACCEPTED_RESULT_SKIPPED",
+                  ids: { message: message.id, upload: entry && entry.uploadId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
+                });
                 const statusHandle = receiptStageByUpload[String(entry && entry.uploadId || "")];
                 if (processingStatusManager) processingStatusManager.mark(statusHandle, "accepted_published", void 0, published || entry && entry.resultMessageId ? "ok" : "skipped");
               } catch (error) {
@@ -8486,14 +8691,23 @@ var require_upload_duplicate_guard = __commonJS({
       return true;
     }
     async function processPersonalMediaV2(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent = "", allowProcessingStatus = true, routingOptions = {}) {
+      const trace = routingOptions && routingOptions.trace;
       if (!message || !isPersonalTarsRoom(message.room)) return { handled: false, status: "not-personal" };
       const imageFiles = messageImageFiles(message);
       if (!imageFiles.length) {
         if (logger) logger.warn(`MEDIA_V2_SKIPPED message=${String(message.id || "none")} reason=no-image`);
+        if (trace) emitTarsTraceV1(logger, trace, {
+          component: "routing", stage: "personal_media", event: "skip", outcome: "skipped", reason_code: "NO_IMAGE",
+          ids: { message: message.id, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: forcedIntent || "none" }
+        });
         return { handled: false, status: "no-image" };
       }
       const personalImageDiagnostic = createPersonalImageClassificationDiagnostic(personalImageDiagnosticSourceType(message));
       if (logger) logger.info(`MEDIA_V2_START message=${String(message.id || "none")} images=${imageFiles.length} intent=${forcedIntent || "automatic"}`);
+      if (trace) emitTarsTraceV1(logger, trace, {
+        component: "routing", stage: "personal_media", event: "start", outcome: "ok", reason_code: "PERSONAL_MEDIA_STARTED",
+        ids: { message: message.id, upload: imageFiles[0] && (imageFiles[0]._id || imageFiles[0].id), room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: forcedIntent || "none" }
+      });
       // Work photos have an independent receipt-safe route to result. The
       // forwarder checks visible salon-work signs first (person, hair, face,
       // head/back of head, beard, brows/lashes, hands/nails or feet), blocks
@@ -8528,6 +8742,10 @@ var require_upload_duplicate_guard = __commonJS({
             emitPersonalImageClassificationDiagnostic(logger, personalImageDiagnostic);
           }
           if (logger) logger.info(`MEDIA_V2_WORK_PHOTO_RESULT message=${String(message.id || "none")} result=${String(photoResult)}`);
+          if (trace) emitTarsTraceV1(logger, trace, {
+            component: "routing", stage: "personal_media", event: "finish", outcome: photoResult === true ? "forwarded" : "failed", reason_code: photoResult === true ? "WORK_PHOTO_FORWARDED" : "WORK_PHOTO_NOT_FORWARDED",
+            ids: { message: message.id, upload: imageFiles[0] && (imageFiles[0]._id || imageFiles[0].id), room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "photo" }
+          });
           return { handled: true, status: photoResult === true ? "work-photo-forwarded" : String(photoResult), result: photoResult };
         }
         // A user-selected PHOTO must never fall through into receipt OCR just
@@ -8536,12 +8754,17 @@ var require_upload_duplicate_guard = __commonJS({
         // fail-closed Yandex OCR safety check.
         if (forcedIntent === "photo") {
           if (logger) logger.warn(`MEDIA_V2_WORK_PHOTO_STOP message=${String(message.id || "none")} result=not-forwarded`);
+          if (trace) emitTarsTraceV1(logger, trace, {
+            component: "routing", stage: "personal_media", event: "finish", outcome: "failed", reason_code: "WORK_PHOTO_NOT_FORWARDED",
+            ids: { message: message.id, upload: imageFiles[0] && (imageFiles[0]._id || imageFiles[0].id), room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "photo" }
+          });
           return { handled: true, status: "work-photo-not-forwarded", result: false };
         }
       }
       const processingStatusManager = createReceiptProcessingStatusManager(message, read, persistence, modify, logger, allowProcessingStatus);
       try {
         const resultContext = {};
+        if (trace) resultContext.trace = trace;
         const result = await rejectDuplicateMessage(message, read, persistence, modify, logger, http, ocrConfig, forcedIntent, processingStatusManager, personalImageDiagnostic, resultContext);
         const handled = result === true || result === "processed";
         if (result === true) processingStatusManager.markAll("rejected_published", "ok");
@@ -8556,6 +8779,10 @@ var require_upload_duplicate_guard = __commonJS({
           setPersonalImageFinalDiagnostic(personalImageDiagnostic, "unknown", finalReason, "final");
           emitPersonalImageClassificationDiagnostic(logger, personalImageDiagnostic);
         }
+        if (trace) emitTarsTraceV1(logger, trace, {
+          component: "routing", stage: "personal_media", event: "finish", outcome: handled ? "ok" : "skipped", reason_code: handled ? "PERSONAL_MEDIA_HANDLED" : "PERSONAL_MEDIA_UNCLASSIFIED",
+          ids: { message: message.id, upload: imageFiles[0] && (imageFiles[0]._id || imageFiles[0].id), room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: forcedIntent || "none" }
+        });
         return { handled, status: handled ? "processed" : "unclassified", result, acceptedReceiptEntries: resultContext.acceptedReceiptEntries || [] };
       } finally {
         await processingStatusManager.clearAll();
@@ -9155,6 +9382,10 @@ var require_upload_duplicate_guard = __commonJS({
       expectedReceiptDate,
       visualHash,
       hammingDistance,
+      createTarsTraceV1,
+      tarsTraceIdentifierTokenV1,
+      sanitizeTarsTraceEventV1,
+      emitTarsTraceV1,
       guardUpload,
       rejectDuplicateMessage,
       messageImageFiles,
@@ -9689,6 +9920,19 @@ var C = class extends j.App {
     return !G.isTarsAppMessage(e, r);
   }
   async executePostMessageSent(e, n, t, s, r) {
+    let trace;
+    let traceLogger;
+    try {
+      traceLogger = this.getLogger();
+      trace = G.createTarsTraceV1();
+    } catch (_2) {
+      trace = void 0;
+      traceLogger = void 0;
+    }
+    G.emitTarsTraceV1(traceLogger, trace, {
+      component: "rocketchat", stage: "inbound_received", event: "start", outcome: "ok", reason_code: "EVENT_RECEIVED",
+      ids: { message: e && e.id, room: e && e.room && e.room.id, sender: e && e.sender && e.sender.id }
+    });
     if (e && e.room && e.room.id && !G.isPersonalTarsRoom(e.room)) {
       try {
         const hydratedRoom = await n.getRoomReader().getById(e.room.id);
@@ -9697,9 +9941,15 @@ var C = class extends j.App {
         this.getLogger().warn(`POST_ROOM_HYDRATE_EXECUTE_FAILED room=${String(e.room.id)} error=${roomError && roomError.message || roomError}`);
       }
     }
-    if (await G.isKnownArchiveRoom(e && e.room, n)) return;
+    if (await G.isKnownArchiveRoom(e && e.room, n)) {
+      G.emitTarsTraceV1(traceLogger, trace, { component: "rocketchat", stage: "terminal_outcome", event: "finish", outcome: "skipped", reason_code: "ARCHIVE_MESSAGE_SKIPPED", ids: { message: e && e.id, room: e && e.room && e.room.id, sender: e && e.sender && e.sender.id } });
+      return;
+    }
     const appUser = await n.getUserReader().getByUsername("tars") || await n.getUserReader().getAppUser();
-    if (G.isTarsAppMessage(e, appUser)) return;
+    if (G.isTarsAppMessage(e, appUser)) {
+      G.emitTarsTraceV1(traceLogger, trace, { component: "rocketchat", stage: "terminal_outcome", event: "finish", outcome: "skipped", reason_code: "APP_MESSAGE_SKIPPED", ids: { message: e && e.id, room: e && e.room && e.room.id, sender: e && e.sender && e.sender.id } });
+      return;
+    }
     let messageId = e && e.id ? String(e.id) : "";
     const originalEvent = e;
     const hasInitialMediaSignal = Boolean(G.messageImageFiles(e).length || G.messageLooksLikePendingImageUpload(e) || e && e.file || e && Array.isArray(e.files) && e.files.length || e && Array.isArray(e.attachments) && e.attachments.length || !String(e && e.text || "").trim());
@@ -9722,7 +9972,7 @@ var C = class extends j.App {
       // so every personal message gets the former short settle window. Explicit
       // media signals keep the longer window; ordinary text is delayed at most
       // about two seconds and remains fully functional.
-      const settledMessage = await G.resolvePersonalImageMessageV2(e, n, this.getLogger(), hasInitialMediaSignal ? 16 : 6, hasInitialMediaSignal ? 750 : 400, hasInitialMediaSignal);
+      const settledMessage = await G.resolvePersonalImageMessageV2(e, n, this.getLogger(), hasInitialMediaSignal ? 16 : 6, hasInitialMediaSignal ? 750 : 400, hasInitialMediaSignal, trace);
       const settledHasImages = Boolean(G.messageImageFiles(settledMessage).length);
       // Preserve authoritative sender/room from the event. When Rocket.Chat
       // finishes a mobile upload in a sibling message, use that settled message
@@ -9783,6 +10033,10 @@ var C = class extends j.App {
     this.getLogger().info(`POST_PROBE invocation=${invocationId} message=${messageId || "none"} room=${String(e && e.room && (e.room.slugifiedName || e.room.id) || "none")} uploads=${uploadEventKey || "none"} localSeen=${localSeen} localUploadSeen=${localUploadSeen}`);
     if (localSeen || localUploadSeen) {
       this.getLogger().info(`POST_PROBE_SKIP_LOCAL invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
+      G.emitTarsTraceV1(traceLogger, trace, {
+        component: "rocketchat", stage: "terminal_outcome", event: "finish", outcome: "skipped", reason_code: "LOCAL_DUPLICATE_EVENT",
+        ids: { message: e && e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e && e.room && e.room.id, sender: e && e.sender && e.sender.id }
+      });
       return;
     }
       if (messageId && !uploadEventKey) recentPostMessageIds.add(messageId);
@@ -9828,6 +10082,11 @@ var C = class extends j.App {
             this.activeMailingReportIntent(n, e.room)
           ]);
           const intentCount = [explicitPhotoIntent, explicitTransferIntent, explicitMailingIntent].filter(Boolean).length;
+          G.emitTarsTraceV1(traceLogger, trace, {
+            component: "intent_gate", stage: "intent_gate", event: "decision", outcome: intentCount === 1 ? "ok" : "skipped", reason_code: intentCount === 1 ? "INTENT_SELECTED" : "INTENT_MISSING_OR_AMBIGUOUS",
+            ids: { message: e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e.room && e.room.id, sender: e.sender && e.sender.id },
+            attrs: { intent: intentCount === 1 ? explicitPhotoIntent ? "photo" : explicitTransferIntent ? "receipt" : "mailing" : intentCount > 1 ? "ambiguous" : "none" }
+          });
           if (intentCount !== 1) {
             // New V3 contract: the user chooses the pipeline before upload.
             // No automatic classifier or downstream pipeline runs without one
@@ -9836,12 +10095,22 @@ var C = class extends j.App {
             return;
           }
           primaryRoutingDiagnostic = G.createPersonalImageClassificationDiagnostic(G.personalImageDiagnosticSourceType(e));
+          const primaryTraceStartedAt = trace ? Date.now() : 0;
           try {
             selectedPrimaryDecision = await G.primaryVisionDecisionForPersonalMessage(e, n, t, i, this.getLogger(), primaryRoutingDiagnostic);
+            G.emitTarsTraceV1(traceLogger, trace, {
+              component: "vision", stage: "primary_classification", event: "finish", outcome: selectedPrimaryDecision ? "ok" : "failed", reason_code: selectedPrimaryDecision ? "PRIMARY_CLASSIFIED" : "PRIMARY_EMPTY",
+              duration_ms: Date.now() - primaryTraceStartedAt,
+              ids: { message: e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e.room && e.room.id, sender: e.sender && e.sender.id }, attrs: { pass: "primary" }
+            });
             visionRoute = G.primaryVisionDominantKind(selectedPrimaryDecision);
           } catch (visionError) {
             selectedPrimaryVisionUnavailable = true;
             this.getLogger().warn(`Primary Vision intent verification failed: ${visionError && visionError.message || visionError}`);
+            G.emitTarsTraceV1(traceLogger, trace, {
+              component: "vision", stage: "primary_classification", event: "finish", outcome: "failed", reason_code: "PRIMARY_CLASSIFICATION_FAILED", error_class: "unknown",
+              ids: { message: e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e.room && e.room.id, sender: e.sender && e.sender.id }, attrs: { pass: "primary" }
+            });
           }
           G.scheduleImageClassificationV1Shadow({
             enabled: i.imageClassificationV1ShadowEnabled,
@@ -9940,7 +10209,8 @@ var C = class extends j.App {
         {
           primaryVisionDecision: selectedPrimaryDecision,
           primaryVisionAttempted: hasPersonalImageUpload,
-          allowYandexSafetyFallback: explicitPhotoIntent
+          allowYandexSafetyFallback: explicitPhotoIntent,
+          trace
         }
       );
       if (mediaV2.handled) {
@@ -9970,9 +10240,13 @@ var C = class extends j.App {
     } finally {
       if (postMessageClaimToken && !postMessageClaimFailed) {
         try {
-          await G.completePostMessageClaim(e, postMessageClaimToken, s, this.getLogger());
+          await G.completePostMessageClaim(e, postMessageClaimToken, s, this.getLogger(), trace);
         } catch (claimError) {
           this.getLogger().warn(`Could not complete post-message claim: ${claimError && claimError.message || claimError}`);
+          G.emitTarsTraceV1(traceLogger, trace, {
+            component: "rocketchat", stage: "claim_complete", event: "error", outcome: "failed", reason_code: "CLAIM_COMPLETE_FAILED", error_class: "persistence",
+            ids: { message: e && e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e && e.room && e.room.id, sender: e && e.sender && e.sender.id }
+          });
         }
       }
       if (!personalButtonAlreadyRefreshed && this.isPersonalReportRoom(e && e.room) && e && e.sender) {
@@ -9980,6 +10254,11 @@ var C = class extends j.App {
       }
       if (messageId && !uploadEventKey) setTimeout(() => recentPostMessageIds.delete(messageId), 6e4);
       if (uploadEventKey) setTimeout(() => recentPostUploadIds.delete(uploadEventKey), 6e4);
+      G.emitTarsTraceV1(traceLogger, trace, {
+        component: "rocketchat", stage: "terminal_outcome", event: "finish", outcome: postMessageClaimFailed ? "failed" : "unknown", reason_code: postMessageClaimFailed ? "UNHANDLED_EXCEPTION" : "POST_MESSAGE_FINISHED",
+        duration_ms: trace && trace.startedAt ? Date.now() - trace.startedAt : null,
+        ids: { message: e && e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e && e.room && e.room.id, sender: e && e.sender && e.sender.id }
+      });
     }
   }
   async receiptOcrConfig(e) {

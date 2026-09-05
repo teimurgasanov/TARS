@@ -11,7 +11,7 @@ const handler = source.slice(handlerStart, handlerEnd);
 assert(handler.includes('postMessageClaimToken = await G.claimPostMessage(e, n, s, this.getLogger())'), 'distributed claim is not wired to persistence in image post-message handling');
 assert(handler.includes('if (!postMessageClaimToken)'), 'losing contender is not blocked');
 assert(handler.includes('postMessageClaimFailed = true'), 'claim failure state is not tracked');
-assert(handler.includes('await G.completePostMessageClaim(e, postMessageClaimToken, s, this.getLogger())'), 'winning claim is not completed through persistence');
+assert(handler.includes('await G.completePostMessageClaim(e, postMessageClaimToken, s, this.getLogger(), trace)'), 'winning claim is not completed through persistence');
 assert(handler.indexOf('if (uploadEventKey)') < handler.indexOf('await this.receiptOcrConfig(n)'), 'claim must happen before OCR/accounting');
 
 const claimStart = source.indexOf('function postMessageFileIds(message)');
@@ -23,7 +23,7 @@ class RocketChatAssociationRecord {
   constructor(model, key) { this.model = model; this.key = key; }
 }
 const RocketChatAssociationModel = { MISC: 'misc' };
-const context = { RocketChatAssociationRecord, RocketChatAssociationModel, setTimeout, Date, Math, console };
+const context = { RocketChatAssociationRecord, RocketChatAssociationModel, setTimeout, Date, Math, console, emitTarsTraceV1() { return true; } };
 vm.createContext(context);
 vm.runInContext(`${claimSource}\nthis.claimPostMessage = claimPostMessage; this.completePostMessageClaim = completePostMessageClaim;`, context);
 

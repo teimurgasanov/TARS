@@ -9,10 +9,12 @@ assert(start >= 0 && end > start, "media-v2 resolver missing");
 const resolver = new Function(
   "isPersonalTarsRoom",
   "messageImageFiles",
+  "emitTarsTraceV1",
   `return (${source.slice(start, end).trim()});`
 )(
   (room) => Boolean(room && room.personal),
-  (message) => message && message.image ? [message.image] : message && message.file ? [message.file] : []
+  (message) => message && message.image ? [message.image] : message && message.file ? [message.file] : [],
+  () => true
 );
 
 const logger = { info() {}, warn() {} };
