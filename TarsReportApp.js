@@ -9814,9 +9814,6 @@ var C = class extends j.App {
           this.getLogger().warn(`POST_PROBE_PREVIEW_FALLBACK invocation=${invocationId} message=${messageId || "none"} uploads=${uploadEventKey || "none"}`);
         }
         if (e && e.__mediaV2NotSettled && !hasPersonalImageUpload) {
-          if (appUser && e.room) {
-            await r.getCreator().finish(r.getCreator().startMessage().setSender(appUser).setRoom(e.room).setText("⚠️ ФАЙЛ НЕ ОБРАБОТАН\nRocket.Chat не завершил загрузку изображения. Отправьте файл ещё раз."));
-          }
           return;
         }
         let explicitPhotoIntent = false;
