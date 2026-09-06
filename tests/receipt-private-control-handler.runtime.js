@@ -11,7 +11,7 @@ function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
-function createRuntime(loaded, sharedRecords) {
+function createRuntime(loaded, sharedRecords, sharedMessages, sharedFaults) {
   const guard = loaded.__testGuard;
   const app = Object.create(loaded.TarsReportApp.prototype);
   const room = { id: "master-room", type: "d", slugifiedName: "tars-master" };
@@ -20,7 +20,8 @@ function createRuntime(loaded, sharedRecords) {
   const teimur = { id: "teimur-id", username: "teimur" };
   const shura = { id: "shura-id", username: "shura" };
   const records = sharedRecords || new Map();
-  const messages = new Map();
+  const messages = sharedMessages || new Map();
+  const faults = sharedFaults || { caseWrites: 0, statusUpdates: 0 };
   const notifications = [];
   const blocks = [];
   const counters = { persistenceReads: 0, indexWrites: 0, memory: 0, summary: 0, report: 0, publicMessages: 0, statusUpdates: 0 };
@@ -54,6 +55,10 @@ function createRuntime(loaded, sharedRecords) {
   const persistence = {
     async updateByAssociation(association, value) {
       const key = keyOf(association);
+      if (key.startsWith("receipt-case-v1:case:") && faults.caseWrites > 0) {
+        faults.caseWrites -= 1;
+        throw new Error("injected receipt case persistence failure");
+      }
       if (key === "receipt-duplicate-index-v1") counters.indexWrites += 1;
       records.set(key, clone(value));
     },
@@ -94,6 +99,10 @@ function createRuntime(loaded, sharedRecords) {
       };
     },
     async finish(builder) {
+      if (faults.statusUpdates > 0) {
+        faults.statusUpdates -= 1;
+        throw new Error("injected receipt status update failure");
+      }
       counters.statusUpdates += 1;
       messages.set(String(builder.__state.id), clone(builder.__state));
     }
@@ -121,7 +130,26 @@ function createRuntime(loaded, sharedRecords) {
   app.receiptOcrConfig = async () => ({});
   app.formatRubles = (value) => `${Number(value)} ₽`;
   app.refreshPreliminaryReportAnalysis = async () => { counters.report += 1; };
-  return { guard, app, room, master, teimur, read, persistence, modify, records, messages, notifications, counters, entry, blocks };
+  return { guard, app, room, master, teimur, read, persistence, modify, records, messages, notifications, counters, entry, blocks, faults };
+}
+
+async function prepareControl(runtime) {
+  runtime.guard.resetReceiptCaseV1ForTests();
+  const created = await runtime.guard.findOrCreateReceiptCaseV1({
+    sourceMessageId: runtime.entry.messageId,
+    sourceUploadId: runtime.entry.uploadId,
+    masterId: runtime.entry.userId
+  }, runtime.read, runtime.persistence);
+  await runtime.guard.transitionReceiptCaseV1(created.caseId, { state: "PROCESSING" }, runtime.read, runtime.persistence);
+  const control = await runtime.guard.transitionReceiptCaseV1(created.caseId, {
+    state: "CONTROL", strictDecision: "control", controlReason: "unresolved",
+    normalizedAmount: 600, normalizedDate: "2026-09-06"
+  }, runtime.read, runtime.persistence);
+  const statusManager = runtime.guard.createReceiptProcessingStatusManager({
+    id: runtime.entry.messageId, room: runtime.room, sender: runtime.master
+  }, runtime.read, runtime.persistence, runtime.modify, runtime.app.getLogger(), true);
+  await statusManager.syncCase(control);
+  return { caseId: created.caseId, statusMessageId: Array.from(runtime.messages.keys())[0] };
 }
 
 (async () => {
@@ -234,22 +262,7 @@ function createRuntime(loaded, sharedRecords) {
   assert.strictEqual(missingFields.records.get("receipt-duplicate-index-v1").photos[0].source, "rejected");
 
   const runtime = createRuntime(loaded);
-  runtime.guard.resetReceiptCaseV1ForTests();
-  const created = await runtime.guard.findOrCreateReceiptCaseV1({
-    sourceMessageId: runtime.entry.messageId,
-    sourceUploadId: runtime.entry.uploadId,
-    masterId: runtime.entry.userId
-  }, runtime.read, runtime.persistence);
-  await runtime.guard.transitionReceiptCaseV1(created.caseId, { state: "PROCESSING" }, runtime.read, runtime.persistence);
-  const control = await runtime.guard.transitionReceiptCaseV1(created.caseId, {
-    state: "CONTROL", strictDecision: "control", controlReason: "unresolved",
-    normalizedAmount: 600, normalizedDate: "2026-09-06"
-  }, runtime.read, runtime.persistence);
-  const statusManager = runtime.guard.createReceiptProcessingStatusManager({
-    id: runtime.entry.messageId, room: runtime.room, sender: runtime.master
-  }, runtime.read, runtime.persistence, runtime.modify, runtime.app.getLogger(), true);
-  await statusManager.syncCase(control);
-  const statusMessageId = Array.from(runtime.messages.keys())[0];
+  const { statusMessageId } = await prepareControl(runtime);
 
   const originalMemory = runtime.guard.scheduleTarsMemoryHumanReceiptConfirmationV1;
   const originalSummary = runtime.guard.publishMasterTransferSummary;
@@ -264,7 +277,7 @@ function createRuntime(loaded, sharedRecords) {
     await runtime.app.handleApproveReceiptButton(runtime.read, runtime.modify, runtime.persistence, action);
     const index = runtime.records.get("receipt-duplicate-index-v1");
     assert.strictEqual(index.photos[0].source, "confirmed");
-    assert.strictEqual(runtime.counters.indexWrites, 1, "manual financial path must remain the existing single index write");
+    assert.strictEqual(runtime.counters.indexWrites, 2, "approval must persist acceptance, then clear only the status-repair marker after successful synchronization");
     assert.deepStrictEqual({ memory: runtime.counters.memory, summary: runtime.counters.summary, report: runtime.counters.report }, { memory: 1, summary: 1, report: 1 });
     assert.strictEqual(runtime.messages.size, 1, "approval must not create another room message");
     assert.strictEqual(runtime.messages.get(statusMessageId).text, "✅ Чек 600 ₽ принят", "the same ReceiptCase status must be updated");
@@ -272,11 +285,64 @@ function createRuntime(loaded, sharedRecords) {
     assert.match(runtime.notifications[runtime.notifications.length - 1].message.text, /ЧЕК ЗАЧТЁН/);
 
     await runtime.app.handleApproveReceiptButton(runtime.read, runtime.modify, runtime.persistence, action);
-    assert.strictEqual(runtime.counters.indexWrites, 1, "repeated click must not credit the receipt twice");
+    assert.strictEqual(runtime.counters.indexWrites, 2, "repeated click must not credit the receipt twice");
     assert.deepStrictEqual({ memory: runtime.counters.memory, summary: runtime.counters.summary, report: runtime.counters.report }, { memory: 1, summary: 1, report: 1 });
   } finally {
     runtime.guard.scheduleTarsMemoryHumanReceiptConfirmationV1 = originalMemory;
     runtime.guard.publishMasterTransferSummary = originalSummary;
+  }
+
+  for (const failurePoint of ["caseWrites", "statusUpdates"]) {
+    const failed = createRuntime(loaded);
+    const prepared = await prepareControl(failed);
+    const originalFailedMemory = failed.guard.scheduleTarsMemoryHumanReceiptConfirmationV1;
+    const originalFailedSummary = failed.guard.publishMasterTransferSummary;
+    failed.guard.scheduleTarsMemoryHumanReceiptConfirmationV1 = () => { failed.counters.memory += 1; return true; };
+    failed.guard.publishMasterTransferSummary = async () => { failed.counters.summary += 1; return true; };
+    failed.faults[failurePoint] = 1;
+    try {
+      await failed.app.handleApproveReceiptButton(failed.read, failed.modify, failed.persistence, {
+        user: failed.teimur,
+        room: failed.room,
+        value: failed.guard.receiptPrivateControlEntryTokenV1(failed.entry)
+      });
+    } finally {
+      failed.guard.scheduleTarsMemoryHumanReceiptConfirmationV1 = originalFailedMemory;
+      failed.guard.publishMasterTransferSummary = originalFailedSummary;
+    }
+    const confirmed = failed.records.get("receipt-duplicate-index-v1").photos[0];
+    assert.strictEqual(confirmed.source, "confirmed", `${failurePoint}: financial acceptance must remain committed`);
+    assert.strictEqual(confirmed.receiptCaseStatusPending, true, `${failurePoint}: failed status synchronization must remain durably retryable`);
+    assert.deepStrictEqual({ memory: failed.counters.memory, summary: failed.counters.summary, report: failed.counters.report }, { memory: 1, summary: 1, report: 1 });
+    assert.strictEqual(failed.messages.get(prepared.statusMessageId).text, "⚠️ Чек требует проверки", `${failurePoint}: injected failure must leave the original status unchanged`);
+
+    const restarted = createRuntime(loaded, failed.records, failed.messages);
+    await restarted.app.handleReceiptControlCommand(restarted.read, restarted.modify, restarted.room, restarted.teimur);
+    const repairBlock = restarted.blocks[0];
+    assert(repairBlock, `${failurePoint}: restart recovery must expose a private status-repair action`);
+    const repairToken = repairBlock.elements[0].value;
+    assert.match(restarted.notifications[0].message.text, /СТАТУС.*СИНХРОНИЗАЦ/i);
+
+    const originalRestartedMemory = restarted.guard.scheduleTarsMemoryHumanReceiptConfirmationV1;
+    const originalRestartedSummary = restarted.guard.publishMasterTransferSummary;
+    restarted.guard.scheduleTarsMemoryHumanReceiptConfirmationV1 = () => { restarted.counters.memory += 1; return true; };
+    restarted.guard.publishMasterTransferSummary = async () => { restarted.counters.summary += 1; return true; };
+    try {
+      await restarted.app.handleApproveReceiptButton(restarted.read, restarted.modify, restarted.persistence, {
+        user: restarted.teimur,
+        room: restarted.room,
+        value: repairToken
+      });
+    } finally {
+      restarted.guard.scheduleTarsMemoryHumanReceiptConfirmationV1 = originalRestartedMemory;
+      restarted.guard.publishMasterTransferSummary = originalRestartedSummary;
+    }
+    const repaired = restarted.records.get("receipt-duplicate-index-v1").photos[0];
+    assert.strictEqual(repaired.source, "confirmed");
+    assert.strictEqual(repaired.receiptCaseStatusPending, undefined, `${failurePoint}: successful repair must clear the durable marker`);
+    assert.deepStrictEqual({ memory: restarted.counters.memory, summary: restarted.counters.summary, report: restarted.counters.report }, { memory: 0, summary: 0, report: 0 }, `${failurePoint}: status repair must not repeat financial/report effects`);
+    assert.strictEqual(restarted.messages.size, 1, `${failurePoint}: repair must update the existing status message`);
+    assert.strictEqual(restarted.messages.get(prepared.statusMessageId).text, "✅ Чек 600 ₽ принят");
   }
 
   console.log("PASS: private receipt action is server-authorized and updates the same ReceiptCase status");

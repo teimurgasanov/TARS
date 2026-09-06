@@ -11348,13 +11348,13 @@ var C = class extends j.App {
     const allowed = await this.privateReceiptControlActorAllowed(e, actor);
     const appUser = await e.getUserReader().getByUsername("tars") || await e.getUserReader().getAppUser();
     if (!appUser) return;
-    const notify = async (text, entryToken) => {
+    const notify = async (text, entryToken, actionLabel = "ЗАЧЕСТЬ ЧЕК") => {
       const notifier = n.getNotifier(), builder = notifier.getMessageBuilder().setSender(appUser).setRoom(room).setText(text);
       if (entryToken) {
         const blocks = n.getCreator().getBlockBuilder();
         blocks.addActionsBlock({ elements: [blocks.newButtonElement({
           actionId: K,
-          text: blocks.newPlainTextObject("ЗАЧЕСТЬ ЧЕК"),
+          text: blocks.newPlainTextObject(actionLabel),
           value: entryToken
         })] });
         builder.setBlocks(blocks);
@@ -11370,13 +11370,13 @@ var C = class extends j.App {
       return;
     }
     const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
-    const entries = (index.photos || []).filter((entry) => entry && entry.source === "rejected" && String(entry.roomId || "") === String(room.id || "")).sort((left, right) => Number(right.uploadedAt || 0) - Number(left.uploadedAt || 0)).slice(0, 20);
+    const entries = (index.photos || []).filter((entry) => entry && (entry.source === "rejected" || entry.source === "confirmed" && entry.receiptCaseStatusPending === true) && String(entry.roomId || "") === String(room.id || "")).sort((left, right) => Number(right.uploadedAt || 0) - Number(left.uploadedAt || 0)).slice(0, 20);
     let shown = 0;
     for (const entry of entries) {
       const entryToken = G.receiptPrivateControlEntryTokenV1(entry);
       if (!entryToken) continue;
-      const amount = Number(entry.receiptAmount), amountText = Number.isFinite(amount) && amount > 0 ? `\nСумма: ${this.formatRubles(amount)}` : "\nСумма: не распознана", dateText = /^\d{4}-\d{2}-\d{2}$/.test(String(entry.receiptDate || "")) ? `\nДата: ${entry.receiptDate}` : "\nДата: не распознана", reason = String(entry.invalidReason || "чек требует проверки");
-      await notify(`👁️ ЧЕК НА КОНТРОЛЬ\nМастер: @${entry.username || "мастер"}\nПричина: ${reason}${dateText}${amountText}`, entryToken);
+      const amount = Number(entry.receiptAmount), amountText = Number.isFinite(amount) && amount > 0 ? `\nСумма: ${this.formatRubles(amount)}` : "\nСумма: не распознана", dateText = /^\d{4}-\d{2}-\d{2}$/.test(String(entry.receiptDate || "")) ? `\nДата: ${entry.receiptDate}` : "\nДата: не распознана", statusRepair = entry.source === "confirmed" && entry.receiptCaseStatusPending === true, reason = String(entry.invalidReason || "чек требует проверки");
+      await notify(statusRepair ? `⚠️ СТАТУС ПРИНЯТОГО ЧЕКА ТРЕБУЕТ СИНХРОНИЗАЦИИ\nМастер: @${entry.username || "мастер"}${dateText}${amountText}` : `👁️ ЧЕК НА КОНТРОЛЬ\nМастер: @${entry.username || "мастер"}\nПричина: ${reason}${dateText}${amountText}`, entryToken, statusRepair ? "ОБНОВИТЬ СТАТУС" : "ЗАЧЕСТЬ ЧЕК");
       shown += 1;
     }
     if (!shown) await notify("✅ В этом чате нет чеков, ожидающих ручной проверки.");
@@ -11403,7 +11403,7 @@ var C = class extends j.App {
       return;
     }
     const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
-    const entry = (index.photos || []).find((candidate) => candidate && candidate.source === "rejected" && (privateAction ? String(candidate.roomId || "") === String(a.room.id || "") && G.receiptPrivateControlEntryTokenV1(candidate) === value : String(candidate.exact || "") === value));
+    const entry = (index.photos || []).find((candidate) => candidate && (candidate.source === "rejected" || privateAction && candidate.source === "confirmed" && candidate.receiptCaseStatusPending === true) && (privateAction ? String(candidate.roomId || "") === String(a.room.id || "") && G.receiptPrivateControlEntryTokenV1(candidate) === value : String(candidate.exact || "") === value));
     if (!entry) {
       await notify("ℹ️ Этот чек уже зачтён или больше не ожидает проверки.");
       return;
@@ -11414,6 +11414,47 @@ var C = class extends j.App {
       await notify("⚠️ Чек нельзя зачесть одной кнопкой: сумма или дата не распознана. Используйте /prinyat @логин сумма ДД.ММ.ГГГГ.");
       return;
     }
+    const syncAcceptedReceiptCaseStatus = async (targetRoom) => {
+      if (!targetRoom) return false;
+      try {
+        const receiptCase = await G.findReceiptCaseForInputV1({
+          sourceMessageId: entry.messageId,
+          sourceUploadId: entry.uploadId,
+          masterId: entry.userId
+        }, e);
+        if (!receiptCase) return false;
+        const acceptedCase = await G.manualTransitionReceiptCaseV1(receiptCase.caseId, {
+          normalizedAmount: amount,
+          normalizedDate: targetDate
+        }, e, t, {}, this.getLogger());
+        if (!acceptedCase || acceptedCase.state !== "ACCEPTED") return false;
+        const statusManager = G.createReceiptProcessingStatusManager({
+          id: entry.messageId || "",
+          room: targetRoom,
+          sender: { id: entry.userId || "" }
+        }, e, t, n, this.getLogger(), true);
+        return Boolean(await statusManager.syncCase(acceptedCase));
+      } catch (error) {
+        this.getLogger().warn(`Could not update ReceiptCase status after manual approval: ${error && error.message || error}`);
+        return false;
+      }
+    };
+    const clearStatusRepairMarker = async () => {
+      delete entry.receiptCaseStatusPending;
+      entry.postProcessedAt = Date.now();
+      try {
+        await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+      } catch (error) {
+        entry.receiptCaseStatusPending = true;
+        this.getLogger().warn(`Could not clear ReceiptCase status repair marker: ${error && error.message || error}`);
+      }
+    };
+    if (privateAction && entry.source === "confirmed") {
+      const synchronized = await syncAcceptedReceiptCaseStatus(a.room);
+      if (synchronized) await clearStatusRepairMarker();
+      await notify(synchronized ? "✅ Статус принятого чека обновлён." : "⚠️ Чек уже зачтён, но статус пока не обновлён. Повторите /receipt-control.");
+      return;
+    }
     const originalReason = entry.invalidReason || "";
     entry.source = "confirmed";
     entry.invalidReason = "";
@@ -11421,13 +11462,14 @@ var C = class extends j.App {
     entry.approvedBy = a.user.username || a.user.name || a.user.id || "";
     entry.approvedAt = Date.now();
     entry.validationVersion = 11;
+    if (privateAction) entry.receiptCaseStatusPending = true;
     await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
     const config = await this.receiptOcrConfig(e);
     G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, amount, targetDate, e, t, config);
-    let masterRoom;
+    let masterRoom = privateAction ? a.room : void 0;
     if (entry.roomId) {
       try {
-        masterRoom = await e.getRoomReader().getById(entry.roomId);
+        if (!masterRoom) masterRoom = await e.getRoomReader().getById(entry.roomId);
         if (masterRoom) {
           await G.publishMasterTransferSummary({
             userId: entry.userId || "",
@@ -11446,29 +11488,8 @@ var C = class extends j.App {
         this.getLogger().warn(`Could not refresh master transfer summary after receipt button approval: ${error && error.message || error}`);
       }
     }
-    try {
-      const receiptCase = await G.findReceiptCaseForInputV1({
-        sourceMessageId: entry.messageId,
-        sourceUploadId: entry.uploadId,
-        masterId: entry.userId
-      }, e);
-      if (receiptCase) {
-        const acceptedCase = await G.manualTransitionReceiptCaseV1(receiptCase.caseId, {
-          normalizedAmount: amount,
-          normalizedDate: targetDate
-        }, e, t, {}, this.getLogger());
-        if (acceptedCase && acceptedCase.state === "ACCEPTED" && masterRoom) {
-          const statusManager = G.createReceiptProcessingStatusManager({
-            id: entry.messageId || "",
-            room: masterRoom,
-            sender: { id: entry.userId || "" }
-          }, e, t, n, this.getLogger(), true);
-          await statusManager.syncCase(acceptedCase);
-        }
-      }
-    } catch (error) {
-      this.getLogger().warn(`Could not update ReceiptCase status after manual approval: ${error && error.message || error}`);
-    }
+    const statusSynchronized = await syncAcceptedReceiptCaseStatus(masterRoom);
+    if (privateAction && statusSynchronized) await clearStatusRepairMarker();
     const displayDateText = targetDate.split("-").reverse().join(".");
     if (privateAction) {
       await notify(`✅ ЧЕК ЗАЧТЁН\nМастер: @${entry.username || "мастер"}\nСумма: ${this.formatRubles(amount)}\nДата: ${displayDateText}\nПринял: @${String(a.user.username || "")}`);

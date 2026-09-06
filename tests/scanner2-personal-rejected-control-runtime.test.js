@@ -336,7 +336,8 @@ function runtimeScenario(guard, mode, suffix) {
     read,
     receiptCalls: () => receiptCalls,
     records,
-    requiredDate
+    requiredDate,
+    sourceContent
   };
 }
 
@@ -351,6 +352,14 @@ async function receiptIndex(guard, scenario) {
   // A. A financial document rejected by the strict fallback must use the
   // existing rejected receipt route and must never reach the running total.
   const rejected = runtimeScenario(rejectedGuard, "rejected", "date-reject");
+  await rejectedGuard.guardUpload({
+    file: { ...rejected.message.file, rid: rejected.message.room.id, userId: rejected.owner.id },
+    content: rejected.sourceContent
+  }, rejected.read, rejected.persistence, rejected.modify, { info() {}, warn() {}, error() {} }, rejected.http, rejected.config);
+  let preIndex = await receiptIndex(rejectedGuard, rejected);
+  assert.strictEqual(preIndex.photos.length, 0, "personal pre-upload must not make a financial receipt decision");
+  assert.strictEqual(rejected.providerCalls.length, 0, "personal pre-upload must not invoke OCR/Vision before the original settles");
+  assert.strictEqual(rejected.privateNotifications.length, 0, "private CONTROL actions must wait for the post-message strict decision");
   const rejectedResult = await rejectedGuard.processPersonalMediaV2(
     rejected.message, rejected.read, rejected.persistence, rejected.modify,
     { info() {}, warn() {}, error() {} }, rejected.http, rejected.config
