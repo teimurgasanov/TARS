@@ -12278,13 +12278,13 @@ var C = class extends j.App {
   }
   reportReminderDue(e, n = Date.now()) {
     const t = this.reportReminderStartAt(e && e.workday), s = Number(e && e.dueAt || 0), r = Number(e && e.lastReminderAt || 0);
-    return Boolean(t && n >= t && (!s || n < s) && (!r || n - r >= 9 * 60 * 1e3));
+    return Boolean(t && n >= t && (!s || n < s) && !r);
   }
   reportReminderSlot(e = Date.now()) {
     const n = this.reportLocalMinutes(new Date(e));
     if (n < 19 * 60 + 45 || n >= 21 * 60) return "";
     let t = 19 * 60 + 45;
-    if (n >= 20 * 60 + 15) t = 20 * 60 + 15 + Math.floor((n - (20 * 60 + 15)) / 10) * 10;
+    if (n >= 20 * 60 + 15) t = 20 * 60 + 15;
     else if (n >= 20 * 60) t = 20 * 60;
     return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
   }
