@@ -10717,7 +10717,7 @@ var C = class extends j.App {
       id: "forward-pending-report-photos-now",
       processor: this.forwardPendingReportPhotosJob
     }]);
-    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.slashCommands.provideSlashCommand(new ReceiptReplayCommand(this)), e.api.provideApi({
+    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ReceiptControlCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.slashCommands.provideSlashCommand(new ReceiptReplayCommand(this)), e.api.provideApi({
       visibility: A.ApiVisibility.PUBLIC,
       security: A.ApiSecurity.UNSECURE,
       endpoints: [new S(this), new ReportFormEndpoint(this), new ReportFormScriptEndpoint(this)]
@@ -11342,6 +11342,44 @@ var C = class extends j.App {
       }
     }
     return false;
+  }
+  async handleReceiptControlCommand(e, n, room, actor) {
+    if (!e || !n || !room || !actor) return;
+    const allowed = await this.privateReceiptControlActorAllowed(e, actor);
+    const appUser = await e.getUserReader().getByUsername("tars") || await e.getUserReader().getAppUser();
+    if (!appUser) return;
+    const notify = async (text, entryToken) => {
+      const notifier = n.getNotifier(), builder = notifier.getMessageBuilder().setSender(appUser).setRoom(room).setText(text);
+      if (entryToken) {
+        const blocks = n.getCreator().getBlockBuilder();
+        blocks.addActionsBlock({ elements: [blocks.newButtonElement({
+          actionId: K,
+          text: blocks.newPlainTextObject("ЗАЧЕСТЬ ЧЕК"),
+          value: entryToken
+        })] });
+        builder.setBlocks(blocks);
+      }
+      await notifier.notifyUser(actor, builder.getMessage());
+    };
+    if (!allowed) {
+      await notify("🚫 Контроль чеков доступен только Теймуру и Шуре.");
+      return;
+    }
+    if (!G.isPersonalTarsRoom(room)) {
+      await notify("⚠️ Команда /receipt-control доступна только в личном чате мастера.");
+      return;
+    }
+    const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
+    const entries = (index.photos || []).filter((entry) => entry && entry.source === "rejected" && String(entry.roomId || "") === String(room.id || "")).sort((left, right) => Number(right.uploadedAt || 0) - Number(left.uploadedAt || 0)).slice(0, 20);
+    let shown = 0;
+    for (const entry of entries) {
+      const entryToken = G.receiptPrivateControlEntryTokenV1(entry);
+      if (!entryToken) continue;
+      const amount = Number(entry.receiptAmount), amountText = Number.isFinite(amount) && amount > 0 ? `\nСумма: ${this.formatRubles(amount)}` : "\nСумма: не распознана", dateText = /^\d{4}-\d{2}-\d{2}$/.test(String(entry.receiptDate || "")) ? `\nДата: ${entry.receiptDate}` : "\nДата: не распознана", reason = String(entry.invalidReason || "чек требует проверки");
+      await notify(`👁️ ЧЕК НА КОНТРОЛЬ\nМастер: @${entry.username || "мастер"}\nПричина: ${reason}${dateText}${amountText}`, entryToken);
+      shown += 1;
+    }
+    if (!shown) await notify("✅ В этом чате нет чеков, ожидающих ручной проверки.");
   }
   async handleApproveReceiptButton(e, n, t, a) {
     if (!e || !n || !t || !a || !a.user || !a.room) return;
@@ -14850,6 +14888,14 @@ var ApproveReceiptCommand = class {
   }
   async executor(e, n, t, s, r) {
     await this.app.handleApproveReceiptCommand(n, t, r, e.getRoom(), e.getSender(), e.getArguments());
+  }
+};
+var ReceiptControlCommand = class {
+  constructor(e) {
+    this.app = e, this.command = "receipt-control", this.i18nParamsExample = "receipt_control_command_params", this.i18nDescription = "receipt_control_command_description", this.providesPreview = false;
+  }
+  async executor(e, n, t) {
+    await this.app.handleReceiptControlCommand(n, t, e.getRoom(), e.getSender());
   }
 };
 var ScheduleCommand = class {

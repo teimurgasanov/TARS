@@ -68,6 +68,8 @@
     "lateness_command_description": "Зафиксировать опоздание мастера и штраф в отчёте",
     "approve_receipt_command_params": "@логин сумма [ДД.ММ.ГГГГ]",
     "approve_receipt_command_description": "Вручную засчитать отклонённый чек (например, со статусом «В обработке»); доступ только у владельца и Шуры",
+    "receipt_control_command_params": "",
+    "receipt_control_command_description": "Приватно показать незакрытые чеки этого чата; доступ только Теймуру и Шуре",
     "receipt_replay_command_params": "<uploadId>",
     "receipt_replay_command_description": "Диагностический read-only повтор распознавания существующего original-чека; доступ только владельцу и администратору"
 }

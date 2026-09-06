@@ -11,7 +11,7 @@ function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
-function createRuntime(loaded) {
+function createRuntime(loaded, sharedRecords) {
   const guard = loaded.__testGuard;
   const app = Object.create(loaded.TarsReportApp.prototype);
   const room = { id: "master-room", type: "d", slugifiedName: "tars-master" };
@@ -19,7 +19,7 @@ function createRuntime(loaded) {
   const tars = { id: "tars-id", username: "tars" };
   const teimur = { id: "teimur-id", username: "teimur" };
   const shura = { id: "shura-id", username: "shura" };
-  const records = new Map();
+  const records = sharedRecords || new Map();
   const messages = new Map();
   const notifications = [];
   const blocks = [];
@@ -30,7 +30,7 @@ function createRuntime(loaded) {
     roomId: room.id, userId: master.id, username: master.username,
     messageId: "receipt-message", uploadId: "receipt-upload", uploadedAt: Date.now()
   };
-  records.set("receipt-duplicate-index-v1", { version: 1, photos: [clone(entry)] });
+  if (!records.has("receipt-duplicate-index-v1")) records.set("receipt-duplicate-index-v1", { version: 1, photos: [clone(entry)] });
   const read = {
     getUserReader() {
       return {
@@ -126,6 +126,64 @@ function createRuntime(loaded) {
 
 (async () => {
   const loaded = loadTrackedAppWithGuard();
+
+  const unauthorizedList = createRuntime(loaded);
+  assert.strictEqual(typeof unauthorizedList.app.handleReceiptControlCommand, "function", "/receipt-control handler must exist");
+  await unauthorizedList.app.handleReceiptControlCommand(unauthorizedList.read, unauthorizedList.modify, unauthorizedList.room, unauthorizedList.master);
+  assert.strictEqual(unauthorizedList.counters.persistenceReads, 0, "list authorization must precede receipt data access");
+  assert.match(unauthorizedList.notifications[0].message.text, /только Теймур.*Шур/);
+
+  const wrongRoomList = createRuntime(loaded);
+  const unrelatedRoom = { id: "unrelated-room", type: "c", slugifiedName: "unrelated" };
+  await wrongRoomList.app.handleReceiptControlCommand(wrongRoomList.read, wrongRoomList.modify, unrelatedRoom, wrongRoomList.teimur);
+  assert.strictEqual(wrongRoomList.counters.persistenceReads, 0, "a command outside a master personal room must not read receipt data");
+  assert.match(wrongRoomList.notifications[0].message.text, /личном чате мастера/);
+
+  const commandList = createRuntime(loaded);
+  const commandIndex = commandList.records.get("receipt-duplicate-index-v1");
+  commandIndex.photos.push(
+    { ...clone(commandList.entry), exact: "b".repeat(64), uploadId: "second-upload", messageId: "second-message", receiptAmount: 1000, uploadedAt: Date.now() + 1 },
+    { ...clone(commandList.entry), exact: "c".repeat(64), uploadId: "other-upload", messageId: "other-message", receiptAmount: 900, roomId: "other-room" },
+    { ...clone(commandList.entry), exact: "d".repeat(64), uploadId: "accepted-upload", messageId: "accepted-message", receiptAmount: 1200, source: "confirmed" }
+  );
+  await commandList.app.handleReceiptControlCommand(commandList.read, commandList.modify, commandList.room, commandList.teimur);
+  assert.strictEqual(commandList.counters.persistenceReads, 1, "authorized list must read the receipt index once");
+  assert.strictEqual(commandList.notifications.length, 2, "only unresolved receipts from the current master chat must be listed");
+  assert.strictEqual(commandList.counters.publicMessages, 0, "the recovery command must not create shared room messages");
+  assert.strictEqual(commandList.counters.indexWrites, 0, "listing controls must be read-only");
+  assert(commandList.notifications.every((item) => item.user.id === commandList.teimur.id && item.message.room.id === commandList.room.id));
+  assert(commandList.blocks.every((block) => /^rce_[a-f0-9]{32}$/.test(block.elements[0].value)), "regenerated buttons must use the existing private action token");
+  const firstListText = JSON.stringify(commandList.notifications);
+  assert(firstListText.includes("600") && firstListText.includes("1000"));
+  assert(!firstListText.includes("900") && !firstListText.includes("1200"), "foreign-room and already accepted receipts must be excluded");
+  assert(!firstListText.includes(commandList.entry.exact), "raw exact hash must not be exposed by the recovery command");
+
+  await commandList.app.handleReceiptControlCommand(commandList.read, commandList.modify, commandList.room, commandList.teimur);
+  assert.strictEqual(commandList.notifications.length, 4, "repeated command invocation must regenerate the same two private controls");
+  assert.strictEqual(commandList.counters.indexWrites, 0, "repeated listing must remain read-only");
+
+  const restartedList = createRuntime(loaded, commandList.records);
+  await restartedList.app.handleReceiptControlCommand(restartedList.read, restartedList.modify, restartedList.room, restartedList.teimur);
+  assert.strictEqual(restartedList.notifications.length, 2, "a new app instance must restore controls from persisted unresolved receipts");
+  assert.strictEqual(restartedList.counters.publicMessages, 0);
+  assert.strictEqual(restartedList.counters.indexWrites, 0);
+  const restoredToken = restartedList.blocks[0].elements[0].value;
+  const restoredEntry = restartedList.records.get("receipt-duplicate-index-v1").photos.find((candidate) => restartedList.guard.receiptPrivateControlEntryTokenV1(candidate) === restoredToken);
+  const originalRestoredMemory = restartedList.guard.scheduleTarsMemoryHumanReceiptConfirmationV1;
+  const originalRestoredSummary = restartedList.guard.publishMasterTransferSummary;
+  restartedList.guard.scheduleTarsMemoryHumanReceiptConfirmationV1 = () => true;
+  restartedList.guard.publishMasterTransferSummary = async () => true;
+  try {
+    await restartedList.app.handleApproveReceiptButton(restartedList.read, restartedList.modify, restartedList.persistence, {
+      user: restartedList.teimur,
+      room: restartedList.room,
+      value: restoredToken
+    });
+  } finally {
+    restartedList.guard.scheduleTarsMemoryHumanReceiptConfirmationV1 = originalRestoredMemory;
+    restartedList.guard.publishMasterTransferSummary = originalRestoredSummary;
+  }
+  assert.strictEqual(restartedList.records.get("receipt-duplicate-index-v1").photos.find((candidate) => candidate.exact === restoredEntry.exact).source, "confirmed", "a regenerated button must use the existing approval handler after restart");
 
   const privatePublish = createRuntime(loaded);
   const publishResult = await privatePublish.guard.publishRejectedReceiptReview(

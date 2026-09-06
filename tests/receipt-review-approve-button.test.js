@@ -32,6 +32,10 @@ assert.match(handler, /manualTransitionReceiptCaseV1/);
 assert.match(handler, /createReceiptProcessingStatusManager[\s\S]*syncCase/);
 assert.match(handler, /✅ ЧЕК ЗАЧТЁН/);
 assert.match(source, /if \(a\.actionId === K\)[\s\S]*handleApproveReceiptButton/);
+assert.match(source, /class ReceiptControlCommand|var ReceiptControlCommand = class/);
+assert.match(source, /this\.command = "receipt-control"/);
+assert.match(source, /handleReceiptControlCommand/);
+assert.match(source, /provideSlashCommand\(new ReceiptControlCommand\(this\)\)/);
 
 for (const regression of [
   'receipt-private-control-minimal-v1.runtime.js',
