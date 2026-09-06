@@ -177,6 +177,7 @@ function runtimeScenario(guard, mode, suffix) {
   };
   const publishedMessages = [];
   const publishedMessageById = new Map();
+  const privateNotifications = [];
   const deletedMessages = [];
   const controlUploads = [];
   let latestControlUploadId = "";
@@ -291,14 +292,16 @@ function runtimeScenario(guard, mode, suffix) {
     getNotifier() {
       return {
         getMessageBuilder() {
+          const state = {};
           return {
-            setSender() { return this; },
-            setRoom() { return this; },
-            setText() { return this; },
-            getMessage() { return {}; }
+            setSender(value) { state.sender = value; return this; },
+            setRoom(value) { state.room = value; return this; },
+            setText(value) { state.text = value; return this; },
+            setBlocks(value) { state.blocks = value; return this; },
+            getMessage() { return state; }
           };
         },
-        async notifyUser() {}
+        async notifyUser(user, notification) { privateNotifications.push({ user, notification }); }
       };
     },
     getUpdater() {
@@ -327,6 +330,7 @@ function runtimeScenario(guard, mode, suffix) {
     modify,
     owner,
     persistence,
+    privateNotifications,
     providerCalls,
     publishedMessages,
     read,
@@ -357,8 +361,9 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(index.photos.length, 1);
   assert.strictEqual(index.photos[0].source, "rejected");
   assert.match(index.photos[0].invalidReason, /ДАТА ЧЕКА/);
-  assert.strictEqual(rejected.controlUploads.length, 1, "date reject must be published once to control");
-  assert.strictEqual(rejected.controlUploads[0].room.id, rejected.controlRoom.id);
+  assert.strictEqual(rejected.controlUploads.length, 0, "date reject must not be copied to cheki-kontrol");
+  assert.strictEqual(rejected.privateNotifications.filter((item) => /^👁️ ЧЕК НА КОНТРОЛЬ/.test(String(item.notification.text || ""))).length, 2, "Teimur and Shura must receive one private control action each");
+  assert.ok(!rejected.deletedMessages.includes(rejected.message.id), "the disputed original must remain in the master's personal room");
   assert.strictEqual(index.photos.filter((entry) => entry.source === "confirmed").length, 0);
   const rejectedSummary = await rejectedGuard.confirmedTransferSummaryForUser(
     rejected.read, rejected.config, rejected.owner.id, rejected.requiredDate, [], undefined, rejected.message.room.id
@@ -371,11 +376,6 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(rejectedStatuses.length, 1, "rejected receipt must retain one canonical control status");
   assert.strictEqual(rejectedStatuses[0].room.id, rejected.message.room.id, "receipt status must remain in the master's personal room");
   assert.ok(!rejected.deletedMessages.includes(rejectedStatuses[0].id), "canonical receipt status must survive finalization");
-  const rejectedDetails = rejected.publishedMessages.find((item) => /^👁️ ЧЕК НА КОНТРОЛЬ/.test(String(item.text || "")));
-  assert.ok(rejectedDetails, "rejected receipt must publish control details");
-  assert.strictEqual(rejectedDetails.threadId, "control-message-control-upload-1", "control details must be attached to the corresponding receipt image");
-  const rejectedAction = rejected.publishedMessages.find((item) => item.text === "Действие с чеком");
-  assert.strictEqual(rejectedAction.threadId, "control-message-control-upload-1", "control action must stay with the corresponding receipt image");
 
   // D. A repeated event for the same rejected message must be idempotent.
   await rejectedGuard.processPersonalMediaV2(
@@ -385,7 +385,8 @@ async function receiptIndex(guard, scenario) {
   await rejectedGuard.flushReceiptCaseV1ForTests();
   index = await receiptIndex(rejectedGuard, rejected);
   assert.strictEqual(index.photos.length, 1);
-  assert.strictEqual(rejected.controlUploads.length, 1, "the same rejected receipt must not be republished");
+  assert.strictEqual(rejected.controlUploads.length, 0, "the same rejected receipt must not create a control-room copy");
+  assert.strictEqual(rejected.privateNotifications.filter((item) => /^👁️ ЧЕК НА КОНТРОЛЬ/.test(String(item.notification.text || ""))).length, 2, "the same rejected receipt must not duplicate private actions");
   assert.strictEqual(rejected.receiptCalls(), 4, "repeat event must not call providers again");
   assert.strictEqual(rejected.publishedMessages.filter((item) => item.text === "⚠️ Чек требует проверки").length, 1, "repeat event must not duplicate the status");
 
@@ -405,9 +406,9 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(index.photos[0].source, "rejected");
   assert.match(index.photos[0].invalidReason, /ДАТА ЧЕКА/);
   assert.strictEqual(index.photos.filter((entry) => entry.source === "confirmed").length, 0);
-  assert.strictEqual(consensus.controlUploads.length, 1);
-  assert.strictEqual(consensus.controlUploads[0].room.id, consensus.controlRoom.id);
-  assert.ok(consensus.deletedMessages.includes(consensus.message.id), "existing rejected route must preserve source-chat deletion behavior");
+  assert.strictEqual(consensus.controlUploads.length, 0);
+  assert.strictEqual(consensus.privateNotifications.filter((item) => /^👁️ ЧЕК НА КОНТРОЛЬ/.test(String(item.notification.text || ""))).length, 2);
+  assert.ok(!consensus.deletedMessages.includes(consensus.message.id), "existing rejected route must retain the source image in the personal chat");
   assert(!consensus.providerCalls.includes("openai:amount-focus"), `unexpected provider calls: ${consensus.providerCalls.join(", ")}`);
   assert(!consensus.providerCalls.includes("openai:date-focus"), `unexpected provider calls: ${consensus.providerCalls.join(", ")}`);
   assert.strictEqual(consensus.receiptCalls(), 2, "inconclusive classifier must not replace the positive primary used by early mismatch");
@@ -458,7 +459,7 @@ async function receiptIndex(guard, scenario) {
   assert.ok(acceptedDetails, "accepted receipt must publish its result");
   assert.strictEqual(acceptedDetails.threadId, accepted.message.id, "accepted result must be attached to the corresponding receipt image");
 
-  console.log("PASS: personal fallback routes confirmed rejected receipts once to control without affecting unknown images or accepted totals");
+  console.log("PASS: personal fallback keeps rejected receipts private without affecting unknown images or accepted totals");
 })().catch((error) => {
   console.error(error && error.stack || error);
   process.exitCode = 1;
