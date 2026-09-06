@@ -63,3 +63,5 @@ assert.strictEqual(recoveredMerge[0].source, 'confirmed');
 assert.strictEqual(recoveredMerge[0].receiptAmount, 800);
 
 console.log('PASS: concurrent receipt index writes preserve confirmed and OCR-recovered receipts');
+
+require('./receipt-acceptance-race-v1.runtime');

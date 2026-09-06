@@ -5460,6 +5460,7 @@ var require_upload_duplicate_guard = __commonJS({
     var RECEIPT_VISUAL_DISTANCE_LIMIT = 1;
     var recentReceiptIndexWrite;
     var receiptIndexWriteQueue = Promise.resolve();
+    var receiptAcceptanceQueueV1 = Promise.resolve();
     function indexAssociation(indexName) {
       return new RocketChatAssociationRecord(
         RocketChatAssociationModel.MISC,
@@ -5700,6 +5701,53 @@ var require_upload_duplicate_guard = __commonJS({
         if (!durable) return false;
         return normalizedReceiptIdentityKey(existing) === wanted;
       });
+    }
+    async function commitReceiptAcceptanceV1(read, persistence, candidate, options = {}) {
+      const commit = async () => {
+        if (!read || !persistence || !candidate) return { status: "invalid" };
+        const index = await readIndex(read, PROTECTED_ROOMS.kassa.index);
+        index.photos = mergeConcurrentReceiptIndex(index.photos, recentReceiptIndexWrite && recentReceiptIndexWrite.photos);
+        const exact = String(candidate.exact || "");
+        if (!exact) return { status: "invalid", index };
+        const existing = exact ? findExactDuplicate(index, exact) : void 0;
+        if (existing && existing.source === "confirmed") {
+          const sameEvent = Boolean(
+            candidate.messageId && existing.messageId && String(candidate.messageId) === String(existing.messageId) ||
+            candidate.uploadId && existing.uploadId && String(candidate.uploadId) === String(existing.uploadId)
+          );
+          return sameEvent ? { status: "already_confirmed", entry: existing, index } : { status: "duplicate", entry: candidate, duplicate: existing, index };
+        }
+        if (options.requireExistingSource && (!existing || existing.source !== options.requireExistingSource)) {
+          return { status: "stale", entry: existing, index };
+        }
+        const identityDuplicate = options.confirmedOnlyDuplicate === true && isStableReceiptIdentity(candidate.receiptIdentity) ? index.photos.find((entry) => {
+          if (!entry || entry === existing || !isStableReceiptIdentity(entry.receiptIdentity)) return false;
+          const accepted = entry.source === "confirmed" || entry.archiveStatus === "stored" || entry.archiveKey;
+          return accepted && normalizedReceiptIdentityKey(entry.receiptIdentity) === normalizedReceiptIdentityKey(candidate.receiptIdentity);
+        }) : findReceiptIdentityDuplicate(index, candidate.receiptIdentity, existing);
+        if (identityDuplicate) {
+          let duplicateEntry = existing;
+          if (options.recordDuplicate === true) {
+            duplicateEntry = existing || {};
+            Object.assign(duplicateEntry, candidate, {
+              source: "duplicate",
+              invalidReason: "🚫 ПОВТОР ЧЕКА",
+              postProcessedAt: Date.now()
+            });
+            if (!existing) index.photos.push(duplicateEntry);
+            await writeIndex(persistence, PROTECTED_ROOMS.kassa.index, index);
+          }
+          return { status: "duplicate", entry: duplicateEntry, duplicate: identityDuplicate, index };
+        }
+        const acceptedEntry = existing || {};
+        Object.assign(acceptedEntry, candidate, { source: "confirmed" });
+        if (!existing) index.photos.push(acceptedEntry);
+        await writeIndex(persistence, PROTECTED_ROOMS.kassa.index, index);
+        return { status: "accepted", entry: acceptedEntry, index };
+      };
+      const queued = receiptAcceptanceQueueV1.then(commit, commit);
+      receiptAcceptanceQueueV1 = queued.then(() => void 0, () => void 0);
+      return queued;
     }
     function sameReceiptAmount(left, right) {
       const leftAmount = Number(left);
@@ -8914,6 +8962,42 @@ var require_upload_duplicate_guard = __commonJS({
       const receiptCaseByUpload = {};
       let duplicate = false;
       let rejectionText = "";
+      const finishLateReceiptIdentityDuplicate = async (messageFile, content, messageFileId, entry, duplicateEntry, shadowEvidence) => {
+        await publishRejectedReceiptReview(messageFile, content, {
+          reason: "🚫 ПОВТОР ЧЕКА",
+          sourceRoom: message.room,
+          user: message.sender,
+          exact: entry.exact,
+          receiptDate: entry.receiptDate,
+          receiptAmount: entry.receiptAmount
+        }, read, modify, ocrConfig, logger);
+        if (message.id && message.sender) {
+          await deleteReceiptMessage(message, read, modify, logger);
+          await notifyDuplicateUser(message.sender, message.room, PROTECTED_ROOMS.kassa, read, modify, logger, "🚫 ПОВТОР ЧЕКА");
+        }
+        if (logger) logger.info("Deleted receipt after acceptance identity recheck");
+        emitTarsTraceV1(logger, trace, {
+          component: "publisher", stage: "result_publish", event: "success", outcome: "duplicate", reason_code: "DUPLICATE_RESULT_PUBLISHED",
+          ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
+        });
+        scheduleReceiptCaseV1({ ...receiptCaseByUpload[messageFileId], state: "DUPLICATE", strictDecision: "duplicate", normalizedAmount: entry.receiptAmount, normalizedDate: entry.receiptDate }, read, persistence, { enabled: true }, logger, trace, processingStatusManager);
+        if (shadowEvidence) await recordShadowReceiptOutcome({
+          messageId: message.id,
+          uploadId: messageFileId,
+          exact: entry.exact,
+          visual: entry.visual,
+          shadowEvidence,
+          requiredDate: expectedReceiptDate(ocrConfig),
+          decision: ShadowDecision.REJECT,
+          reason: "🚫 ПОВТОР ЧЕКА",
+          date: entry.receiptDate,
+          amount: entry.receiptAmount,
+          receiptIdentity: entry.receiptIdentity,
+          duplicateMatchType: "IDENTITY",
+          duplicateReference: duplicateEntry && duplicateEntry.receiptIdentity
+        }, read, persistence, ocrConfig);
+        return true;
+      };
       for (const messageFile of imageFiles) {
         try {
           const messageFileId = String(messageFile._id || messageFile.id || "");
@@ -9095,6 +9179,7 @@ var require_upload_duplicate_guard = __commonJS({
           }
           const isCurrentPreUpload = exactMatch && exactMatch.source === "pre" && exactMatch.roomId === (message.room && message.room.id || exactMatch.roomId) && (protectedRoom.kind === "receipt" || Date.now() - Number(exactMatch.uploadedAt || 0) < 30 * 60 * 1e3);
           if (isCurrentPreUpload) {
+            let exactMatchReceiptShadowEvidence;
             if (protectedRoom.kind === "receipt") {
               const receiptCheck = exactMatch.receiptIdentity && exactMatch.receiptDate && amountFromEntry(exactMatch) !== void 0 && Number(exactMatch.validationVersion || 0) >= 10 ? {
                 ok: true,
@@ -9213,6 +9298,7 @@ var require_upload_duplicate_guard = __commonJS({
               exactMatch.receiptDate = receiptCheck.receiptDate;
               exactMatch.receiptAmount = receiptCheck.receiptAmount;
               exactMatch.receiptWarning = receiptCheck.receiptWarning || "";
+              exactMatchReceiptShadowEvidence = receiptCheck.shadowEvidence;
               exactMatch.validationVersion = 10;
               exactMatch.invalidReason = "";
               if (receiptCheck.shadowEvidence) acceptedShadowRecords.push({
@@ -9244,19 +9330,29 @@ var require_upload_duplicate_guard = __commonJS({
             }
             exactMatch.source = "confirmed";
             exactMatch.postProcessedAt = Date.now();
-            if (protectedRoom.kind === "receipt" && exactMatch.receiptWarning && !exactMatch.receiptWarningPublishedAt) {
+            let acceptedExactMatch = exactMatch;
+            if (protectedRoom.kind === "receipt") {
+              const acceptance = await commitReceiptAcceptanceV1(read, persistence, exactMatch, { recordDuplicate: true });
+              index.photos = acceptance.index && acceptance.index.photos || index.photos;
+              if (acceptance.status === "duplicate") {
+                return finishLateReceiptIdentityDuplicate(messageFile, content, messageFileId, acceptance.entry || exactMatch, acceptance.duplicate, exactMatchReceiptShadowEvidence);
+              }
+              if (acceptance.status !== "accepted") continue;
+              acceptedExactMatch = acceptance.entry;
+            }
+            if (protectedRoom.kind === "receipt" && acceptedExactMatch.receiptWarning && !acceptedExactMatch.receiptWarningPublishedAt) {
               await publishRejectedReceiptReview(messageFile, content, {
-                reason: exactMatch.receiptWarning,
+                reason: acceptedExactMatch.receiptWarning,
                 sourceRoom: message.room,
                 user: message.sender,
                 exact,
-                receiptDate: exactMatch.receiptDate,
-                receiptAmount: exactMatch.receiptAmount
+                receiptDate: acceptedExactMatch.receiptDate,
+                receiptAmount: acceptedExactMatch.receiptAmount
               }, read, modify, ocrConfig, logger);
-              exactMatch.receiptWarningPublishedAt = Date.now();
+              acceptedExactMatch.receiptWarningPublishedAt = Date.now();
             }
-            acceptedEntries.push(exactMatch);
-            rememberAccepted(protectedRoom, exactMatch);
+            acceptedEntries.push(acceptedExactMatch);
+            rememberAccepted(protectedRoom, acceptedExactMatch);
             continue;
           }
           if (exactMatch) {
@@ -9441,6 +9537,18 @@ var require_upload_duplicate_guard = __commonJS({
             reportQueuedAt: protectedRoom.kind === "photo" && isPersonalTarsRoom(message.room) ? acceptedAt : void 0,
             postProcessedAt: Date.now()
           };
+          let committedAcceptedEntry = acceptedEntry;
+          if (protectedRoom.kind === "receipt") {
+            if (receiptWarning) acceptedEntry.receiptWarningPublishedAt = void 0;
+            markReceiptArchivePending(acceptedEntry, acceptedAt);
+            const acceptance = await commitReceiptAcceptanceV1(read, persistence, acceptedEntry, { recordDuplicate: true });
+            index.photos = acceptance.index && acceptance.index.photos || index.photos;
+            if (acceptance.status === "duplicate") {
+              return finishLateReceiptIdentityDuplicate(messageFile, content, messageFileId, acceptance.entry || acceptedEntry, acceptance.duplicate, receiptShadowEvidence);
+            }
+            if (acceptance.status !== "accepted") continue;
+            committedAcceptedEntry = acceptance.entry;
+          }
           if (protectedRoom.kind === "receipt" && receiptWarning) {
             await publishRejectedReceiptReview(messageFile, content, {
               reason: receiptWarning,
@@ -9450,12 +9558,11 @@ var require_upload_duplicate_guard = __commonJS({
               receiptDate,
               receiptAmount
             }, read, modify, ocrConfig, logger);
-            acceptedEntry.receiptWarningPublishedAt = Date.now();
+            committedAcceptedEntry.receiptWarningPublishedAt = Date.now();
           }
-          if (protectedRoom.kind === "receipt") markReceiptArchivePending(acceptedEntry, acceptedAt);
-          index.photos.push(acceptedEntry);
-          acceptedEntries.push(acceptedEntry);
-          rememberAccepted(protectedRoom, acceptedEntry);
+          if (protectedRoom.kind !== "receipt") index.photos.push(committedAcceptedEntry);
+          acceptedEntries.push(committedAcceptedEntry);
+          rememberAccepted(protectedRoom, committedAcceptedEntry);
           if (protectedRoom.kind === "receipt" && receiptShadowEvidence) acceptedShadowRecords.push({
             messageId: message.id,
             uploadId: messageFileId,
@@ -10057,6 +10164,7 @@ var require_upload_duplicate_guard = __commonJS({
               const exact = exactHash(content);
               let entry = findExactDuplicate(index, exact);
               if (entry && entry.validationVersion >= 2 && entry.source !== "invalid" && entry.source !== "rejected" && entry.source !== "archive_failed" && entry.source !== "duplicate" && entry.receiptDate === targetDate && amountFromEntry(entry) !== void 0) {
+                const requiresAcceptance = entry.source !== "confirmed" && entry.archiveStatus !== "stored" && !entry.archiveKey;
                 const senderId = roomMessage.sender && roomMessage.sender.id || "";
                 const senderUsername = roomMessage.sender && roomMessage.sender.username || "";
                 const senderName = roomMessage.sender && roomMessage.sender.name || "";
@@ -10093,6 +10201,12 @@ var require_upload_duplicate_guard = __commonJS({
                   entry.invalidReason = "";
                   changed = true;
                 }
+                if (requiresAcceptance) {
+                  const acceptance = await commitReceiptAcceptanceV1(read, persistence, entry, { recordDuplicate: true });
+                  index.photos = acceptance.index && acceptance.index.photos || index.photos;
+                  if (acceptance.status !== "accepted" && acceptance.status !== "already_confirmed") continue;
+                  entry = acceptance.entry;
+                }
                 continue;
               }
               const receiptCheck = await validateReceiptDate(file, content, http, config, logger);
@@ -10111,10 +10225,7 @@ var require_upload_duplicate_guard = __commonJS({
                 }
                 continue;
               }
-              if (!entry) {
-                entry = { exact };
-                index.photos.push(entry);
-              }
+              if (!entry) entry = { exact };
               entry.exact = exact;
               entry.visual = entry.visual || visualHash(file, content);
               entry.receiptIdentity = receiptCheck.receiptIdentity;
@@ -10131,6 +10242,11 @@ var require_upload_duplicate_guard = __commonJS({
               entry.roomId = message.room.id;
               entry.messageId = roomMessage.id || entry.messageId || "";
               entry.uploadId = messageFileId || entry.uploadId || "";
+              markReceiptArchivePending(entry, createdAt);
+              const acceptance = await commitReceiptAcceptanceV1(read, persistence, entry, { recordDuplicate: true });
+              index.photos = acceptance.index && acceptance.index.photos || index.photos;
+              if (acceptance.status !== "accepted" && acceptance.status !== "already_confirmed") continue;
+              entry = acceptance.entry;
               if (entry.receiptWarning && !entry.receiptWarningPublishedAt) {
                 await publishRejectedReceiptReview(file, content, {
                   reason: entry.receiptWarning,
@@ -10142,7 +10258,6 @@ var require_upload_duplicate_guard = __commonJS({
                 }, read, modify, config, logger);
                 entry.receiptWarningPublishedAt = Date.now();
               }
-              markReceiptArchivePending(entry, createdAt);
               changed = true;
             } catch (error) {
               if (logger) logger.warn(`Summary repair could not inspect upload ${messageFileId || "unknown"}: ${error && error.message || error}`);
@@ -10373,6 +10488,7 @@ var require_upload_duplicate_guard = __commonJS({
       publishMasterTransferSummary,
       readIndex,
       writeIndex,
+      commitReceiptAcceptanceV1,
       PROTECTED_ROOMS,
       isDirectRoom,
       isMasterPrivateRoom,
@@ -11352,20 +11468,27 @@ var C = class extends j.App {
       const amount = Number(entry.receiptAmount);
       return Number.isFinite(amount) && Math.abs(amount - targetAmount) < 0.01;
     }).sort((left, right) => Number(right.uploadedAt || 0) - Number(left.uploadedAt || 0));
-    const entry = candidates[0];
+    const selectedEntry = candidates[0];
     const displayDateText = targetDate.split("-").reverse().join(".");
-    if (!entry) {
+    if (!selectedEntry) {
       await notify(`Не найден отклонённый чек @${targetUsername} на сумму ${this.formatRubles(targetAmount)} за ${displayDateText}.\nПроверьте логин, сумму и дату.`);
       return;
     }
-    const originalReason = entry.invalidReason || "";
-    entry.source = "confirmed";
-    entry.invalidReason = "";
-    entry.manualApprovalNote = originalReason;
-    entry.approvedBy = r.username || r.name || r.id || "";
-    entry.approvedAt = Date.now();
-    entry.validationVersion = 11;
-    await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+    const originalReason = selectedEntry.invalidReason || "";
+    const acceptance = await G.commitReceiptAcceptanceV1(e, t, {
+      ...selectedEntry,
+      source: "confirmed",
+      invalidReason: "",
+      manualApprovalNote: originalReason,
+      approvedBy: r.username || r.name || r.id || "",
+      approvedAt: Date.now(),
+      validationVersion: 11
+    }, { requireExistingSource: "rejected", confirmedOnlyDuplicate: true });
+    if (acceptance.status !== "accepted") {
+      await notify("ℹ️ Этот чек уже зачтён, признан повтором или больше не ожидает проверки.");
+      return;
+    }
+    const entry = acceptance.entry;
     G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, targetAmount, targetDate, e, t, config);
     if (entry.roomId) {
       try {
@@ -11408,25 +11531,32 @@ var C = class extends j.App {
     }
     const exact = String(a.value || "");
     const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
-    const entry = (index.photos || []).find((candidate) => candidate && candidate.source === "rejected" && String(candidate.exact || "") === exact);
-    if (!entry) {
+    const selectedEntry = (index.photos || []).find((candidate) => candidate && candidate.source === "rejected" && String(candidate.exact || "") === exact);
+    if (!selectedEntry) {
       await notify("ℹ️ Этот чек уже зачтён или больше не ожидает проверки.");
       return;
     }
-    const amount = Number(entry.receiptAmount);
-    const targetDate = String(entry.receiptDate || "");
+    const amount = Number(selectedEntry.receiptAmount);
+    const targetDate = String(selectedEntry.receiptDate || "");
     if (!Number.isFinite(amount) || amount <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
       await notify("⚠️ Чек нельзя зачесть одной кнопкой: сумма или дата не распознана. Используйте /prinyat @логин сумма ДД.ММ.ГГГГ.");
       return;
     }
-    const originalReason = entry.invalidReason || "";
-    entry.source = "confirmed";
-    entry.invalidReason = "";
-    entry.manualApprovalNote = originalReason;
-    entry.approvedBy = a.user.username || a.user.name || a.user.id || "";
-    entry.approvedAt = Date.now();
-    entry.validationVersion = 11;
-    await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+    const originalReason = selectedEntry.invalidReason || "";
+    const acceptance = await G.commitReceiptAcceptanceV1(e, t, {
+      ...selectedEntry,
+      source: "confirmed",
+      invalidReason: "",
+      manualApprovalNote: originalReason,
+      approvedBy: a.user.username || a.user.name || a.user.id || "",
+      approvedAt: Date.now(),
+      validationVersion: 11
+    }, { requireExistingSource: "rejected", confirmedOnlyDuplicate: true });
+    if (acceptance.status !== "accepted") {
+      await notify("ℹ️ Этот чек уже зачтён, признан повтором или больше не ожидает проверки.");
+      return;
+    }
+    const entry = acceptance.entry;
     G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, amount, targetDate, e, t, config);
     if (entry.roomId) {
       try {

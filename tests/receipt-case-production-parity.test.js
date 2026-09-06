@@ -17,10 +17,10 @@ const { source, loadReceiptCaseHelpers, createStore } = require("./receipt-case-
     ["requestOpenAiReceiptVisionEngineV1(", 5],
     ["requestReceiptOcr(", 8],
     ["validateReceiptStrict(", 6],
-    ["findExactDuplicate(", 6],
-    ["findReceiptIdentityDuplicate(", 4],
+    ["findExactDuplicate(", 7],
+    ["findReceiptIdentityDuplicate(", 5],
     ["publishAcceptedReceipt(", 3],
-    ["publishRejectedReceiptReview(", 8],
+    ["publishRejectedReceiptReview(", 9],
     ["claimPostMessage(", 3],
     ["completePostMessageClaim(", 3],
     ["queuedReceiptOcrPost(", 2]
