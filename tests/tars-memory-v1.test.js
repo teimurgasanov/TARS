@@ -253,11 +253,12 @@ async function flushQueue() {
   const approvalCommand = source.slice(source.indexOf("async handleApproveReceiptCommand"), source.indexOf("async handleApproveReceiptButton"));
   const approvalButton = source.slice(source.indexOf("async handleApproveReceiptButton"), source.indexOf("photoReportIntentAssociation"));
   for (const approval of [approvalCommand, approvalButton]) {
-    assert(approval.includes("G.scheduleTarsMemoryHumanReceiptConfirmationV1("));
-    assert(!/await\s+G\.scheduleTarsMemoryHumanReceiptConfirmationV1/.test(approval), "human-confirmed memory write must remain asynchronous");
+    assert(approval.includes("approveReceiptThroughSharedService"));
   }
+  const sharedApproval = source.slice(source.indexOf("async approveReceiptThroughSharedService"), source.indexOf("async handlePrivateReceiptControlCommand"));
+  assert(sharedApproval.includes("G.writeTarsMemoryHumanReceiptConfirmationV1("));
 
-  const confirmationSource = source.slice(source.indexOf("function scheduleTarsMemoryHumanReceiptConfirmationV1"), source.indexOf("function tarsMemoryRecommendationForGroupV1"));
+  const confirmationSource = source.slice(source.indexOf("function tarsMemoryHumanReceiptConfirmationRecordV1"), source.indexOf("function tarsMemoryRecommendationForGroupV1"));
   assert(confirmationSource.includes('confirmationState: "human_confirmed"'));
   assert(confirmationSource.includes('reasonCode: "manual_correction"'));
 

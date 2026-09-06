@@ -18,7 +18,7 @@ const { source, loadReceiptCaseHelpers, createStore } = require("./receipt-case-
     ["requestReceiptOcr(", 8],
     ["validateReceiptStrict(", 6],
     ["findExactDuplicate(", 6],
-    ["findReceiptIdentityDuplicate(", 4],
+    ["findReceiptIdentityDuplicate(", 5],
     ["publishAcceptedReceipt(", 3],
     ["publishRejectedReceiptReview(", 8],
     ["claimPostMessage(", 3],
@@ -27,6 +27,11 @@ const { source, loadReceiptCaseHelpers, createStore } = require("./receipt-case-
   ]) {
     assert.strictEqual(source.split(needle).length - 1, expectedCount, `production call count changed: ${needle}`);
   }
+  const manualApprovalStart = source.indexOf("async function runReceiptManualApprovalV1");
+  const manualApprovalEnd = source.indexOf("function resetReceiptManualApprovalV1ForTests", manualApprovalStart);
+  assert.strictEqual((source.slice(manualApprovalStart, manualApprovalEnd).match(/findReceiptIdentityDuplicate\(/g) || []).length, 1, "manual approval owns the only new identity recheck");
+  const sourceWithoutManualApproval = source.slice(0, manualApprovalStart) + source.slice(manualApprovalEnd);
+  assert.strictEqual((sourceWithoutManualApproval.match(/findReceiptIdentityDuplicate\(/g) || []).length, 4, "normal production duplicate path must stay unchanged");
 
   const production = {
     outcome: "control",
