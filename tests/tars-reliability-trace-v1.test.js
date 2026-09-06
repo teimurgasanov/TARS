@@ -155,7 +155,7 @@ const structuralExpectations = [
   ["async function requestOpenAiReceiptVisionEngineV1", "function normalizeOpenAiStatus", 3, 14, 0],
   ["async function validateReceiptDateCore", "async function validateReceiptDate(", 9, 60, 1],
   ["async function validateReceiptStrict", "const shadowRuntimeCircuitBreaker", 6, 6, 1],
-  ["async function rejectDuplicateMessage", "async function processPersonalMediaV2", 53, 21, 2],
+  ["async function rejectDuplicateMessage", "async function processPersonalMediaV2", 59, 24, 2],
   ["async function processPersonalMediaV2", "function isTodayTransferSumRequest", 4, 5, 0],
   ["async executePostMessageSent", "async receiptOcrConfig", 38, 14, 0]
 ];
@@ -170,10 +170,10 @@ for (const [needle, expectedCount] of [
   ["requestOpenAiReceiptVisionEngineV1(", 5],
   ["requestReceiptOcr(", 8],
   ["validateReceiptStrict(", 6],
-  ["findExactDuplicate(", 6],
-  ["findReceiptIdentityDuplicate(", 4],
+  ["findExactDuplicate(", 7],
+  ["findReceiptIdentityDuplicate(", 5],
   ["publishAcceptedReceipt(", 3],
-  ["publishRejectedReceiptReview(", 8],
+  ["publishRejectedReceiptReview(", 9],
   ["claimPostMessage(", 3],
   ["completePostMessageClaim(", 3],
   ["queuedReceiptOcrPost(", 2]
