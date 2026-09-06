@@ -1378,6 +1378,22 @@ var require_upload_duplicate_guard = __commonJS({
         return void 0;
       }
     }
+    async function findReceiptCaseForInputV1(input, read) {
+      try {
+        const correlations = receiptCaseCorrelationsV1(input);
+        for (const alias of correlations.aliases) {
+          const association = receiptCaseAliasAssociationV1(alias);
+          if (!association) continue;
+          const links = await read.getPersistenceReader().readByAssociation(association);
+          const link = (links || []).filter((entry) => entry && entry.schemaVersion === RECEIPT_CASE_V1_SCHEMA_VERSION && /^rcv1_[a-f0-9]{32}$/.test(String(entry.caseId || "")))[0];
+          if (link) return readReceiptCaseV1(link.caseId, read);
+        }
+        const caseId = receiptCaseIdFromCorrelationsV1(correlations);
+        return caseId ? readReceiptCaseV1(caseId, read) : void 0;
+      } catch (_2) {
+        return void 0;
+      }
+    }
     function emitReceiptCaseTransitionV1(logger, trace, caseId, fromState, toState) {
       const reasonCode = {
         RECEIVED: "RECEIPT_CASE_RECEIVED",
@@ -1526,6 +1542,35 @@ var require_upload_duplicate_guard = __commonJS({
         if (!next) return existing;
         const comparable = (record) => JSON.stringify({ state: record.state, strictDecision: record.strictDecision, controlReason: record.controlReason, normalizedAmount: record.normalizedAmount, normalizedDate: record.normalizedDate });
         if (comparable(existing) === comparable(next)) return existing;
+        await persistence.updateByAssociation(receiptCaseAssociationV1(caseId), next, true);
+        await updateReceiptCaseIndexV1(next, [], read, persistence, options);
+        emitReceiptCaseTransitionV1(logger, trace, caseId, existing.state, next.state);
+        return next;
+      } catch (_2) {
+        emitTarsTraceV1(logger, trace, { component: "receipt_case", stage: "receipt_case", event: "error", outcome: "failed", reason_code: "RECEIPT_CASE_PERSISTENCE_FAILED", error_class: "persistence" });
+        return void 0;
+      }
+    }
+    async function manualTransitionReceiptCaseV1(caseId, input, read, persistence, options = {}, logger, trace) {
+      try {
+        const existing = await readReceiptCaseV1(caseId, read);
+        if (!existing || !persistence || !persistence.updateByAssociation) return void 0;
+        if (existing.state === "ACCEPTED") return existing;
+        if (existing.state !== "CONTROL") return existing;
+        const amount = receiptCaseNormalizedAmountV1(input && input.normalizedAmount);
+        const date = receiptCaseNormalizedDateV1(input && input.normalizedDate);
+        if (amount.status !== "recognized" || date.status !== "recognized") return existing;
+        const next = sanitizeReceiptCaseV1({
+          ...existing,
+          state: "ACCEPTED",
+          strictDecision: "accept",
+          controlReason: "none",
+          normalizedAmount: amount,
+          normalizedDate: date,
+          updatedAt: Date.now(),
+          revision: existing.revision + 1
+        });
+        if (!next) return existing;
         await persistence.updateByAssociation(receiptCaseAssociationV1(caseId), next, true);
         await updateReceiptCaseIndexV1(next, [], read, persistence, options);
         emitReceiptCaseTransitionV1(logger, trace, caseId, existing.state, next.state);
@@ -1875,25 +1920,38 @@ var require_upload_duplicate_guard = __commonJS({
         return false;
       }
     }
+    function tarsMemoryHumanReceiptConfirmationRecordV1(entry, amount, date) {
+      const source = entry && typeof entry === "object" ? entry : {};
+      return {
+        caseToken: tarsMemoryCaseTokenV1(source.uploadId || source.messageId || source.exact),
+        caseType: "receipt",
+        classification: "receipt",
+        outcome: "accepted",
+        reasonCode: "manual_correction",
+        providerOutcome: "not_used",
+        agreement: "unknown",
+        amount,
+        date,
+        status: "success",
+        confirmationState: "human_confirmed",
+        correctionKind: "outcome"
+      };
+    }
     function scheduleTarsMemoryHumanReceiptConfirmationV1(entry, amount, date, read, persistence, config) {
       try {
-        const source = entry && typeof entry === "object" ? entry : {};
-        return scheduleTarsMemoryCaseV1({
-          caseToken: tarsMemoryCaseTokenV1(source.uploadId || source.messageId || source.exact),
-          caseType: "receipt",
-          classification: "receipt",
-          outcome: "accepted",
-          reasonCode: "manual_correction",
-          providerOutcome: "not_used",
-          agreement: "unknown",
-          amount,
-          date,
-          status: "success",
-          confirmationState: "human_confirmed",
-          correctionKind: "outcome"
-        }, read, persistence, {
+        return scheduleTarsMemoryCaseV1(tarsMemoryHumanReceiptConfirmationRecordV1(entry, amount, date), read, persistence, {
           writeEnabled: config && config.tarsMemoryV1WriteEnabled === true,
           retrievalEnabled: config && config.tarsMemoryV1RetrievalAdvisoryEnabled === true
+        });
+      } catch (_2) {
+        return false;
+      }
+    }
+    async function writeTarsMemoryHumanReceiptConfirmationV1(entry, amount, date, read, persistence, config) {
+      try {
+        if (!config || config.tarsMemoryV1WriteEnabled !== true) return true;
+        return await writeTarsMemoryCaseV1(tarsMemoryHumanReceiptConfirmationRecordV1(entry, amount, date), read, persistence, {
+          retrievalEnabled: config.tarsMemoryV1RetrievalAdvisoryEnabled === true
         });
       } catch (_2) {
         return false;
@@ -5700,6 +5758,177 @@ var require_upload_duplicate_guard = __commonJS({
         if (!durable) return false;
         return normalizedReceiptIdentityKey(existing) === wanted;
       });
+    }
+    const RECEIPT_MANUAL_APPROVAL_SCHEMA_VERSION = "receipt-manual-approval-v1";
+    let receiptManualApprovalQueue = Promise.resolve();
+    function receiptPrivateControlEntryTokenV1(entry) {
+      try {
+        const seed = String(entry && (entry.exact || entry.uploadId || entry.messageId) || "").trim();
+        return seed ? `rce_${sha256Bytes(utf8Bytes(`receipt-private-control-v1:entry:${seed}`)).slice(0, 32)}` : "";
+      } catch (_2) {
+        return "";
+      }
+    }
+    function receiptManualApprovalOperationTokenV1(entry) {
+      try {
+        const identity = isStableReceiptIdentity(entry && entry.receiptIdentity) ? normalizedReceiptIdentityKey(entry.receiptIdentity) : "";
+        const seed = identity || String(entry && (entry.exact || entry.uploadId || entry.messageId) || "").trim();
+        return seed ? `rca_${sha256Bytes(utf8Bytes(`receipt-manual-approval-v1:operation:${seed}`)).slice(0, 32)}` : "";
+      } catch (_2) {
+        return "";
+      }
+    }
+    function receiptManualApprovalOperationAssociationV1(operationToken) {
+      const value = String(operationToken || "");
+      return /^rca_[a-f0-9]{32}$/.test(value) ? new RocketChatAssociationRecord(RocketChatAssociationModel.MISC, `${RECEIPT_MANUAL_APPROVAL_SCHEMA_VERSION}:${value}`) : void 0;
+    }
+    function sanitizeReceiptManualApprovalOperationV1(input) {
+      try {
+        const source = input && typeof input === "object" ? input : {};
+        const operationToken = /^rca_[a-f0-9]{32}$/.test(String(source.operationToken || "")) ? String(source.operationToken) : "";
+        if (!operationToken) return void 0;
+        const record = {
+          schemaVersion: RECEIPT_MANUAL_APPROVAL_SCHEMA_VERSION,
+          operationToken,
+          actorToken: /^rco_[a-f0-9]{32}$/.test(String(source.actorToken || "")) ? String(source.actorToken) : null,
+          authorityCommitted: source.authorityCommitted === true,
+          memoryCompleted: source.memoryCompleted === true,
+          refreshCompleted: source.refreshCompleted === true,
+          statusCompleted: source.statusCompleted === true,
+          completed: source.completed === true,
+          createdAt: Math.max(0, Math.floor(Number(source.createdAt || Date.now()) || Date.now())),
+          updatedAt: Math.max(0, Math.floor(Number(source.updatedAt || Date.now()) || Date.now())),
+          revision: Math.max(1, Math.min(1e6, Math.floor(Number(source.revision) || 1)))
+        };
+        return JSON.stringify(record).length <= 1024 ? record : void 0;
+      } catch (_2) {
+        return void 0;
+      }
+    }
+    function receiptManualApprovalActorTokenV1(value) {
+      try {
+        const raw = String(value || "").trim().toLowerCase();
+        return raw ? `rco_${sha256Bytes(utf8Bytes(`receipt-manual-approval-v1:actor:${raw}`)).slice(0, 32)}` : "";
+      } catch (_2) {
+        return "";
+      }
+    }
+    async function readReceiptManualApprovalOperationV1(operationToken, read) {
+      try {
+        const association = receiptManualApprovalOperationAssociationV1(operationToken);
+        if (!association || !read || !read.getPersistenceReader) return void 0;
+        const records = await read.getPersistenceReader().readByAssociation(association);
+        return (records || []).map(sanitizeReceiptManualApprovalOperationV1).filter(Boolean).sort((left, right) => Number(right.revision || 0) - Number(left.revision || 0))[0];
+      } catch (_2) {
+        return void 0;
+      }
+    }
+    async function writeReceiptManualApprovalOperationV1(operation, persistence) {
+      try {
+        const record = sanitizeReceiptManualApprovalOperationV1(operation);
+        const association = record && receiptManualApprovalOperationAssociationV1(record.operationToken);
+        if (!record || !association || !persistence || !persistence.updateByAssociation) return false;
+        await persistence.updateByAssociation(association, record, true);
+        return true;
+      } catch (_2) {
+        return false;
+      }
+    }
+    function receiptEntryForManualApprovalV1(index, selector) {
+      const source = selector && typeof selector === "object" ? selector : {};
+      const entryToken = String(source.entryToken || "");
+      const exact = String(source.exact || "");
+      return (index && Array.isArray(index.photos) ? index.photos : []).find((entry) => entry && (
+        entryToken && receiptPrivateControlEntryTokenV1(entry) === entryToken || exact && String(entry.exact || "") === exact
+      ));
+    }
+    async function runReceiptManualApprovalV1(input, read, persistence, handlers = {}) {
+      const run = async () => {
+        let authorityCommitted = false;
+        let entry;
+        let operationToken = "";
+        try {
+          const index = await readIndex(read, PROTECTED_ROOMS.kassa.index);
+          entry = receiptEntryForManualApprovalV1(index, input);
+          if (!entry) return { status: "not_found" };
+          const amount = Number(entry.receiptAmount);
+          const date = String(entry.receiptDate || "");
+          if (!Number.isFinite(amount) || amount <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return { status: "invalid_fields", entry };
+          operationToken = receiptManualApprovalOperationTokenV1(entry);
+          if (!operationToken) return { status: "not_found" };
+          if (entry.source === "duplicate") return { status: "duplicate_blocked", entry, operationToken };
+          const ownCommittedOperation = entry.source === "confirmed" && String(entry.manualApprovalOperationToken || "") === operationToken;
+          authorityCommitted = ownCommittedOperation;
+          if (entry.source !== "rejected" && !ownCommittedOperation) return { status: "already_resolved", entry, operationToken };
+          let operation = await readReceiptManualApprovalOperationV1(operationToken, read) || sanitizeReceiptManualApprovalOperationV1({
+            operationToken,
+            actorToken: receiptManualApprovalActorTokenV1(input && input.approvedBy),
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            revision: 1
+          });
+          if (!operation) return { status: authorityCommitted ? "recovery_pending" : "failed", entry, operationToken, authorityCommitted, failedStage: "operation" };
+          if (entry.source === "rejected") {
+          const firstIdentityMatch = findReceiptIdentityDuplicate(index, entry.receiptIdentity, entry);
+          const identityKey = isStableReceiptIdentity(entry.receiptIdentity) ? normalizedReceiptIdentityKey(entry.receiptIdentity) : "";
+          const controlContenders = identityKey ? (index.photos || []).filter((candidate) => candidate && candidate.source === "rejected" && isStableReceiptIdentity(candidate.receiptIdentity) && normalizedReceiptIdentityKey(candidate.receiptIdentity) === identityKey).sort((left, right) => {
+            const timeDifference = Number(left.uploadedAt || 0) - Number(right.uploadedAt || 0);
+            return timeDifference || receiptPrivateControlEntryTokenV1(left).localeCompare(receiptPrivateControlEntryTokenV1(right));
+          }) : [];
+          const identityDuplicate = identityKey && (index.photos || []).find((candidate) => candidate && candidate !== entry && (
+            candidate.source === "confirmed" || candidate.source === "duplicate" || candidate.archiveStatus === "stored" || candidate.archiveKey
+          ) && isStableReceiptIdentity(candidate.receiptIdentity) && normalizedReceiptIdentityKey(candidate.receiptIdentity) === identityKey);
+          if (identityDuplicate || firstIdentityMatch && firstIdentityMatch.source !== "rejected" || controlContenders.length > 1 && controlContenders[0] !== entry) return { status: "duplicate_blocked", entry, operationToken };
+          const originalReason = String(entry.invalidReason || "");
+          entry.source = "confirmed";
+          entry.invalidReason = "";
+          entry.manualApprovalNote = originalReason;
+          entry.approvedBy = String(input && input.approvedBy || "");
+          entry.approvedAt = Date.now();
+          entry.manualApprovalOperationToken = operationToken;
+          entry.validationVersion = 11;
+          entry.postProcessedAt = Date.now();
+            await writeIndex(persistence, PROTECTED_ROOMS.kassa.index, index);
+            authorityCommitted = true;
+            operation = { ...operation, authorityCommitted: true, updatedAt: Date.now(), revision: operation.revision + 1 };
+            await writeReceiptManualApprovalOperationV1(operation, persistence);
+          } else if (!operation.authorityCommitted) {
+            operation = { ...operation, authorityCommitted: true, updatedAt: Date.now(), revision: operation.revision + 1 };
+            await writeReceiptManualApprovalOperationV1(operation, persistence);
+          }
+          const stages = [
+            ["memoryCompleted", "memory"],
+            ["refreshCompleted", "refresh"],
+            ["statusCompleted", "status"]
+          ];
+          for (const [field, handlerName] of stages) {
+            if (operation[field]) continue;
+            try {
+              const handler = handlers && handlers[handlerName];
+              if (typeof handler === "function" && await handler(entry, operation) === false) throw new Error(`${handlerName} incomplete`);
+              operation = { ...operation, [field]: true, updatedAt: Date.now(), revision: operation.revision + 1 };
+              await writeReceiptManualApprovalOperationV1(operation, persistence);
+            } catch (_2) {
+              return { status: "recovery_pending", entry, operationToken, authorityCommitted: true, failedStage: handlerName };
+            }
+          }
+          operation = { ...operation, completed: true, updatedAt: Date.now(), revision: operation.revision + 1 };
+          await writeReceiptManualApprovalOperationV1(operation, persistence);
+          if (!Number(entry.manualApprovalCompletedAt || 0)) {
+            entry.manualApprovalCompletedAt = Date.now();
+            await writeIndex(persistence, PROTECTED_ROOMS.kassa.index, index);
+          }
+          return { status: "approved", entry, operationToken, authorityCommitted: true };
+        } catch (_2) {
+          return { status: authorityCommitted ? "recovery_pending" : "failed", entry, operationToken, authorityCommitted, failedStage: authorityCommitted ? "completion" : "authority" };
+        }
+      };
+      const pending = receiptManualApprovalQueue.then(run, run);
+      receiptManualApprovalQueue = pending.then(() => void 0, () => void 0);
+      return pending.catch(() => ({ status: "failed", authorityCommitted: false, failedStage: "authority" }));
+    }
+    function resetReceiptManualApprovalV1ForTests() {
+      receiptManualApprovalQueue = Promise.resolve();
     }
     function sameReceiptAmount(left, right) {
       const leftAmount = Number(left);
@@ -10252,8 +10481,10 @@ var require_upload_duplicate_guard = __commonJS({
       emitTarsTraceV1,
       receiptCaseCorrelationsV1,
       sanitizeReceiptCaseV1,
+      findReceiptCaseForInputV1,
       findOrCreateReceiptCaseV1,
       transitionReceiptCaseV1,
+      manualTransitionReceiptCaseV1,
       scheduleReceiptCaseV1,
       flushReceiptCaseV1ForTests,
       resetReceiptCaseV1ForTests,
@@ -10267,6 +10498,7 @@ var require_upload_duplicate_guard = __commonJS({
       scheduleTarsMemoryCaseV1,
       scheduleTarsMemoryFromTraceV1,
       scheduleTarsMemoryHumanReceiptConfirmationV1,
+      writeTarsMemoryHumanReceiptConfirmationV1,
       analyzeTarsMemoryCasesV1,
       runTarsMemoryBackgroundAnalysisV1,
       tarsMemoryGoldenDatasetV1,
@@ -10373,6 +10605,11 @@ var require_upload_duplicate_guard = __commonJS({
       publishMasterTransferSummary,
       readIndex,
       writeIndex,
+      receiptPrivateControlEntryTokenV1,
+      receiptManualApprovalOperationTokenV1,
+      sanitizeReceiptManualApprovalOperationV1,
+      runReceiptManualApprovalV1,
+      resetReceiptManualApprovalV1ForTests,
       PROTECTED_ROOMS,
       isDirectRoom,
       isMasterPrivateRoom,
@@ -10420,6 +10657,7 @@ var F = "open-female-hairdresser-report-from-table";
 var L = "open-brow-report-from-table";
 var U = "open-manicure-report-from-table";
 var K = G.APPROVE_REJECTED_RECEIPT_ACTION;
+var PRIVATE_RECEIPT_CONTROL_ACTION = "approve-private-receipt-control-v1";
 var UPLOAD_MENU_ACTION = "open-upload-type-menu";
 var PHOTO_REPORT_ACTION = "start-photo-report-upload";
 var RECEIPT_UPLOAD_ACTION = "start-receipt-upload";
@@ -10775,7 +11013,7 @@ var C = class extends j.App {
       id: "forward-pending-report-photos-now",
       processor: this.forwardPendingReportPhotosJob
     }]);
-    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.slashCommands.provideSlashCommand(new ReceiptReplayCommand(this)), e.api.provideApi({
+    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ReceiptPrivateControlCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.slashCommands.provideSlashCommand(new ReceiptReplayCommand(this)), e.api.provideApi({
       visibility: A.ApiVisibility.PUBLIC,
       security: A.ApiSecurity.UNSECURE,
       endpoints: [new S(this), new ReportFormEndpoint(this), new ReportFormScriptEndpoint(this)]
@@ -11303,6 +11541,175 @@ var C = class extends j.App {
     if (entries.length > visibleEntries.length) text += `\nПоказано ${visibleEntries.length} из ${entries.length}. Укажите логин мастера: /cheki @login ${displayDate}`;
     await notify(text);
   }
+  async privateReceiptControlActorAllowed(e, n) {
+    if (!e || !n || !n.id) return false;
+    for (const username of ["teimur", "shura"]) {
+      try {
+        const allowedUser = await e.getUserReader().getByUsername(username);
+        if (allowedUser && String(allowedUser.id || "") === String(n.id || "")) return true;
+      } catch (_2) {
+      }
+    }
+    return false;
+  }
+  async receiptControlEvidenceState(e, n) {
+    try {
+      if (n && n.messageId) {
+        const message = await e.getMessageReader().getById(n.messageId);
+        if (message && String(message.room && message.room.id || "") === String(n.roomId || "")) {
+          const files = G.messageImageFiles(message);
+          const uploadId = String(n.uploadId || "");
+          const original = files.find((file) => !uploadId || String(file && (file._id || file.id) || "") === uploadId);
+          if (original) {
+            const originalUploadId = String(original && (original._id || original.id) || uploadId);
+            const upload = originalUploadId && e.getUploadReader ? await e.getUploadReader().getById(originalUploadId) : void 0;
+            if (upload) return "original";
+          }
+        }
+      }
+    } catch (_2) {
+    }
+    if (n && n.archiveStatus === "stored" && n.archiveKey) return "archive";
+    return "canonical_original_unresolved";
+  }
+  async approveReceiptThroughSharedService(e, n, t, r, selector) {
+    const config = await this.receiptOcrConfig(e);
+    const logger = this.getLogger();
+    return G.runReceiptManualApprovalV1({
+      ...selector,
+      approvedBy: r && (r.username || r.name || r.id) || ""
+    }, e, t, {
+      memory: async (entry) => {
+        return G.writeTarsMemoryHumanReceiptConfirmationV1(entry, Number(entry.receiptAmount), String(entry.receiptDate || ""), e, t, config);
+      },
+      refresh: async (entry) => {
+        if (!entry.roomId) return true;
+        const masterRoom = await e.getRoomReader().getById(entry.roomId);
+        if (!masterRoom) return true;
+        await G.publishMasterTransferSummary({
+          userId: entry.userId || "",
+          receiptDate: String(entry.receiptDate || ""),
+          username: entry.username || "",
+          userName: entry.userName || "",
+          nameCandidates: [entry.username || ""]
+        }, { room: masterRoom }, e, t, n, config, logger, true, [entry]);
+        await this.refreshPreliminaryReportAnalysis(e, t, n, r, masterRoom, {
+          refreshFinancialReport: true,
+          workday: String(entry.receiptDate || ""),
+          currentValidatedReceipts: [entry]
+        });
+        return true;
+      },
+      status: async (entry) => {
+        const receiptCase = await G.findReceiptCaseForInputV1({
+          sourceMessageId: entry.messageId,
+          sourceUploadId: entry.uploadId,
+          masterId: entry.userId
+        }, e);
+        if (!receiptCase) return true;
+        const acceptedCase = await G.manualTransitionReceiptCaseV1(receiptCase.caseId, {
+          normalizedAmount: entry.receiptAmount,
+          normalizedDate: entry.receiptDate
+        }, e, t, {}, logger);
+        if (!acceptedCase || acceptedCase.state !== "ACCEPTED") return false;
+        const masterRoom = entry.roomId ? await e.getRoomReader().getById(entry.roomId) : void 0;
+        if (!masterRoom) return true;
+        let masterUser;
+        try {
+          masterUser = entry.userId ? await e.getUserReader().getById(entry.userId) : void 0;
+        } catch (_2) {
+          masterUser = void 0;
+        }
+        const manager = G.createReceiptProcessingStatusManager({
+          id: entry.messageId || "",
+          room: masterRoom,
+          sender: masterUser || { id: entry.userId || "", username: entry.username || "" }
+        }, e, t, n, logger, true);
+        return Boolean(await manager.syncCase(acceptedCase));
+      }
+    });
+  }
+  async handlePrivateReceiptControlCommand(e, n, t, s, r) {
+    if (!e || !n || !t || !s || !r) return;
+    const appUser = await e.getUserReader().getByUsername("tars") || await e.getUserReader().getAppUser();
+    if (!appUser) return;
+    const notify = async (text, blocks) => {
+      const builder = n.getNotifier().getMessageBuilder().setSender(appUser).setRoom(s).setText(text);
+      if (blocks && typeof builder.setBlocks === "function") builder.setBlocks(blocks);
+      await n.getNotifier().notifyUser(r, builder.getMessage());
+    };
+    if (!await this.privateReceiptControlActorAllowed(e, r)) {
+      await notify("🚫 Контроль чеков доступен только Теймуру и Шуре.");
+      return;
+    }
+    if (!G.isPersonalTarsRoom(s)) {
+      await notify("Откройте личный чат нужного мастера TARS и повторите /receipt-control.");
+      return;
+    }
+    const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
+    const entries = (index.photos || []).filter((entry) => entry && (entry.source === "rejected" || entry.source === "confirmed" && entry.manualApprovalOperationToken && !Number(entry.manualApprovalCompletedAt || 0)) && String(entry.roomId || "") === String(s.id || "")).sort((left, right) => Number(right.uploadedAt || 0) - Number(left.uploadedAt || 0)).slice(0, 10);
+    if (!entries.length) {
+      await notify("✅ В этом чате нет чеков, ожидающих ручной проверки.");
+      return;
+    }
+    const blocks = n.getCreator().getBlockBuilder();
+    const lines = [];
+    for (let index2 = 0; index2 < entries.length; index2 += 1) {
+      const entry = entries[index2];
+      const amount = Number(entry.receiptAmount);
+      const date = String(entry.receiptDate || "");
+      const valid = Number.isFinite(amount) && amount > 0 && /^\d{4}-\d{2}-\d{2}$/.test(date);
+      const evidence = await this.receiptControlEvidenceState(e, entry);
+      const evidenceText = evidence === "original" ? "исходник в этом чате" : evidence === "archive" ? "есть архив" : "исходник недоступен — сверить в cheki-kontrol";
+      const amountText = valid ? this.formatRubles(amount) : "сумма/дата не распознаны";
+      lines.push(`${index2 + 1}. ${valid ? `${amountText} · ${date.split("-").reverse().join(".")}` : amountText} · ${evidenceText}`);
+      if (valid) {
+        blocks.addActionsBlock({ elements: [
+          blocks.newButtonElement({ actionId: PRIVATE_RECEIPT_CONTROL_ACTION, text: blocks.newPlainTextObject(`Зачесть чек ${index2 + 1}`), value: G.receiptPrivateControlEntryTokenV1(entry) })
+        ] });
+      }
+    }
+    await notify(`*Приватный контроль чеков*\n${lines.join("\n")}\n\nДействие доступно только Теймуру и Шуре.`, blocks);
+  }
+  async handlePrivateReceiptControlButton(e, n, t, a) {
+    if (!e || !n || !t || !a || !a.user || !a.room) return;
+    const appUser = await e.getUserReader().getByUsername("tars") || await e.getUserReader().getAppUser();
+    if (!appUser) return;
+    const notify = async (text) => {
+      const message = n.getNotifier().getMessageBuilder().setSender(appUser).setRoom(a.room).setText(text).getMessage();
+      await n.getNotifier().notifyUser(a.user, message);
+    };
+    if (!await this.privateReceiptControlActorAllowed(e, a.user)) {
+      await notify("🚫 Зачесть чек могут только Теймур и Шура.");
+      return;
+    }
+    if (!G.isPersonalTarsRoom(a.room)) {
+      await notify("⚠️ Приватное действие доступно только в личном чате мастера TARS.");
+      return;
+    }
+    const result = await this.approveReceiptThroughSharedService(e, n, t, a.user, { entryToken: String(a.value || "") });
+    if (result.status === "approved") {
+      await notify("✅ Чек зачтён. Финансовые итоги и статус синхронизированы.");
+      return;
+    }
+    if (result.status === "recovery_pending") {
+      await notify("⏳ Чек зачтён. Обновление связанных итогов продолжится при повторной проверке.");
+      return;
+    }
+    if (result.status === "failed") {
+      await notify("⚠️ Не удалось подтвердить зачисление. Финансовый результат не считается изменённым; повторите проверку позже.");
+      return;
+    }
+    if (result.status === "duplicate_blocked") {
+      await notify("🚫 Чек не зачтён: обнаружен другой чек с той же платёжной идентичностью.");
+      return;
+    }
+    if (result.status === "invalid_fields") {
+      await notify("⚠️ Чек нельзя зачесть одной кнопкой: сумма или дата не распознана.");
+      return;
+    }
+    await notify("ℹ️ Этот чек уже обработан или больше не ожидает проверки.");
+  }
   async handleApproveReceiptCommand(e, n, t, s, r, a = []) {
     if (!e || !n || !t || !s || !r) return;
     const config = await this.receiptOcrConfig(e);
@@ -11346,7 +11753,7 @@ var C = class extends j.App {
     }
     const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
     const candidates = (index.photos || []).filter((entry) => {
-      if (!entry || entry.source !== "rejected") return false;
+      if (!entry || entry.source !== "rejected" && !(entry.source === "confirmed" && entry.manualApprovalOperationToken && !Number(entry.manualApprovalCompletedAt || 0))) return false;
       if (String(entry.username || "").toLowerCase() !== targetUsername) return false;
       if (String(entry.receiptDate || "") !== targetDate) return false;
       const amount = Number(entry.receiptAmount);
@@ -11359,34 +11766,18 @@ var C = class extends j.App {
       return;
     }
     const originalReason = entry.invalidReason || "";
-    entry.source = "confirmed";
-    entry.invalidReason = "";
-    entry.manualApprovalNote = originalReason;
-    entry.approvedBy = r.username || r.name || r.id || "";
-    entry.approvedAt = Date.now();
-    entry.validationVersion = 11;
-    await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
-    G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, targetAmount, targetDate, e, t, config);
-    if (entry.roomId) {
-      try {
-        const masterRoom = await e.getRoomReader().getById(entry.roomId);
-        if (masterRoom) {
-          await G.publishMasterTransferSummary({
-            userId: entry.userId || "",
-            receiptDate: targetDate,
-            username: entry.username || targetUsername,
-            userName: entry.userName || "",
-            nameCandidates: [targetUsername]
-          }, { room: masterRoom }, e, t, n, config, this.getLogger(), true, [entry]);
-          await this.refreshPreliminaryReportAnalysis(e, t, n, r, masterRoom, {
-            refreshFinancialReport: true,
-            workday: targetDate,
-            currentValidatedReceipts: [entry]
-          });
-        }
-      } catch (error) {
-        this.getLogger().warn(`Could not refresh master transfer summary after manual approval: ${error && error.message || error}`);
-      }
+    const approval = await this.approveReceiptThroughSharedService(e, n, t, r, { exact: String(entry.exact || "") });
+    if (approval.status === "duplicate_blocked") {
+      await notify("🚫 Чек не зачтён: обнаружен другой чек с той же платёжной идентичностью.");
+      return;
+    }
+    if (approval.status === "invalid_fields") {
+      await notify("⚠️ Чек нельзя зачесть: сумма или дата не распознана.");
+      return;
+    }
+    if (approval.status !== "approved" && approval.status !== "recovery_pending") {
+      await notify("ℹ️ Этот чек уже зачтён или больше не ожидает проверки.");
+      return;
     }
     await notify(`✅ ЧЕК ПРИНЯТ ВРУЧНУЮ\nМастер: @${targetUsername}\nСумма: ${this.formatRubles(targetAmount)}\nДата: ${displayDateText}\nБыла причина отказа: ${originalReason || "—"}\nПринял: @${currentUsername}`);
   }
@@ -11408,7 +11799,7 @@ var C = class extends j.App {
     }
     const exact = String(a.value || "");
     const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
-    const entry = (index.photos || []).find((candidate) => candidate && candidate.source === "rejected" && String(candidate.exact || "") === exact);
+    const entry = (index.photos || []).find((candidate) => candidate && (candidate.source === "rejected" || candidate.source === "confirmed" && candidate.manualApprovalOperationToken && !Number(candidate.manualApprovalCompletedAt || 0)) && String(candidate.exact || "") === exact);
     if (!entry) {
       await notify("ℹ️ Этот чек уже зачтён или больше не ожидает проверки.");
       return;
@@ -11419,35 +11810,18 @@ var C = class extends j.App {
       await notify("⚠️ Чек нельзя зачесть одной кнопкой: сумма или дата не распознана. Используйте /prinyat @логин сумма ДД.ММ.ГГГГ.");
       return;
     }
-    const originalReason = entry.invalidReason || "";
-    entry.source = "confirmed";
-    entry.invalidReason = "";
-    entry.manualApprovalNote = originalReason;
-    entry.approvedBy = a.user.username || a.user.name || a.user.id || "";
-    entry.approvedAt = Date.now();
-    entry.validationVersion = 11;
-    await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
-    G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, amount, targetDate, e, t, config);
-    if (entry.roomId) {
-      try {
-        const masterRoom = await e.getRoomReader().getById(entry.roomId);
-        if (masterRoom) {
-          await G.publishMasterTransferSummary({
-            userId: entry.userId || "",
-            receiptDate: targetDate,
-            username: entry.username || "",
-            userName: entry.userName || "",
-            nameCandidates: [entry.username || ""]
-          }, { room: masterRoom }, e, t, n, config, this.getLogger(), true, [entry]);
-          await this.refreshPreliminaryReportAnalysis(e, t, n, a.user, masterRoom, {
-            refreshFinancialReport: true,
-            workday: targetDate,
-            currentValidatedReceipts: [entry]
-          });
-        }
-      } catch (error) {
-        this.getLogger().warn(`Could not refresh master transfer summary after receipt button approval: ${error && error.message || error}`);
-      }
+    const approval = await this.approveReceiptThroughSharedService(e, n, t, a.user, { exact });
+    if (approval.status === "duplicate_blocked") {
+      await notify("🚫 Чек не зачтён: обнаружен другой чек с той же платёжной идентичностью.");
+      return;
+    }
+    if (approval.status === "invalid_fields") {
+      await notify("⚠️ Чек нельзя зачесть одной кнопкой: сумма или дата не распознана. Используйте /prinyat @логин сумма ДД.ММ.ГГГГ.");
+      return;
+    }
+    if (approval.status !== "approved" && approval.status !== "recovery_pending") {
+      await notify("ℹ️ Этот чек уже зачтён или больше не ожидает проверки.");
+      return;
     }
     const displayDateText = targetDate.split("-").reverse().join(".");
     const builder = n.getCreator().startMessage().setSender(appUser).setRoom(a.room).setText(`✅ ЧЕК ЗАЧТЁН\nМастер: @${entry.username || "мастер"}\nСумма: ${this.formatRubles(amount)}\nДата: ${displayDateText}\nПринял: @${currentUsername}`);
@@ -11833,6 +12207,10 @@ var C = class extends j.App {
   }
   async executeActionButtonHandler(e, n, t, s, r) {
     let a = e.getInteractionData();
+    if (a.actionId === PRIVATE_RECEIPT_CONTROL_ACTION) {
+      await this.handlePrivateReceiptControlButton(n, r, s, a);
+      return e.getInteractionResponder().successResponse();
+    }
     if (a.actionId === K) {
       await this.handleApproveReceiptButton(n, r, s, a);
       return e.getInteractionResponder().successResponse();
@@ -11869,6 +12247,10 @@ var C = class extends j.App {
   }
   async executeBlockActionHandler(e, n, t, s, r) {
     let a = e.getInteractionData();
+    if (a.actionId === PRIVATE_RECEIPT_CONTROL_ACTION) {
+      await this.handlePrivateReceiptControlButton(n, r, s, a);
+      return e.getInteractionResponder().successResponse();
+    }
     if (a.actionId === K) {
       await this.handleApproveReceiptButton(n, r, s, a);
       return e.getInteractionResponder().successResponse();
@@ -14863,6 +15245,14 @@ var ApproveReceiptCommand = class {
   }
   async executor(e, n, t, s, r) {
     await this.app.handleApproveReceiptCommand(n, t, r, e.getRoom(), e.getSender(), e.getArguments());
+  }
+};
+var ReceiptPrivateControlCommand = class {
+  constructor(e) {
+    this.app = e, this.command = "receipt-control", this.i18nParamsExample = "receipt_private_control_command_params", this.i18nDescription = "receipt_private_control_command_description", this.providesPreview = false;
+  }
+  async executor(e, n, t, s, r) {
+    await this.app.handlePrivateReceiptControlCommand(n, t, r, e.getRoom(), e.getSender());
   }
 };
 var ScheduleCommand = class {

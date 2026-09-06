@@ -1,5 +1,7 @@
 const fs = require('fs');
 const assert = require('assert');
+const path = require('path');
+const { spawnSync } = require('child_process');
 
 const source = fs.readFileSync('TarsReportApp.js', 'utf8');
 const reviewStart = source.indexOf('async function createReviewMessageForUpload');
@@ -34,9 +36,21 @@ assert.match(handler, /roomSlug !== "cheki-kontrol"/);
 assert.match(handler, /candidate\.source === "rejected"/);
 assert.match(handler, /candidate\.exact \|\| ""\) === exact/);
 assert.match(handler, /amount <= 0/);
-assert.match(handler, /entry\.source = "confirmed"/);
-assert.match(handler, /publishMasterTransferSummary[\s\S]*true, \[entry\]/);
+assert.match(handler, /approveReceiptThroughSharedService/);
+const sharedStart = source.indexOf('async approveReceiptThroughSharedService');
+const sharedEnd = source.indexOf('async handlePrivateReceiptControlCommand', sharedStart);
+const shared = source.slice(sharedStart, sharedEnd);
+assert.match(shared, /G\.runReceiptManualApprovalV1/);
+assert.match(shared, /publishMasterTransferSummary[\s\S]*true, \[entry\]/);
 assert.match(handler, /✅ ЧЕК ЗАЧТЁН/);
 assert.match(source, /if \(a\.actionId === K\)[\s\S]*handleApproveReceiptButton/);
+
+for (const runtime of [
+  'receipt-private-control-v1.runtime.js',
+  'receipt-private-control-runtime.runtime.js'
+]) {
+  const result = spawnSync(process.execPath, [path.join(__dirname, runtime)], { encoding: 'utf8' });
+  assert.strictEqual(result.status, 0, `${runtime} failed:\n${result.stdout || ''}${result.stderr || ''}`);
+}
 
 console.log('PASS: rejected receipts can be approved from cheki-kontrol by a guarded button');

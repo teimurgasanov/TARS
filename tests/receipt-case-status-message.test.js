@@ -153,6 +153,20 @@ async function lifecycle(guard, state, text, extra = {}) {
   await lifecycle(guard, "DUPLICATE", "🚫 Этот чек уже был отправлен", { strictDecision: "duplicate" });
   await lifecycle(guard, "FAILED", "⚠️ Не удалось завершить проверку", { strictDecision: "failed" });
 
+  // A guarded manual CONTROL -> ACCEPTED resolution must update the same
+  // canonical status message rather than publishing a second status.
+  guard.resetReceiptCaseV1ForTests();
+  const manual = createRuntime();
+  const manualManager = await transition(guard, manual, "manual", "PROCESSING");
+  await transition(guard, manual, "manual", "CONTROL", { strictDecision: "control", controlReason: "unresolved", normalizedAmount: 600, normalizedDate: "2026-09-06" }, manualManager);
+  const manualCase = Array.from(manual.records.entries()).filter(([key]) => key.startsWith("receipt-case-v1:case:")).map(([, value]) => value)[0];
+  const originalStatusId = manual.created[0] && manual.created[0].id;
+  const acceptedManualCase = await guard.manualTransitionReceiptCaseV1(manualCase.caseId, { normalizedAmount: 600, normalizedDate: "2026-09-06" }, manual.read, manual.persistence);
+  await manualManager.syncCase(acceptedManualCase);
+  assert.strictEqual(manual.created.length, 1, "manual approval must not create another status");
+  assert.strictEqual(Array.from(manual.messages.values())[0].id, originalStatusId);
+  assert.strictEqual(Array.from(manual.messages.values())[0].text, "✅ Чек 600 ₽ принят");
+
   // 6. Repeated transitions are idempotent.
   guard.resetReceiptCaseV1ForTests();
   const repeated = createRuntime();

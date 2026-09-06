@@ -65,10 +65,11 @@ assert.match(post, /receiptWasAcceptedForMessage\(n, e\)[\s\S]*refreshFinancialR
 assert.doesNotMatch(post, /mediaV2\.result === ["']processed["']/, 'a generic processed image result must not be treated as an accepted receipt');
 assert.doesNotMatch(post, /result && result\.result === ["']processed["']/, 'manual image routing must not treat a generic processed result as an accepted receipt');
 
-const approvalStart = source.indexOf('async handleApproveReceiptCommand');
+const approvalStart = source.indexOf('async approveReceiptThroughSharedService');
 const approvalEnd = source.indexOf('photoReportIntentAssociation', approvalStart);
 const approvals = source.slice(approvalStart, approvalEnd);
-assert.strictEqual((approvals.match(/refreshFinancialReport: true/g) || []).length, 2, 'both manual approval paths must reconcile the stored report');
-assert.strictEqual((approvals.match(/workday: targetDate/g) || []).length, 2, 'manual approvals must reconcile the report for the receipt date');
+assert.strictEqual((approvals.match(/refreshFinancialReport: true/g) || []).length, 1, 'the shared manual approval service must reconcile the stored report once');
+assert.strictEqual((approvals.match(/workday: String\(entry\.receiptDate \|\| ""\)/g) || []).length, 1, 'the shared service must reconcile the report for the authoritative stored receipt date');
+assert.strictEqual((approvals.match(/approveReceiptThroughSharedService/g) || []).length, 4, 'private, command and legacy button paths must use the shared service');
 
 console.log('PASS: accepted receipts update the running total and reconcile stored reports without changing manual form values');

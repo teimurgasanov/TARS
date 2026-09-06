@@ -171,7 +171,7 @@ for (const [needle, expectedCount] of [
   ["requestReceiptOcr(", 8],
   ["validateReceiptStrict(", 6],
   ["findExactDuplicate(", 6],
-  ["findReceiptIdentityDuplicate(", 4],
+  ["findReceiptIdentityDuplicate(", 5],
   ["publishAcceptedReceipt(", 3],
   ["publishRejectedReceiptReview(", 8],
   ["claimPostMessage(", 3],
@@ -180,6 +180,12 @@ for (const [needle, expectedCount] of [
 ]) {
   assert.strictEqual(source.split(needle).length - 1, expectedCount, `production call count changed: ${needle}`);
 }
+const manualApprovalStart = source.indexOf("async function runReceiptManualApprovalV1");
+const manualApprovalEnd = source.indexOf("function resetReceiptManualApprovalV1ForTests", manualApprovalStart);
+assert(manualApprovalStart >= 0 && manualApprovalEnd > manualApprovalStart);
+assert.strictEqual((source.slice(manualApprovalStart, manualApprovalEnd).match(/findReceiptIdentityDuplicate\(/g) || []).length, 1, "the one added identity check must remain isolated to manual approval");
+const sourceWithoutManualApproval = source.slice(0, manualApprovalStart) + source.slice(manualApprovalEnd);
+assert.strictEqual((sourceWithoutManualApproval.match(/findReceiptIdentityDuplicate\(/g) || []).length, 4, "normal production duplicate call count must remain unchanged");
 
 const traceBootstrapEnd = handler.indexOf("G.emitTarsTraceV1(traceLogger");
 const traceBootstrapBody = handler.slice(handler.indexOf("{") + 1, traceBootstrapEnd);
