@@ -23,7 +23,8 @@ function loadReceiptCaseHelpers() {
     `${source.slice(helperStart, helperEnd)}\nreturn {
       createTarsTraceV1, sanitizeTarsTraceEventV1,
       receiptCaseCorrelationsV1, sanitizeReceiptCaseV1,
-      findOrCreateReceiptCaseV1, transitionReceiptCaseV1,
+      findReceiptCaseForInputV1, findOrCreateReceiptCaseV1,
+      transitionReceiptCaseV1, manualTransitionReceiptCaseV1,
       scheduleReceiptCaseV1, flushReceiptCaseV1ForTests,
       resetReceiptCaseV1ForTests
     };`

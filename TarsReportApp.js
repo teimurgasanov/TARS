@@ -1378,6 +1378,23 @@ var require_upload_duplicate_guard = __commonJS({
         return void 0;
       }
     }
+    async function findReceiptCaseForInputV1(input, read) {
+      try {
+        if (!read || !read.getPersistenceReader) return void 0;
+        const correlations = receiptCaseCorrelationsV1(input);
+        for (const alias of correlations.aliases) {
+          const association = receiptCaseAliasAssociationV1(alias);
+          if (!association) continue;
+          const links = await read.getPersistenceReader().readByAssociation(association);
+          const link = (links || []).filter((entry) => entry && entry.schemaVersion === RECEIPT_CASE_V1_SCHEMA_VERSION && /^rcv1_[a-f0-9]{32}$/.test(String(entry.caseId || "")))[0];
+          if (link) return readReceiptCaseV1(link.caseId, read);
+        }
+        const caseId = receiptCaseIdFromCorrelationsV1(correlations);
+        return caseId ? readReceiptCaseV1(caseId, read) : void 0;
+      } catch (_2) {
+        return void 0;
+      }
+    }
     function emitReceiptCaseTransitionV1(logger, trace, caseId, fromState, toState) {
       const reasonCode = {
         RECEIVED: "RECEIPT_CASE_RECEIVED",
@@ -1526,6 +1543,35 @@ var require_upload_duplicate_guard = __commonJS({
         if (!next) return existing;
         const comparable = (record) => JSON.stringify({ state: record.state, strictDecision: record.strictDecision, controlReason: record.controlReason, normalizedAmount: record.normalizedAmount, normalizedDate: record.normalizedDate });
         if (comparable(existing) === comparable(next)) return existing;
+        await persistence.updateByAssociation(receiptCaseAssociationV1(caseId), next, true);
+        await updateReceiptCaseIndexV1(next, [], read, persistence, options);
+        emitReceiptCaseTransitionV1(logger, trace, caseId, existing.state, next.state);
+        return next;
+      } catch (_2) {
+        emitTarsTraceV1(logger, trace, { component: "receipt_case", stage: "receipt_case", event: "error", outcome: "failed", reason_code: "RECEIPT_CASE_PERSISTENCE_FAILED", error_class: "persistence" });
+        return void 0;
+      }
+    }
+    async function manualTransitionReceiptCaseV1(caseId, input, read, persistence, options = {}, logger, trace) {
+      try {
+        const existing = await readReceiptCaseV1(caseId, read);
+        if (!existing || !persistence || !persistence.updateByAssociation) return void 0;
+        if (existing.state === "ACCEPTED") return existing;
+        if (existing.state !== "CONTROL") return existing;
+        const amount = receiptCaseNormalizedAmountV1(input && input.normalizedAmount);
+        const date = receiptCaseNormalizedDateV1(input && input.normalizedDate);
+        if (amount.status !== "recognized" || date.status !== "recognized") return existing;
+        const next = sanitizeReceiptCaseV1({
+          ...existing,
+          state: "ACCEPTED",
+          strictDecision: "accept",
+          controlReason: "none",
+          normalizedAmount: amount,
+          normalizedDate: date,
+          updatedAt: Date.now(),
+          revision: existing.revision + 1
+        });
+        if (!next) return existing;
         await persistence.updateByAssociation(receiptCaseAssociationV1(caseId), next, true);
         await updateReceiptCaseIndexV1(next, [], read, persistence, options);
         emitReceiptCaseTransitionV1(logger, trace, caseId, existing.state, next.state);
@@ -2386,56 +2432,6 @@ var require_upload_duplicate_guard = __commonJS({
       }
       return files.filter((file) => file && /^image\//i.test(String(file.type || "")));
     }
-    async function ensureReceiptReviewRoom(read, modify, config, logger) {
-      let room;
-      try {
-        room = await read.getRoomReader().getByName(RECEIPT_REVIEW_ROOM);
-      } catch (_2) {
-        room = void 0;
-      }
-      const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
-      if (!appUser) throw new Error("Tars app user was not found");
-      const usernames = ["teimur", "shura", config && config.ownerUsername, config && config.adminUsername].map((value) => String(value || "").replace(/^@/, "").trim()).filter(Boolean).filter((value, index, values) => values.indexOf(value) === index);
-      if (!room) {
-        const existingUsers = [];
-        for (const username of usernames) {
-          try {
-            const user = await read.getUserReader().getByUsername(username);
-            if (user && user.username) existingUsers.push(user.username);
-          } catch (_3) {
-          }
-        }
-        const builder = modify.getCreator().startRoom().setCreator(appUser).setType(RoomType.PRIVATE_GROUP).setSlugifiedName(RECEIPT_REVIEW_ROOM).setDisplayName("Контроль чеков").setReadOnly(false).setDisplayingOfSystemMessages(false).setMembersToBeAddedByUsernames(existingUsers);
-        const roomId = await modify.getCreator().finish(builder);
-        room = await read.getRoomReader().getById(roomId);
-        if (!room) throw new Error("Receipt review room was not created");
-        if (logger) logger.info(`Receipt review room created: ${room.id}`);
-      }
-      try {
-        const members = await read.getRoomReader().getMembers(room.id);
-        const memberIds = new Set((members || []).map((member) => String(member && member.id || "")));
-        const extender = await modify.getExtender().extendRoom(room.id, appUser);
-        let changed = false;
-        if (!memberIds.has(String(appUser.id || ""))) {
-          extender.addMember(appUser);
-          changed = true;
-        }
-        for (const username of usernames) {
-          try {
-            const user = await read.getUserReader().getByUsername(username);
-            if (user && !memberIds.has(String(user.id || ""))) {
-              extender.addMember(user);
-              changed = true;
-            }
-          } catch (_4) {
-          }
-        }
-        if (changed) await modify.getExtender().finish(extender);
-      } catch (memberError) {
-        if (logger) logger.warn(`Could not refresh receipt review members: ${memberError && memberError.message || memberError}`);
-      }
-      return { room, appUser };
-    }
     function archiveMessageUploadIds(message) {
       const files = [];
       if (message && message.file) files.push(message.file);
@@ -2571,62 +2567,18 @@ var require_upload_duplicate_guard = __commonJS({
       // rooms. Returning true preserves the existing cleanup behavior.
       return true;
     }
-    function reviewReceiptFilename(file, user, exact) {
-      const username = String(user && user.username || user && user.name || user && user.id || "master").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "master", mime = String(file && file.type || "").toLowerCase(), extension = mime.indexOf("png") !== -1 ? "png" : mime.indexOf("webp") !== -1 ? "webp" : "jpg";
-      return `rejected-receipt-${username}-${String(exact || Date.now()).slice(0, 16)}.${extension}`;
+    function receiptPrivateControlEntryTokenV1(entry) {
+      try {
+        const seed = String(entry && (entry.exact || entry.uploadId || entry.messageId) || "").trim();
+        return seed ? `rce_${sha256Bytes(utf8Bytes(`receipt-private-control-v1:entry:${seed}`)).slice(0, 32)}` : "";
+      } catch (_2) {
+        return "";
+      }
     }
     function attachReceiptResultToMessage(builder, messageId) {
       const threadId = String(messageId || "");
       if (threadId && builder && typeof builder.setThreadId === "function") builder.setThreadId(threadId);
       return builder;
-    }
-    async function createReviewMessageForUpload(upload, filename, mimeType, room, appUser, modify, logger, details) {
-      if (!upload || !upload.id || !room || !appUser || !modify || !modify.getCreator) return "";
-      const uploadUrl = String(upload.url || ""), reason = String(details && details.reason || "чек не прошёл проверку"), master = details && details.user ? `@${details.user.username || details.user.name || details.user.id}` : "мастер", sourceRoom = details && details.sourceRoom ? details.sourceRoom.displayName || details.sourceRoom.name || details.sourceRoom.slugifiedName || "" : "", amount = details && Number.isFinite(Number(details.receiptAmount)) ? `\nСумма: ${Number(details.receiptAmount)} ₽` : "", date = details && details.receiptDate ? `\nДата: ${details.receiptDate}` : "";
-      const reviewFile = {
-        _id: upload.id,
-        name: filename || upload.name || "rejected-receipt.jpg",
-        type: mimeType || upload.type || "image/jpeg"
-      };
-      const attachment = {
-        type: "file",
-        title: {
-          value: reviewFile.name,
-          link: uploadUrl || void 0,
-          displayDownloadLink: true
-        },
-        imageUrl: /^image\//i.test(String(reviewFile.type || "")) ? uploadUrl || void 0 : void 0,
-        description: reason
-      };
-      const text = `👁️ ЧЕК НА КОНТРОЛЬ\nМастер: ${master}${sourceRoom ? `\nОткуда: ${sourceRoom}` : ""}\nПричина: ${reason}${date}${amount}`;
-      const fileBuilder = modify.getCreator().startMessage({
-        room,
-        sender: appUser,
-        text: "Фото чека для проверки",
-        file: reviewFile,
-        attachments: [attachment],
-        parseUrls: false
-      });
-      const messageId = await modify.getCreator().finish(fileBuilder);
-      const detailsBuilder = attachReceiptResultToMessage(
-        modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text),
-        messageId
-      );
-      if (details && details.exact) {
-        const blocks = modify.getCreator().getBlockBuilder();
-        blocks.addActionsBlock({
-          elements: [blocks.newButtonElement({
-            actionId: APPROVE_REJECTED_RECEIPT_ACTION,
-            text: blocks.newPlainTextObject("ЗАЧЕСТЬ ЧЕК"),
-            value: String(details.exact)
-          })]
-        });
-        detailsBuilder.setBlocks(blocks);
-      }
-      const detailsMessageId = await modify.getCreator().finish(detailsBuilder);
-      if (logger) logger.info(`Receipt review reason created in ${RECEIPT_REVIEW_ROOM}: message=${detailsMessageId || "unknown"}`);
-      if (logger) logger.info(`Receipt review message created in ${RECEIPT_REVIEW_ROOM}: message=${messageId || "unknown"} upload=${upload.id}`);
-      return String(messageId || "");
     }
     async function findOtchetRoom(read) {
       const names = ["result", "Result", "Результат", "результат", "Otchet", "otchet", "Отчет", "отчет", "Отчёт", "отчёт", "Отчеты", "отчеты", "Отчёты", "отчёты"];
@@ -3970,54 +3922,38 @@ var require_upload_duplicate_guard = __commonJS({
       return reset;
     }
     async function publishRejectedReceiptReview(file, content, details, read, modify, config, logger) {
-      if (!file || !content || !content.length || !config || !config.reviewRejectedReceipts) return "";
+      if (!file || !content || !content.length || !config || !config.reviewRejectedReceipts || !details || details.privateControl !== true || !isPersonalTarsRoom(details.sourceRoom)) return "";
       try {
-        let user = details && details.user;
-        if (!user && file && file.userId) {
+        const appUser = await read.getUserReader().getByUsername("tars") || await read.getUserReader().getAppUser();
+        const entryToken = receiptPrivateControlEntryTokenV1(details);
+        if (!appUser || !entryToken) return "";
+        const reviewers = [];
+        for (const username of ["teimur", "shura"]) {
           try {
-            user = await read.getUserReader().getById(file.userId);
-        } catch (_6) {
+            const reviewer = await read.getUserReader().getByUsername(username);
+            if (reviewer && reviewer.id) reviewers.push(reviewer);
+          } catch (_6) {
           }
         }
-        const { room, appUser } = await ensureReceiptReviewRoom(read, modify, config, logger), exact = details && details.exact || exactHash(content), filename = reviewReceiptFilename(file, user, exact);
-        const upload = await modify.getCreator().getUploadCreator().uploadBuffer(content, {
-          filename,
-          room,
-          user: appUser
-        });
-        if (!upload || !upload.id) throw new Error("Rocket.Chat did not return a review upload id");
-        const mimeType = String(file && file.type || upload.type || "image/jpeg").toLowerCase(), reviewDetails = { ...(details || {}), user };
-        if (!await archiveMessageExists(room.id, upload.id, read)) {
-          return await createReviewMessageForUpload(upload, filename, mimeType, room, appUser, modify, logger, reviewDetails);
-        }
-        const reason = String(reviewDetails.reason || "чек не прошёл проверку"), master = user ? `@${user.username || user.name || user.id}` : "мастер", sourceRoom = reviewDetails.sourceRoom ? reviewDetails.sourceRoom.displayName || reviewDetails.sourceRoom.name || reviewDetails.sourceRoom.slugifiedName || "" : "", amount = Number.isFinite(Number(reviewDetails.receiptAmount)) ? `\nСумма: ${Number(reviewDetails.receiptAmount)} ₽` : "", date = reviewDetails.receiptDate ? `\nДата: ${reviewDetails.receiptDate}` : "";
-        const text = `👁️ ЧЕК НА КОНТРОЛЬ\nМастер: ${master}${sourceRoom ? `\nОткуда: ${sourceRoom}` : ""}\nПричина: ${reason}${date}${amount}`;
-        const reviewMessage = await findArchiveMessageByUploadId(room.id, upload.id, read);
-        const reviewMessageId = String(reviewMessage && reviewMessage.id || "");
-        const detailsBuilder = attachReceiptResultToMessage(
-          modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText(text),
-          reviewMessageId
-        );
-        await modify.getCreator().finish(detailsBuilder);
-        if (reviewDetails.exact) {
-          const actionBuilder = attachReceiptResultToMessage(
-            modify.getCreator().startMessage().setSender(appUser).setRoom(room).setText("Действие с чеком"),
-            reviewMessageId
-          );
+        if (!reviewers.length) return "";
+        const user = details.user;
+        const reason = String(details.reason || "чек не прошёл проверку"), master = user ? `@${user.username || user.name || "мастер"}` : "мастер", amount = Number.isFinite(Number(details.receiptAmount)) ? `\nСумма: ${Number(details.receiptAmount)} ₽` : "", date = details.receiptDate ? `\nДата: ${details.receiptDate}` : "";
+        const text = `👁️ ЧЕК НА КОНТРОЛЬ\nМастер: ${master}\nПричина: ${reason}${date}${amount}`;
+        let notified = 0;
+        for (const reviewer of reviewers) {
           const blocks = modify.getCreator().getBlockBuilder();
-          blocks.addActionsBlock({
-            elements: [blocks.newButtonElement({
-              actionId: APPROVE_REJECTED_RECEIPT_ACTION,
-              text: blocks.newPlainTextObject("ЗАЧЕСТЬ ЧЕК"),
-              value: String(reviewDetails.exact)
-            })]
-          });
-          actionBuilder.setBlocks(blocks);
-          await modify.getCreator().finish(actionBuilder);
+          blocks.addActionsBlock({ elements: [blocks.newButtonElement({
+            actionId: APPROVE_REJECTED_RECEIPT_ACTION,
+            text: blocks.newPlainTextObject("ЗАЧЕСТЬ ЧЕК"),
+            value: entryToken
+          })] });
+          const builder = modify.getNotifier().getMessageBuilder().setSender(appUser).setRoom(details.sourceRoom).setText(text).setBlocks(blocks);
+          await modify.getNotifier().notifyUser(reviewer, builder.getMessage());
+          notified += 1;
         }
-        return String(upload.id || "");
+        return notified ? "private" : "";
       } catch (error) {
-        if (logger) logger.warn(`Could not publish rejected receipt to review room: ${error && error.message || error}`);
+        if (logger) logger.warn(`Could not publish private receipt control action: ${error && error.message || error}`);
         return "";
       }
     }
@@ -9034,14 +8970,15 @@ var require_upload_duplicate_guard = __commonJS({
                   reason,
                   sourceRoom: message.room,
                   user: message.sender,
+                  privateControl: true,
                   exact,
                   receiptDate: exactMatch.receiptDate,
                   receiptAmount: exactMatch.receiptAmount
                 }, read, modify, ocrConfig, logger);
-                await deleteReceiptMessage(message, read, modify, logger);
+                if (!isPersonalTarsRoom(message.room)) await deleteReceiptMessage(message, read, modify, logger);
                 await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, reason);
               }
-              if (logger) logger.info(`Deleted posted rejected receipt ${message.id || "unknown"} with original reason`);
+              if (logger) logger.info(`${isPersonalTarsRoom(message.room) ? "Retained" : "Deleted"} posted rejected receipt ${message.id || "unknown"} with original reason`);
               emitTarsTraceV1(logger, trace, {
                 component: "publisher", stage: "result_publish", event: "success", outcome: "rejected", reason_code: "REJECTED_RESULT_PUBLISHED",
                 ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
@@ -9296,13 +9233,14 @@ var require_upload_duplicate_guard = __commonJS({
                 reason: rejectedEntry.invalidReason,
                 sourceRoom: message.room,
                 user: message.sender,
+                privateControl: true,
                 exact,
                 receiptDate: receiptCheck.receiptDate,
                 receiptAmount: receiptCheck.receiptAmount
               }, read, modify, ocrConfig, logger);
-              if (message.id && message.sender) await deleteReceiptMessage(message, read, modify, logger);
+              if (message.id && message.sender && !isPersonalTarsRoom(message.room)) await deleteReceiptMessage(message, read, modify, logger);
               await notifyDuplicateUser(message.sender, message.room, protectedRoom, read, modify, logger, rejectedEntry.invalidReason);
-              if (logger) logger.info(`Deleted suspicious receipt ${message.id || "unknown"} without pre-upload reservation: ${rejectedEntry.invalidReason}`);
+              if (logger) logger.info(`${isPersonalTarsRoom(message.room) ? "Retained" : "Deleted"} suspicious receipt ${message.id || "unknown"} without pre-upload reservation: ${rejectedEntry.invalidReason}`);
               emitTarsTraceV1(logger, trace, {
                 component: "publisher", stage: "result_publish", event: "success", outcome: "control", reason_code: "CONTROL_RESULT_PUBLISHED",
                 ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id }, attrs: { intent: "receipt" }
@@ -10252,8 +10190,10 @@ var require_upload_duplicate_guard = __commonJS({
       emitTarsTraceV1,
       receiptCaseCorrelationsV1,
       sanitizeReceiptCaseV1,
+      findReceiptCaseForInputV1,
       findOrCreateReceiptCaseV1,
       transitionReceiptCaseV1,
+      manualTransitionReceiptCaseV1,
       scheduleReceiptCaseV1,
       flushReceiptCaseV1ForTests,
       resetReceiptCaseV1ForTests,
@@ -10362,6 +10302,7 @@ var require_upload_duplicate_guard = __commonJS({
       emitManualImageSelectionTelemetry,
       fastForwardPersonalReportPhotos,
       notifyWorkPhotoAccepted,
+      publishRejectedReceiptReview,
       publishPendingReportPhotos,
       resetInvisiblePermalinkForwards,
       resetStaleReportPhotoForwards,
@@ -10396,6 +10337,7 @@ var require_upload_duplicate_guard = __commonJS({
       parseShadowSamplePercent,
       parseShadowRetentionDays,
       parseShadowMaxRecords,
+      receiptPrivateControlEntryTokenV1,
       APPROVE_REJECTED_RECEIPT_ACTION
     };
   }
@@ -10775,7 +10717,7 @@ var C = class extends j.App {
       id: "forward-pending-report-photos-now",
       processor: this.forwardPendingReportPhotosJob
     }]);
-    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.slashCommands.provideSlashCommand(new ReceiptReplayCommand(this)), e.api.provideApi({
+    e.slashCommands.provideSlashCommand(new E(this)), e.slashCommands.provideSlashCommand(new ApproveReceiptCommand(this)), e.slashCommands.provideSlashCommand(new ReceiptControlCommand(this)), e.slashCommands.provideSlashCommand(new ScheduleCommand(this)), e.slashCommands.provideSlashCommand(new MasterChatCommand(this)), e.slashCommands.provideSlashCommand(new LatenessCommand(this, "штраф")), e.slashCommands.provideSlashCommand(new ReceiptReplayCommand(this)), e.api.provideApi({
       visibility: A.ApiVisibility.PUBLIC,
       security: A.ApiSecurity.UNSECURE,
       endpoints: [new S(this), new ReportFormEndpoint(this), new ReportFormScriptEndpoint(this)]
@@ -11390,25 +11332,78 @@ var C = class extends j.App {
     }
     await notify(`✅ ЧЕК ПРИНЯТ ВРУЧНУЮ\nМастер: @${targetUsername}\nСумма: ${this.formatRubles(targetAmount)}\nДата: ${displayDateText}\nБыла причина отказа: ${originalReason || "—"}\nПринял: @${currentUsername}`);
   }
+  async privateReceiptControlActorAllowed(e, actor) {
+    if (!e || !actor || !actor.id) return false;
+    for (const username of ["teimur", "shura"]) {
+      try {
+        const allowedUser = await e.getUserReader().getByUsername(username);
+        if (allowedUser && String(allowedUser.id || "") === String(actor.id || "")) return true;
+      } catch (_2) {
+      }
+    }
+    return false;
+  }
+  async handleReceiptControlCommand(e, n, room, actor) {
+    if (!e || !n || !room || !actor) return;
+    const allowed = await this.privateReceiptControlActorAllowed(e, actor);
+    const appUser = await e.getUserReader().getByUsername("tars") || await e.getUserReader().getAppUser();
+    if (!appUser) return;
+    const notify = async (text, entryToken, actionLabel = "ЗАЧЕСТЬ ЧЕК") => {
+      const notifier = n.getNotifier(), builder = notifier.getMessageBuilder().setSender(appUser).setRoom(room).setText(text);
+      if (entryToken) {
+        const blocks = n.getCreator().getBlockBuilder();
+        blocks.addActionsBlock({ elements: [blocks.newButtonElement({
+          actionId: K,
+          text: blocks.newPlainTextObject(actionLabel),
+          value: entryToken
+        })] });
+        builder.setBlocks(blocks);
+      }
+      await notifier.notifyUser(actor, builder.getMessage());
+    };
+    if (!allowed) {
+      await notify("🚫 Контроль чеков доступен только Теймуру и Шуре.");
+      return;
+    }
+    if (!G.isPersonalTarsRoom(room)) {
+      await notify("⚠️ Команда /receipt-control доступна только в личном чате мастера.");
+      return;
+    }
+    const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
+    const entries = (index.photos || []).filter((entry) => entry && (entry.source === "rejected" || entry.source === "confirmed" && entry.receiptCaseStatusPending === true) && String(entry.roomId || "") === String(room.id || "")).sort((left, right) => Number(right.uploadedAt || 0) - Number(left.uploadedAt || 0)).slice(0, 20);
+    let shown = 0;
+    for (const entry of entries) {
+      const entryToken = G.receiptPrivateControlEntryTokenV1(entry);
+      if (!entryToken) continue;
+      const amount = Number(entry.receiptAmount), amountText = Number.isFinite(amount) && amount > 0 ? `\nСумма: ${this.formatRubles(amount)}` : "\nСумма: не распознана", dateText = /^\d{4}-\d{2}-\d{2}$/.test(String(entry.receiptDate || "")) ? `\nДата: ${entry.receiptDate}` : "\nДата: не распознана", statusRepair = entry.source === "confirmed" && entry.receiptCaseStatusPending === true, reason = String(entry.invalidReason || "чек требует проверки");
+      await notify(statusRepair ? `⚠️ СТАТУС ПРИНЯТОГО ЧЕКА ТРЕБУЕТ СИНХРОНИЗАЦИИ\nМастер: @${entry.username || "мастер"}${dateText}${amountText}` : `👁️ ЧЕК НА КОНТРОЛЬ\nМастер: @${entry.username || "мастер"}\nПричина: ${reason}${dateText}${amountText}`, entryToken, statusRepair ? "ОБНОВИТЬ СТАТУС" : "ЗАЧЕСТЬ ЧЕК");
+      shown += 1;
+    }
+    if (!shown) await notify("✅ В этом чате нет чеков, ожидающих ручной проверки.");
+  }
   async handleApproveReceiptButton(e, n, t, a) {
     if (!e || !n || !t || !a || !a.user || !a.room) return;
-    const config = await this.receiptOcrConfig(e);
-    const currentUsername = String(a.user.username || "").toLowerCase();
-    const allowed = ["teimur", "shura", config.ownerUsername, config.adminUsername].map((value) => String(value || "").replace(/^@/, "").toLowerCase()).filter(Boolean);
+    const allowed = await this.privateReceiptControlActorAllowed(e, a.user);
     const appUser = await e.getUserReader().getByUsername("tars") || await e.getUserReader().getAppUser();
     if (!appUser) return;
     const notify = async (text) => {
       const notifier = n.getNotifier(), message = notifier.getMessageBuilder().setSender(appUser).setRoom(a.room).setText(text).getMessage();
       await notifier.notifyUser(a.user, message);
     };
-    const roomSlug = String(a.room.slugifiedName || a.room.name || "").toLowerCase();
-    if (roomSlug !== "cheki-kontrol" || allowed.indexOf(currentUsername) === -1) {
-      await notify("🚫 Зачесть чек могут только Теймур и Шура в чате cheki-kontrol.");
+    if (!allowed) {
+      await notify("🚫 Зачесть чек могут только Теймур и Шура.");
       return;
     }
-    const exact = String(a.value || "");
+    const value = String(a.value || "");
+    const privateAction = /^rce_[a-f0-9]{32}$/.test(value);
+    const roomSlug = String(a.room.slugifiedName || a.room.name || "").toLowerCase();
+    const personalRoom = G.isPersonalTarsRoom(a.room);
+    if (privateAction ? !personalRoom : roomSlug !== "cheki-kontrol") {
+      await notify("⚠️ Это действие недоступно в данном чате.");
+      return;
+    }
     const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
-    const entry = (index.photos || []).find((candidate) => candidate && candidate.source === "rejected" && String(candidate.exact || "") === exact);
+    const entry = (index.photos || []).find((candidate) => candidate && (candidate.source === "rejected" || privateAction && candidate.source === "confirmed" && candidate.receiptCaseStatusPending === true) && (privateAction ? String(candidate.roomId || "") === String(a.room.id || "") && G.receiptPrivateControlEntryTokenV1(candidate) === value : String(candidate.exact || "") === value));
     if (!entry) {
       await notify("ℹ️ Этот чек уже зачтён или больше не ожидает проверки.");
       return;
@@ -11419,6 +11414,47 @@ var C = class extends j.App {
       await notify("⚠️ Чек нельзя зачесть одной кнопкой: сумма или дата не распознана. Используйте /prinyat @логин сумма ДД.ММ.ГГГГ.");
       return;
     }
+    const syncAcceptedReceiptCaseStatus = async (targetRoom) => {
+      if (!targetRoom) return false;
+      try {
+        const receiptCase = await G.findReceiptCaseForInputV1({
+          sourceMessageId: entry.messageId,
+          sourceUploadId: entry.uploadId,
+          masterId: entry.userId
+        }, e);
+        if (!receiptCase) return false;
+        const acceptedCase = await G.manualTransitionReceiptCaseV1(receiptCase.caseId, {
+          normalizedAmount: amount,
+          normalizedDate: targetDate
+        }, e, t, {}, this.getLogger());
+        if (!acceptedCase || acceptedCase.state !== "ACCEPTED") return false;
+        const statusManager = G.createReceiptProcessingStatusManager({
+          id: entry.messageId || "",
+          room: targetRoom,
+          sender: { id: entry.userId || "" }
+        }, e, t, n, this.getLogger(), true);
+        return Boolean(await statusManager.syncCase(acceptedCase));
+      } catch (error) {
+        this.getLogger().warn(`Could not update ReceiptCase status after manual approval: ${error && error.message || error}`);
+        return false;
+      }
+    };
+    const clearStatusRepairMarker = async () => {
+      delete entry.receiptCaseStatusPending;
+      entry.postProcessedAt = Date.now();
+      try {
+        await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+      } catch (error) {
+        entry.receiptCaseStatusPending = true;
+        this.getLogger().warn(`Could not clear ReceiptCase status repair marker: ${error && error.message || error}`);
+      }
+    };
+    if (privateAction && entry.source === "confirmed") {
+      const synchronized = await syncAcceptedReceiptCaseStatus(a.room);
+      if (synchronized) await clearStatusRepairMarker();
+      await notify(synchronized ? "✅ Статус принятого чека обновлён." : "⚠️ Чек уже зачтён, но статус пока не обновлён. Повторите /receipt-control.");
+      return;
+    }
     const originalReason = entry.invalidReason || "";
     entry.source = "confirmed";
     entry.invalidReason = "";
@@ -11426,11 +11462,14 @@ var C = class extends j.App {
     entry.approvedBy = a.user.username || a.user.name || a.user.id || "";
     entry.approvedAt = Date.now();
     entry.validationVersion = 11;
+    if (privateAction) entry.receiptCaseStatusPending = true;
     await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+    const config = await this.receiptOcrConfig(e);
     G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, amount, targetDate, e, t, config);
+    let masterRoom = privateAction ? a.room : void 0;
     if (entry.roomId) {
       try {
-        const masterRoom = await e.getRoomReader().getById(entry.roomId);
+        if (!masterRoom) masterRoom = await e.getRoomReader().getById(entry.roomId);
         if (masterRoom) {
           await G.publishMasterTransferSummary({
             userId: entry.userId || "",
@@ -11449,7 +11488,14 @@ var C = class extends j.App {
         this.getLogger().warn(`Could not refresh master transfer summary after receipt button approval: ${error && error.message || error}`);
       }
     }
+    const statusSynchronized = await syncAcceptedReceiptCaseStatus(masterRoom);
+    if (privateAction && statusSynchronized) await clearStatusRepairMarker();
     const displayDateText = targetDate.split("-").reverse().join(".");
+    if (privateAction) {
+      await notify(`✅ ЧЕК ЗАЧТЁН\nМастер: @${entry.username || "мастер"}\nСумма: ${this.formatRubles(amount)}\nДата: ${displayDateText}\nПринял: @${String(a.user.username || "")}`);
+      return;
+    }
+    const currentUsername = String(a.user.username || "").toLowerCase();
     const builder = n.getCreator().startMessage().setSender(appUser).setRoom(a.room).setText(`✅ ЧЕК ЗАЧТЁН\nМастер: @${entry.username || "мастер"}\nСумма: ${this.formatRubles(amount)}\nДата: ${displayDateText}\nПринял: @${currentUsername}`);
     await n.getCreator().finish(builder);
   }
@@ -14863,6 +14909,14 @@ var ApproveReceiptCommand = class {
   }
   async executor(e, n, t, s, r) {
     await this.app.handleApproveReceiptCommand(n, t, r, e.getRoom(), e.getSender(), e.getArguments());
+  }
+};
+var ReceiptControlCommand = class {
+  constructor(e) {
+    this.app = e, this.command = "receipt-control", this.i18nParamsExample = "receipt_control_command_params", this.i18nDescription = "receipt_control_command_description", this.providesPreview = false;
+  }
+  async executor(e, n, t) {
+    await this.app.handleReceiptControlCommand(n, t, e.getRoom(), e.getSender());
   }
 };
 var ScheduleCommand = class {
