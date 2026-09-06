@@ -86,6 +86,14 @@ const primaryWorkPhoto = {
   bank: null
 };
 
+const yandexPrimaryWorkPhoto = Object.fromEntries(
+  Object.entries(primaryWorkPhoto).filter(([key]) => !["date", "amount", "amount_text", "amount_label", "status", "bank"].includes(key))
+);
+
+function yandexPrimary(overrides) {
+  return { ...yandexPrimaryWorkPhoto, ...overrides };
+}
+
 const dedicatedWorkPhoto = {
   is_work_photo: true,
   is_document_or_screen: false,
@@ -134,6 +142,12 @@ async function run() {
   assert.strictEqual(incompleteYandex.id, "openai", "incomplete Yandex settings must preserve the OpenAI fallback");
   assert.strictEqual(api.normalizedYandexAiStudioModel("bad/model"), "qwen3.6-35b-a3b");
 
+  assert.strictEqual(typeof api.primaryImageVisionProviderForConfig, "function", "primary classification must have its own provider selector");
+  const primaryProvider = api.primaryImageVisionProviderForConfig(yandexConfig);
+  assert.strictEqual(primaryProvider.id, "yandex_ai_studio", "Yandex must replace OpenAI as production primary classification provider");
+  assert.strictEqual(primaryProvider.url, YANDEX_URL);
+  assert.strictEqual(primaryProvider.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
+
   const calls = [];
   const http = {
     post: async (url, request) => {
@@ -142,7 +156,7 @@ async function run() {
         return responseFor(imageClassification);
       }
       if (request.data.text && request.data.text.format && request.data.text.format.name === "tars_primary_image_vision_v1") {
-        return responseFor(primaryWorkPhoto);
+        return responseFor(yandexPrimaryWorkPhoto);
       }
       const prompt = request.data.input[0].content.find((part) => part.type === "input_text").text;
       return responseFor(prompt.includes("is_work_photo") ? dedicatedWorkPhoto : receipt);
@@ -166,6 +180,132 @@ async function run() {
   );
   assert.strictEqual(primary.kind, "work_photo");
   assert.strictEqual(primary.confidence, "high");
+
+  const primaryCall = calls.find((call) => call.request.data.text && call.request.data.text.format && call.request.data.text.format.name === "tars_primary_image_vision_v1");
+  assert(primaryCall, "primary Yandex request must be observable");
+  assert.strictEqual(primaryCall.url, YANDEX_URL);
+  assert.strictEqual(primaryCall.request.headers.Authorization, "Api-Key yandex-test-secret");
+  assert.strictEqual(primaryCall.request.data.model, `gpt://${folderId}/qwen3.6-35b-a3b/latest`);
+  assert.strictEqual(primaryCall.request.data.store, false);
+  assert.strictEqual(primaryCall.request.data.text.format.strict, true);
+  assert.strictEqual(primaryCall.request.data.text.format.schema.additionalProperties, false);
+  for (const forbidden of ["date", "amount", "amount_text", "amount_label", "status", "bank"]) {
+    assert(!primaryCall.request.data.text.format.schema.required.includes(forbidden), `primary classification must not request financial field ${forbidden}`);
+    assert(!Object.prototype.hasOwnProperty.call(primaryCall.request.data.text.format.schema.properties, forbidden), `primary classification schema must omit ${forbidden}`);
+  }
+  const primaryImage = primaryCall.request.data.input[0].content.find((part) => part.type === "input_image");
+  assert(primaryImage && primaryImage.image_url.startsWith("data:image/png;base64,"));
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(primaryImage, "detail"), false, "Yandex primary image input must use its compatible shape");
+
+  const regionRegressionCalls = [];
+  const regionRegression = await api.primaryVisionDecisionForImage(
+    { id: "region-regression", name: "region.png", type: "image/png" },
+    Buffer.from([34, 35, 36]),
+    { post: async (url, request) => {
+      regionRegressionCalls.push(url);
+      if (/openai\.com/.test(url)) {
+        return { statusCode: 403, data: { error: { type: "request_forbidden", code: "unsupported_country_region_territory" } } };
+      }
+      return responseFor(yandexPrimaryWorkPhoto);
+    } },
+    yandexConfig
+  );
+  assert.strictEqual(regionRegression.kind, "work_photo");
+  assert.deepStrictEqual(regionRegressionCalls, [YANDEX_URL], "known OpenAI region failure must be avoided when Yandex primary is configured");
+
+  const openAiRegionDiagnostic = {};
+  const openAiRegionCalls = [];
+  await assert.rejects(() => api.primaryVisionDecisionForImage(
+    { id: "openai-region-proof", name: "region-proof.png", type: "image/png" },
+    Buffer.from([37, 38, 39]),
+    { post: async (url) => {
+      openAiRegionCalls.push(url);
+      return { statusCode: 403, data: { error: { type: "request_forbidden", code: "unsupported_country_region_territory" } } };
+    } },
+    { openaiApiKey: "openai-test-secret" },
+    undefined,
+    openAiRegionDiagnostic
+  ), /HTTP 403/);
+  assert.deepStrictEqual(openAiRegionCalls, ["https://api.openai.com/v1/responses"]);
+  assert.strictEqual(openAiRegionDiagnostic.primary_provider, "openai");
+  assert.strictEqual(openAiRegionDiagnostic.primary_error_class, "provider_4xx");
+  assert.strictEqual(openAiRegionDiagnostic.primary_reason_code, "PRIMARY_OPENAI_REGION_UNAVAILABLE");
+
+  const routeCases = [
+    ["receipt", yandexPrimary({ kind: "receipt", service_kind: "none", has_payment_ui: true, has_receipt_layout: true, has_financial_document: true, has_document_layout: true, has_visible_client: false, has_visible_service_result: false, has_visible_hair_result: false, has_salon_context: false, is_receipt: true, is_banking: true, is_document: true, has_receipt_text: true, visual_type: "bank_receipt", service_type: "unknown" }), "receipt"],
+    ["mailing", yandexPrimary({ kind: "mailing", service_kind: "none", has_visible_client: false, has_visible_service_result: false, has_visible_hair_result: false, has_salon_context: false, has_messaging_ui: true, is_mailing_proof: true, is_screenshot_of_chat: true, visual_type: "mailing_proof_screenshot", service_type: "unknown" }), "mailing"],
+    ["unknown", yandexPrimary({ kind: "unknown", confidence: "low", service_kind: "none", has_visible_client: false, has_visible_service_result: false, has_visible_hair_result: false, has_salon_context: false, visual_type: "unknown", service_type: "unknown" }), ""]
+  ];
+  for (let index = 0; index < routeCases.length; index += 1) {
+    const [name, payload, expectedRoute] = routeCases[index];
+    const decision = await api.primaryVisionDecisionForImage(
+      { id: `route-${name}`, name: `${name}.png`, type: "image/png" },
+      Buffer.from([101 + index, 111 + index, 121 + index]),
+      { post: async () => responseFor(payload) },
+      yandexConfig
+    );
+    assert.strictEqual(api.primaryVisionDominantKind(decision), expectedRoute, `${name} routing must preserve the existing decision contract`);
+  }
+
+  const invalidCalls = [];
+  const invalidDiagnostic = {};
+  await assert.rejects(() => api.primaryVisionDecisionForImage(
+    { id: "invalid-primary", name: "invalid.png", type: "image/png" },
+    Buffer.from([131, 132, 133]),
+    { post: async (url) => {
+      invalidCalls.push(url);
+      return responseFor({ ...yandexPrimaryWorkPhoto, amount: 1300 });
+    } },
+    yandexConfig,
+    undefined,
+    invalidDiagnostic
+  ), /invalid response/);
+  assert.deepStrictEqual(invalidCalls, [YANDEX_URL], "schema failure must not invoke OpenAI or retry a full Vision request");
+  assert.strictEqual(invalidDiagnostic.primary_provider, "yandex_ai_studio");
+  assert.strictEqual(invalidDiagnostic.primary_error_class, "parse");
+  assert.strictEqual(invalidDiagnostic.primary_reason_code, "PRIMARY_PROVIDER_INVALID_RESPONSE");
+
+  const retryCases = [
+    ["429", () => ({ statusCode: 429, data: {} })],
+    ["5xx", () => ({ statusCode: 503, data: {} })],
+    ["timeout", () => { throw new Error("request timed out"); }]
+  ];
+  for (let index = 0; index < retryCases.length; index += 1) {
+    const [name, firstResponse] = retryCases[index];
+    const urls = [];
+    const diagnostic = {};
+    const decision = await api.primaryVisionDecisionForImage(
+      { id: `retry-${name}`, name: `${name}.png`, type: "image/png" },
+      Buffer.from([141 + index, 151 + index, 161 + index]),
+      { post: async (url) => {
+        urls.push(url);
+        return urls.length === 1 ? firstResponse() : responseFor(yandexPrimaryWorkPhoto);
+      } },
+      yandexConfig,
+      undefined,
+      diagnostic
+    );
+    assert.strictEqual(decision.kind, "work_photo");
+    assert.deepStrictEqual(urls, [YANDEX_URL, YANDEX_URL], `${name} must retry Yandex once and never invoke OpenAI`);
+    assert.strictEqual(diagnostic.primary_attempt, 2);
+  }
+
+  const deniedCalls = [];
+  const deniedDiagnostic = {};
+  await assert.rejects(() => api.primaryVisionDecisionForImage(
+    { id: "denied-primary", name: "denied.png", type: "image/png" },
+    Buffer.from([171, 172, 173]),
+    { post: async (url) => {
+      deniedCalls.push(url);
+      return { statusCode: 403, data: { error: { type: "permission_denied", code: "permission_denied" } } };
+    } },
+    yandexConfig,
+    undefined,
+    deniedDiagnostic
+  ), /HTTP 403/);
+  assert.deepStrictEqual(deniedCalls, [YANDEX_URL], "Yandex 4xx must fail open without retrying or invoking OpenAI");
+  assert.strictEqual(deniedDiagnostic.primary_error_class, "provider_4xx");
+  assert.strictEqual(deniedDiagnostic.primary_reason_code, "PRIMARY_PROVIDER_4XX");
 
   const dedicated = await api.requestOpenAiWorkPhotoCheck(
     { name: "dedicated.png", type: "image/png" },
@@ -195,7 +335,7 @@ async function run() {
   assert(receiptCall.request.data.text.format.schema.required.includes("date"));
 
   assert.strictEqual(calls.length, 4, "each isolated Vision path must make one provider call");
-  for (const call of calls.slice(0, 3)) {
+  for (const call of calls.filter((call) => call !== primaryCall && call !== receiptCall)) {
     assert.strictEqual(call.url, "https://api.openai.com/v1/responses", "non-receipt Vision must preserve the base OpenAI provider");
     assert.strictEqual(call.request.headers.Authorization, "Bearer openai-test-secret");
     const image = call.request.data.input[0].content.find((part) => part.type === "input_image");
@@ -337,8 +477,6 @@ async function run() {
     ["async function requestOpenAiWorkPhotoCheckUncached", "const workPhotoCheckCache"],
     ["async function shouldForwardConfirmedWorkPhoto", "async function detectPersonalMailingProof"],
     ["async function isBlockedPersonalPhotoImage", "const personalImageKindCache"],
-    ["async function requestPrimaryImageTypeVision", "async function primaryVisionDecisionForImage"],
-    ["async function primaryVisionDecisionForImage", "function logReceiptStage"],
     ["async function personalImageKindForPreUploadUncached", "async function personalImageKindForPreUpload"],
     ["async function personalImageKindForPreUpload", "async function primaryVisionDecisionForPersonalMessage"],
   ];
@@ -351,6 +489,9 @@ async function run() {
     assert(!section.includes("yandexAiStudioApiKey"), `${startMarker} must not read Yandex AI Studio credentials`);
     assert(!section.includes("YANDEX_AI_STUDIO_RESPONSES_URL"), `${startMarker} must not call Yandex AI Studio`);
   }
+  const primaryProviderSource = sourceSection("async function requestPrimaryImageTypeVision", "function logReceiptStage");
+  assert(primaryProviderSource.includes("primaryImageVisionProviderForConfig"), "primary classification must use its dedicated provider selector");
+  assert(!primaryProviderSource.includes("receiptVisionProviderForConfig"), "primary classification must not reuse receipt provider routing");
   const receiptCheckSource = sourceSection("async function requestOpenAiReceiptCheck", "function normalizedDate");
   assert.match(receiptCheckSource, /receiptProviderAllowed = diagnosticRole === "receipt" \|\| diagnosticRole === "receipt_dispute"/, "Yandex selection must be explicitly receipt-scoped");
   assert.match(receiptCheckSource, /receiptProviderAllowed \? receiptVisionProviderForConfig\(config, openAiModel\) : openAiVisionProviderForConfig\(config, openAiModel\)/, "non-receipt callers must retain OpenAI-only provider selection");
