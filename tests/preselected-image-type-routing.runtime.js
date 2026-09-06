@@ -27,8 +27,19 @@ function workPhotoPayload() {
     has_document_layout: false,
     has_visible_client: true,
     has_visible_service_result: true,
+    has_visible_hair_result: true,
+    has_visible_nail_result: false,
+    has_visible_brow_lash_result: false,
+    has_salon_context: true,
+    has_messaging_ui: false,
     is_receipt: false,
+    is_banking: false,
+    is_document: false,
+    has_receipt_text: false,
+    is_mailing_proof: false,
+    is_screenshot_of_chat: false,
     visual_type: "hair_work_photo",
+    service_type: "haircut",
     date: null,
     amount: null,
     status: "unknown",
@@ -44,6 +55,7 @@ function safeUnknownPhotoPayload() {
     service_kind: "none",
     has_visible_client: false,
     has_visible_service_result: false,
+    has_visible_hair_result: false,
     visual_type: "unknown"
   };
 }
@@ -58,8 +70,25 @@ function financialPayload() {
     has_receipt_layout: true,
     has_visible_client: false,
     has_visible_service_result: false,
+    has_visible_hair_result: false,
+    has_salon_context: false,
     is_receipt: true,
+    is_banking: true,
+    is_document: true,
+    has_receipt_text: true,
     visual_type: "bank_app_screen"
+  };
+}
+
+function mailingPayload() {
+  return {
+    ...safeUnknownPhotoPayload(),
+    kind: "mailing",
+    confidence: "high",
+    has_messaging_ui: true,
+    is_mailing_proof: true,
+    is_screenshot_of_chat: true,
+    visual_type: "mailing_proof_screenshot"
   };
 }
 
@@ -74,6 +103,7 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
   const message = { id: "photo-message", room, sender: { id: "master-user", username: "master" }, file, files: [file], text: "" };
   const records = new Map();
   const sent = [];
+  const logs = [];
   const providerCalls = [];
   const read = {
     getPersistenceReader() { return { async readByAssociation(association) { return records.get(String(association && association.key || "")) || []; } }; },
@@ -119,6 +149,12 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
   const modify = { getCreator() { return creator; }, getDeleter() { return { async deleteMessage() {} }; } };
   const http = {
     async post(url, options) {
+      if (/ai\.api\.cloud\.yandex\.net\/v1\/responses/.test(String(url))) {
+        providerCalls.push("yandex_primary");
+        if (runtimeOptions.yandexPrimaryStatus) return { statusCode: runtimeOptions.yandexPrimaryStatus, data: {} };
+        const classificationOnly = Object.fromEntries(Object.entries(primaryPayload).filter(([key]) => !["date", "amount", "status", "bank"].includes(key)));
+        return { statusCode: 200, data: { output: [{ content: [{ type: "output_text", text: JSON.stringify(classificationOnly) }] }] } };
+      }
       if (/openai\.com/.test(String(url))) {
         const prompt = String(options && options.data && options.data.input && options.data.input[0] && options.data.input[0].content && options.data.input[0].content[0] && options.data.input[0].content[0].text || "");
         providerCalls.push(prompt.includes("Определи только основной тип изображения") ? "image_type_v3" : "unexpected_openai");
@@ -138,10 +174,13 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
       };
     }
   };
-  app.getLogger = () => ({ info() {}, warn() {}, error() {} });
+  app.getLogger = () => ({ info(message) { logs.push(String(message)); }, warn(message) { logs.push(String(message)); }, error(message) { logs.push(String(message)); } });
   app.receiptOcrConfig = async () => ({
     apiKey: "test-yandex",
     folderId: "test-folder",
+    yandexAiStudioApiKey: runtimeOptions.yandexPrimary ? "test-yandex-ai-studio" : "",
+    yandexAiStudioFolderId: runtimeOptions.yandexPrimary ? "test-folder" : "",
+    yandexAiStudioModel: "qwen3.6-35b-a3b",
     openaiApiKey: "test",
     openaiReceiptModel: "gpt-4.1-mini",
     timeZone: "Europe/Samara",
@@ -161,7 +200,7 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
   app.isReportRequestText = () => false;
   app.refreshPersonalReportButton = async () => false;
   app.refreshPreliminaryReportAnalysis = async () => false;
-  return { app, http, message, modify, persistence, providerCalls, read, records, reportRoom, sent };
+  return { app, http, logs, message, modify, persistence, providerCalls, read, records, reportRoom, sent };
 }
 
 async function execute(state) {
@@ -204,6 +243,44 @@ async function execute(state) {
   assert.deepStrictEqual(financial.providerCalls, ["image_type_v3"], "financial veto must use only the primary Vision decision");
   assert.ok(!financial.sent.some((message) => message.room === financial.reportRoom), "positive financial evidence must block the photo route");
   assert.ok(financial.sent.some((message) => /Фото работы не принято/.test(String(message.text || ""))), "financial veto must retain the existing safe rejection UX");
+
+  const yandexPhoto = runtime(workPhotoPayload(), { yandexPrimary: true });
+  await execute(yandexPhoto);
+  assert.deepStrictEqual(yandexPhoto.providerCalls, ["yandex_primary"], "Yandex primary must preserve work-photo routing without OpenAI or OCR");
+  assert.ok(yandexPhoto.sent.some((message) => message.room === yandexPhoto.reportRoom));
+  assert.deepStrictEqual(yandexPhoto.sent.map((message) => message.text), state.sent.map((message) => message.text), "Yandex primary must not add publisher side effects to the work-photo path");
+  assert.deepStrictEqual([...yandexPhoto.records.keys()].sort(), [...state.records.keys()].sort(), "Yandex primary must not add persistence side effects to the work-photo path");
+
+  const yandexFinancial = runtime(financialPayload(), { yandexPrimary: true });
+  await execute(yandexFinancial);
+  assert.deepStrictEqual(yandexFinancial.providerCalls, ["yandex_primary"], "Yandex primary must preserve the financial safety veto");
+  assert.ok(!yandexFinancial.sent.some((message) => message.room === yandexFinancial.reportRoom));
+  assert.deepStrictEqual(yandexFinancial.sent.map((message) => message.text), financial.sent.map((message) => message.text), "Yandex financial veto must preserve publisher behavior");
+
+  const yandexUnknown = runtime(safeUnknownPhotoPayload(), { yandexPrimary: true });
+  await execute(yandexUnknown);
+  assert.deepStrictEqual(yandexUnknown.providerCalls, ["yandex_primary"], "Yandex UNKNOWN must preserve the existing explicit-photo safe path");
+  assert.ok(yandexUnknown.sent.some((message) => message.room === yandexUnknown.reportRoom));
+
+  const openAiMailing = runtime(mailingPayload(), { intent: "mailing" });
+  await execute(openAiMailing);
+  const yandexMailing = runtime(mailingPayload(), { yandexPrimary: true, intent: "mailing" });
+  await execute(yandexMailing);
+  assert.deepStrictEqual(yandexMailing.providerCalls, ["yandex_primary"], "Yandex primary must preserve mailing routing without OCR or OpenAI");
+  assert.ok(yandexMailing.sent.some((message) => message.text === "✅ РАССЫЛКИ ПРИНЯТЫ"));
+  assert.deepStrictEqual(yandexMailing.sent.map((message) => message.text), openAiMailing.sent.map((message) => message.text), "Yandex primary must preserve mailing publishers");
+  assert.deepStrictEqual([...yandexMailing.records.keys()].sort(), [...openAiMailing.records.keys()].sort(), "Yandex primary must preserve mailing persistence keys");
+
+  const yandexUnavailable = runtime(safeUnknownPhotoPayload(), { yandexPrimary: true, yandexPrimaryStatus: 403 });
+  await execute(yandexUnavailable);
+  assert.deepStrictEqual(yandexUnavailable.providerCalls, ["yandex_primary", "yandex", "yandex"], "Yandex primary 4xx must fail open to the unchanged bounded OCR safety guard");
+  const failedTrace = yandexUnavailable.logs.find((line) => line.includes("TARS_TRACE_V1") && line.includes('"stage":"primary_classification"') && line.includes('"outcome":"failed"'));
+  assert(failedTrace, "primary provider failure must emit structured trace telemetry");
+  assert(failedTrace.includes('"provider":"yandex_ai_studio"'));
+  assert(failedTrace.includes('"error_class":"provider_4xx"'));
+  assert(failedTrace.includes('"reason_code":"PRIMARY_PROVIDER_4XX"'));
+  assert(failedTrace.includes('"attempt":1'));
+  assert(!failedTrace.includes("test-yandex-ai-studio"), "trace must not expose provider credentials");
 
   const openAiUnavailable = runtime(safeUnknownPhotoPayload(), { openaiStatus: 403 });
   await execute(openAiUnavailable);

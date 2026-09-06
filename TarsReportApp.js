@@ -1153,7 +1153,9 @@ var require_upload_duplicate_guard = __commonJS({
       "INTENT_MISSING_OR_AMBIGUOUS", "INTENT_SELECTED", "LOCAL_DUPLICATE_EVENT",
       "MEDIA_ALREADY_SETTLED", "MEDIA_RESOLVED", "MEDIA_UNSETTLED", "NO_IMAGE", "NO_MEDIA_SIGNAL",
       "PERSONAL_MEDIA_HANDLED", "PERSONAL_MEDIA_STARTED", "PERSONAL_MEDIA_UNCLASSIFIED", "POST_MESSAGE_FINISHED",
-      "PRIMARY_CLASSIFICATION_FAILED", "PRIMARY_CLASSIFIED", "PRIMARY_EMPTY",
+      "PRIMARY_CLASSIFICATION_FAILED", "PRIMARY_CLASSIFIED", "PRIMARY_EMPTY", "PRIMARY_OPENAI_REGION_UNAVAILABLE",
+      "PRIMARY_PROVIDER_4XX", "PRIMARY_PROVIDER_5XX", "PRIMARY_PROVIDER_INVALID_RESPONSE",
+      "PRIMARY_PROVIDER_RATE_LIMIT", "PRIMARY_PROVIDER_TIMEOUT", "PRIMARY_PROVIDER_UNAVAILABLE",
       "RECEIPT_CASE_ACCEPTED", "RECEIPT_CASE_CONTROL", "RECEIPT_CASE_DUPLICATE", "RECEIPT_CASE_FAILED",
       "RECEIPT_CASE_PERSISTENCE_FAILED", "RECEIPT_CASE_PROCESSING", "RECEIPT_CASE_RECEIVED",
       "RECEIPT_STATUS_CREATED", "RECEIPT_STATUS_UPDATED", "RECEIPT_STATUS_UPDATE_FAILED",
@@ -2853,7 +2855,7 @@ var require_upload_duplicate_guard = __commonJS({
       const model = String(value || YANDEX_AI_STUDIO_DEFAULT_MODEL).trim().replace(/^gpt:\/\/[^/]+\//, "").replace(/\/latest$/, "");
       return /^[A-Za-z0-9._-]{1,120}$/.test(model) ? model : YANDEX_AI_STUDIO_DEFAULT_MODEL;
     }
-    function receiptVisionProviderForConfig(config, openAiModel) {
+    function yandexAiStudioVisionProviderForConfig(config) {
       if (!config) return void 0;
       const yandexKey = String(config.yandexAiStudioApiKey || "").trim();
       const folderId = String(config.yandexAiStudioFolderId || "").trim();
@@ -2867,15 +2869,7 @@ var require_upload_duplicate_guard = __commonJS({
           includeImageDetail: false
         };
       }
-      const openAiKey = String(config.openaiApiKey || "").trim();
-      if (!openAiKey) return void 0;
-      return {
-        id: "openai",
-        url: "https://api.openai.com/v1/responses",
-        model: String(openAiModel || config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
-        headers: { Authorization: "Bearer " + openAiKey, "Content-Type": "application/json" },
-        includeImageDetail: true
-      };
+      return void 0;
     }
     function openAiVisionProviderForConfig(config, openAiModel) {
       if (!config) return void 0;
@@ -2889,6 +2883,12 @@ var require_upload_duplicate_guard = __commonJS({
         includeImageDetail: true
       };
     }
+    function receiptVisionProviderForConfig(config, openAiModel) {
+      return yandexAiStudioVisionProviderForConfig(config) || openAiVisionProviderForConfig(config, openAiModel);
+    }
+    function primaryImageVisionProviderForConfig(config) {
+      return yandexAiStudioVisionProviderForConfig(config) || openAiVisionProviderForConfig(config, PRIMARY_IMAGE_VISION_MODEL);
+    }
     function receiptVisionProviderConfigured(config) {
       return Boolean(receiptVisionProviderForConfig(config));
     }
@@ -2900,7 +2900,7 @@ var require_upload_duplicate_guard = __commonJS({
       if (provider && provider.includeImageDetail) return { type: "input_image", image_url: imageUrl, detail: "high" };
       return { type: "input_image", image_url: imageUrl };
     }
-    const PRIMARY_IMAGE_VISION_SCHEMA = {
+    const OPENAI_PRIMARY_IMAGE_VISION_SCHEMA = {
       type: "object",
       additionalProperties: false,
       required: [
@@ -2949,6 +2949,42 @@ var require_upload_duplicate_guard = __commonJS({
         amount_label: { anyOf: [{ type: "string" }, { type: "null" }] },
         status: { type: "string", enum: ["success", "failed", "pending", "unknown"] },
         bank: { anyOf: [{ type: "string" }, { type: "null" }] }
+      }
+    };
+    const PRIMARY_IMAGE_VISION_SCHEMA = {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "kind", "confidence", "service_kind", "has_payment_ui", "has_receipt_layout",
+        "has_financial_document", "has_document_layout", "has_visible_client",
+        "has_visible_service_result", "has_visible_hair_result", "has_visible_nail_result",
+        "has_visible_brow_lash_result", "has_salon_context", "has_messaging_ui",
+        "is_receipt", "is_banking", "is_document", "has_receipt_text",
+        "is_mailing_proof", "is_screenshot_of_chat", "visual_type", "service_type"
+      ],
+      properties: {
+        kind: { type: "string", enum: ["receipt", "work_photo", "mailing", "unknown"] },
+        confidence: { type: "string", enum: ["high", "medium", "low"] },
+        service_kind: { type: "string", enum: ["hair", "nails", "pedicure", "brows_lashes", "other", "none"] },
+        has_payment_ui: { type: "boolean" },
+        has_receipt_layout: { type: "boolean" },
+        has_financial_document: { type: "boolean" },
+        has_document_layout: { type: "boolean" },
+        has_visible_client: { type: "boolean" },
+        has_visible_service_result: { type: "boolean" },
+        has_visible_hair_result: { type: "boolean" },
+        has_visible_nail_result: { type: "boolean" },
+        has_visible_brow_lash_result: { type: "boolean" },
+        has_salon_context: { type: "boolean" },
+        has_messaging_ui: { type: "boolean" },
+        is_receipt: { type: "boolean" },
+        is_banking: { type: "boolean" },
+        is_document: { type: "boolean" },
+        has_receipt_text: { type: "boolean" },
+        is_mailing_proof: { type: "boolean" },
+        is_screenshot_of_chat: { type: "boolean" },
+        visual_type: OPENAI_PRIMARY_IMAGE_VISION_SCHEMA.properties.visual_type,
+        service_type: OPENAI_PRIMARY_IMAGE_VISION_SCHEMA.properties.service_type
       }
     };
     const RECEIPT_VISION_SCHEMA = {
@@ -4810,7 +4846,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (prefix && key.indexOf(prefix) !== 0) continue;
         if (Object.prototype.hasOwnProperty.call(source, key)) target[key] = source[key];
       }
-      const telemetryKeys = section === "primary" ? ["primary_transport", "primary_parser", "primary_normalized_result", "vision_class", "vision_confidence", "vision_service_kind", "vision_safety_override", "vision_source_original_or_preview", "fallback_required"] : section === "dedicated" ? ["dedicated_transport", "dedicated_parser", "dedicated_normalized_result", "_dedicated_schema_observed"] : [];
+      const telemetryKeys = section === "primary" ? ["primary_transport", "primary_parser", "primary_normalized_result", "primary_provider", "primary_error_class", "primary_reason_code", "primary_attempt", "vision_class", "vision_confidence", "vision_service_kind", "vision_safety_override", "vision_source_original_or_preview", "fallback_required"] : section === "dedicated" ? ["dedicated_transport", "dedicated_parser", "dedicated_normalized_result", "_dedicated_schema_observed"] : [];
       for (const key of telemetryKeys) {
         if (Object.prototype.hasOwnProperty.call(source, key)) target[key] = source[key];
       }
@@ -4998,7 +5034,8 @@ var require_upload_duplicate_guard = __commonJS({
     function primaryImageVisionKey(file, content, config) {
       const uploadId = String(file && (file._id || file.id) || "").trim();
       if (!content || !content.length) return "";
-      return `${uploadId}:${exactHash(content)}:${expectedReceiptDate(config)}:${PRIMARY_IMAGE_VISION_MODEL}`;
+      const provider = primaryImageVisionProviderForConfig(config);
+      return `${uploadId}:${exactHash(content)}:${expectedReceiptDate(config)}:${provider ? `${provider.id}:${provider.model}` : "none"}`;
     }
     function receiptPrimaryEvidenceKey(file, content, config) {
       const uploadId = String(file && (file._id || file.id) || "").trim();
@@ -5041,24 +5078,56 @@ var require_upload_duplicate_guard = __commonJS({
       context.primaryConsumed = true;
       return { ...candidate };
     }
+    function primaryImageVisionPayloadIsStrict(value) {
+      const keys = PRIMARY_IMAGE_VISION_SCHEMA.required;
+      if (!imageClassificationHasExactKeys(value, keys)) return false;
+      if (["receipt", "work_photo", "mailing", "unknown"].indexOf(value.kind) === -1) return false;
+      if (["high", "medium", "low"].indexOf(value.confidence) === -1) return false;
+      if (["hair", "nails", "pedicure", "brows_lashes", "other", "none"].indexOf(value.service_kind) === -1) return false;
+      if (PRIMARY_IMAGE_VISION_SCHEMA.properties.visual_type.enum.indexOf(value.visual_type) === -1) return false;
+      if (PRIMARY_IMAGE_VISION_SCHEMA.properties.service_type.enum.indexOf(value.service_type) === -1) return false;
+      return keys.filter((key) => PRIMARY_IMAGE_VISION_SCHEMA.properties[key].type === "boolean").every((key) => typeof value[key] === "boolean");
+    }
+    function primaryImageVisionErrorDetails(provider, response, error) {
+      const statusCode = Number(response && response.statusCode || 0);
+      const timeout = /timeout|timed\s*out|etimedout/i.test(String(error && error.message || error || ""));
+      const providerCode = String(response && response.data && response.data.error && response.data.error.code || "");
+      if (provider && provider.id === "openai" && statusCode === 403 && providerCode === "unsupported_country_region_territory") {
+        return { transport: "other_error", errorClass: "provider_4xx", reasonCode: "PRIMARY_OPENAI_REGION_UNAVAILABLE" };
+      }
+      if (timeout) return { transport: "timeout", errorClass: "timeout", reasonCode: "PRIMARY_PROVIDER_TIMEOUT" };
+      if (statusCode === 429) return { transport: "429", errorClass: "rate_limit", reasonCode: "PRIMARY_PROVIDER_RATE_LIMIT" };
+      if (statusCode >= 500) return { transport: "5xx", errorClass: "provider_5xx", reasonCode: "PRIMARY_PROVIDER_5XX" };
+      if (statusCode >= 400) return { transport: "other_error", errorClass: "provider_4xx", reasonCode: "PRIMARY_PROVIDER_4XX" };
+      return { transport: "other_error", errorClass: "unknown", reasonCode: "PRIMARY_PROVIDER_UNAVAILABLE" };
+    }
     async function requestPrimaryImageTypeVision(file, content, http, config, logger, diagnostic, retryAttempt = 0) {
-      if (!config || !config.openaiApiKey || !content || !content.length || !http) {
+      const provider = primaryImageVisionProviderForConfig(config);
+      if (!provider || !content || !content.length || !http) {
         if (diagnostic) {
           diagnostic.primary_transport = "other_error";
           diagnostic.primary_parser = "no_json";
           diagnostic.primary_normalized_result = "unknown";
+          diagnostic.primary_provider = provider && provider.id || "none";
+          diagnostic.primary_error_class = "unknown";
+          diagnostic.primary_reason_code = "PRIMARY_PROVIDER_UNAVAILABLE";
+          diagnostic.primary_attempt = retryAttempt + 1;
         }
         return primaryVisionDecisionFromCandidate(void 0, "no_json");
       }
-      const model = PRIMARY_IMAGE_VISION_MODEL;
+      const model = provider.model;
+      const yandexPrimary = provider.id === "yandex_ai_studio";
+      if (diagnostic) {
+        diagnostic.primary_provider = provider.id;
+        diagnostic.primary_attempt = retryAttempt + 1;
+        diagnostic.primary_error_class = "none";
+        diagnostic.primary_reason_code = "PRIMARY_CLASSIFIED";
+      }
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
       try {
-        response = await http.post("https://api.openai.com/v1/responses", {
-          headers: {
-            Authorization: "Bearer " + config.openaiApiKey,
-            "Content-Type": "application/json"
-          },
+        response = await http.post(provider.url, {
+          headers: provider.headers,
           data: {
             model,
             store: false,
@@ -5068,9 +5137,9 @@ var require_upload_duplicate_guard = __commonJS({
               content: [
                 {
                   type: "input_text",
-                  text: 'Определи только основной тип изображения из личного чата салона. Верни один JSON без Markdown: {"kind":"work_photo|receipt|bank_transfer|mailing|document|unknown","confidence":"high|medium|low","service_kind":"hair|nails|pedicure|brows_lashes|other|none","has_payment_ui":boolean,"has_receipt_layout":boolean,"has_financial_document":boolean,"has_document_layout":boolean,"has_visible_client":boolean,"has_visible_service_result":boolean,"is_receipt":boolean,"visual_type":"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown","date":"YYYY-MM-DD|null","amount":number|null,"status":"success|failed|pending|unknown","bank":"string|null"}. Главный объект и назначение кадра определяют kind. HIGH work_photo ставь, когда ясно виден результат парикмахерской или салонной услуги: форма стрижки, укладка, окрашивание, готовый маникюр, педикюр, брови или ресницы. Для такого решения кресло, инструменты, зеркало, интерьер и полное тело не обязательны. Отдельный текст, логотип, телефон или отсутствие рабочей зоны не являются причиной отклонить очевидный результат услуги. work_photo запрещён только при конкретно видимом банковском/payment UI, receipt layout, financial document или document layout. HIGH receipt или bank_transfer выбирай для банковского чека, перевода, квитанции или payment screen. HIGH mailing выбирай для очевидного скриншота рассылки. Обычный портрет без различимого результата услуги — unknown. Не выдумывай признаки. Поля date, amount, status и bank заполняй только для financial kind и только если они реально видны; они являются необязательной подсказкой для последующей проверки, а не решением о приёме.'
+                  text: yandexPrimary ? 'Классифицируй только основной тип изображения из личного чата салона. Верни строго один JSON по схеме без Markdown. kind может быть только receipt, work_photo, mailing или unknown. receipt — банковский чек, квитанция, перевод или экран оплаты; work_photo — ясно видимый результат салонной услуги; mailing — очевидное подтверждение рассылки; иначе unknown. Не извлекай дату, время, сумму, валюту, статус операции, банк или другие финансовые поля. Булевы safety-признаки отмечай только по реально видимым элементам. Не угадывай.' : 'Определи только основной тип изображения из личного чата салона. Верни один JSON без Markdown: {"kind":"work_photo|receipt|bank_transfer|mailing|document|unknown","confidence":"high|medium|low","service_kind":"hair|nails|pedicure|brows_lashes|other|none","has_payment_ui":boolean,"has_receipt_layout":boolean,"has_financial_document":boolean,"has_document_layout":boolean,"has_visible_client":boolean,"has_visible_service_result":boolean,"is_receipt":boolean,"visual_type":"bank_receipt|bank_app_screen|receipt_on_phone|qr_payment_receipt|mailing_proof_screenshot|hair_work_photo|nails_work_photo|brows_lashes_work_photo|pedicure_work_photo|work_photo|salon_photo|chat_screenshot|unknown","date":"YYYY-MM-DD|null","amount":number|null,"status":"success|failed|pending|unknown","bank":"string|null"}. Главный объект и назначение кадра определяют kind. HIGH work_photo ставь, когда ясно виден результат парикмахерской или салонной услуги: форма стрижки, укладка, окрашивание, готовый маникюр, педикюр, брови или ресницы. Для такого решения кресло, инструменты, зеркало, интерьер и полное тело не обязательны. Отдельный текст, логотип, телефон или отсутствие рабочей зоны не являются причиной отклонить очевидный результат услуги. work_photo запрещён только при конкретно видимом банковском/payment UI, receipt layout, financial document или document layout. HIGH receipt или bank_transfer выбирай для банковского чека, перевода, квитанции или payment screen. HIGH mailing выбирай для очевидного скриншота рассылки. Обычный портрет без различимого результата услуги — unknown. Не выдумывай признаки. Поля date, amount, status и bank заполняй только для financial kind и только если они реально видны; они являются необязательной подсказкой для последующей проверки, а не решением о приёме.'
                 },
-                { type: "input_image", image_url: imageUrl, detail: "high" }
+                receiptVisionImageInput(provider, imageUrl)
               ]
             }],
             text: {
@@ -5078,10 +5147,10 @@ var require_upload_duplicate_guard = __commonJS({
                 type: "json_schema",
                 name: "tars_primary_image_vision_v1",
                 strict: true,
-                schema: PRIMARY_IMAGE_VISION_SCHEMA
+                schema: yandexPrimary ? PRIMARY_IMAGE_VISION_SCHEMA : OPENAI_PRIMARY_IMAGE_VISION_SCHEMA
               }
             },
-            max_output_tokens: 320
+            max_output_tokens: yandexPrimary ? 4096 : 320
           },
           timeout: 14e3
         });
@@ -5090,10 +5159,13 @@ var require_upload_duplicate_guard = __commonJS({
           await new Promise((resolve) => setTimeout(resolve, 900));
           return requestPrimaryImageTypeVision(file, content, http, config, logger, diagnostic, retryAttempt + 1);
         }
+        const details = primaryImageVisionErrorDetails(provider, void 0, error);
         if (diagnostic) {
-          diagnostic.primary_transport = /timeout|timed\s*out|etimedout/i.test(String(error && error.message || error)) ? "timeout" : "other_error";
+          diagnostic.primary_transport = details.transport;
           diagnostic.primary_parser = "no_json";
           diagnostic.primary_normalized_result = "unknown";
+          diagnostic.primary_error_class = details.errorClass;
+          diagnostic.primary_reason_code = details.reasonCode;
         }
         throw error;
       }
@@ -5102,12 +5174,15 @@ var require_upload_duplicate_guard = __commonJS({
           await new Promise((resolve) => setTimeout(resolve, 900));
           return requestPrimaryImageTypeVision(file, content, http, config, logger, diagnostic, retryAttempt + 1);
         }
+        const details = primaryImageVisionErrorDetails(provider, response);
         if (diagnostic) {
-          diagnostic.primary_transport = response && response.statusCode === 429 ? "429" : response && response.statusCode >= 500 ? "5xx" : "other_error";
+          diagnostic.primary_transport = details.transport;
           diagnostic.primary_parser = "no_json";
           diagnostic.primary_normalized_result = "unknown";
+          diagnostic.primary_error_class = details.errorClass;
+          diagnostic.primary_reason_code = details.reasonCode;
         }
-        throw new Error(`OpenAI image type HTTP ${response && response.statusCode || "unknown"}`);
+        throw new Error(`Primary image type provider HTTP ${response && response.statusCode || "unknown"}`);
       }
       let payload;
       try {
@@ -5117,17 +5192,31 @@ var require_upload_duplicate_guard = __commonJS({
           diagnostic.primary_transport = "2xx";
           diagnostic.primary_parser = "parse_error";
           diagnostic.primary_normalized_result = "unknown";
+          diagnostic.primary_error_class = "parse";
+          diagnostic.primary_reason_code = "PRIMARY_PROVIDER_INVALID_RESPONSE";
         }
         throw error;
       }
       const outputText = openAiReceiptOutputText(payload);
       const parsed = parseVisionTypeResponse(outputText);
+      if (yandexPrimary && (!parsed.payload || !primaryImageVisionPayloadIsStrict(parsed.payload))) {
+        if (diagnostic) {
+          diagnostic.primary_transport = "2xx";
+          diagnostic.primary_parser = parsed.parserState === "parsed" ? "schema_mismatch" : personalImageParserEnum(parsed.parserState);
+          diagnostic.primary_normalized_result = "unknown";
+          diagnostic.primary_error_class = "parse";
+          diagnostic.primary_reason_code = "PRIMARY_PROVIDER_INVALID_RESPONSE";
+        }
+        throw new Error("Primary image type provider invalid response");
+      }
       if (diagnostic) {
         diagnostic.primary_transport = "2xx";
         diagnostic.primary_parser = personalImageParserEnum(parsed.parserState);
         diagnostic.primary_normalized_result = parsed.decision && parsed.decision.kind === "bank_transfer" ? "receipt" : parsed.decision && parsed.decision.kind || "unknown";
       }
       if (!parsed.decision) return primaryVisionDecisionFromCandidate(void 0, parsed.parserState);
+      parsed.decision.providerGroup = provider.id;
+      parsed.decision.passType = "primary";
       if (diagnostic) {
         diagnostic.primary_is_receipt = /^(?:receipt|bank_transfer)$/.test(parsed.decision.kind);
         diagnostic.primary_is_document = parsed.decision.is_document === true;
@@ -5135,7 +5224,7 @@ var require_upload_duplicate_guard = __commonJS({
         diagnostic.primary_is_mailing = parsed.decision.kind === "mailing";
         diagnostic.primary_kind = parsed.decision.kind === "work_photo" ? "photo" : parsed.decision.kind === "bank_transfer" ? "receipt" : parsed.decision.kind;
       }
-      const optionalReceiptCandidate = openAiReceiptCandidateFromJson(parsed.payload, expectedReceiptDate(config));
+      const optionalReceiptCandidate = provider.id === "openai" ? openAiReceiptCandidateFromJson(parsed.payload, expectedReceiptDate(config)) : void 0;
       if (optionalReceiptCandidate && /^(?:receipt|bank_transfer|document)$/.test(parsed.decision.kind)) {
         optionalReceiptCandidate.receiptAmountSource = `openai:${model}`;
         rememberPrimaryReceiptEvidence(file, content, config, optionalReceiptCandidate);
@@ -5144,7 +5233,7 @@ var require_upload_duplicate_guard = __commonJS({
       return parsed.decision;
     }
     async function primaryVisionDecisionForImage(file, content, http, config, logger, diagnostic) {
-      if (!config || !config.openaiApiKey || !content || !content.length || !http) {
+      if (!primaryImageVisionProviderForConfig(config) || !content || !content.length || !http) {
         return primaryVisionDecisionFromCandidate(void 0, "no_json");
       }
       const key = primaryImageVisionKey(file, content, config);
@@ -5183,7 +5272,7 @@ var require_upload_duplicate_guard = __commonJS({
     async function personalImageKindForPreUploadUncached(file, content, http, config, logger, diagnostic) {
       if (!config || !content || !content.length) return void 0;
       let primaryDecision;
-      if (config.openaiApiKey) {
+      if (primaryImageVisionProviderForConfig(config)) {
         try {
           primaryDecision = await primaryVisionDecisionForImage(file, content, http, config, logger, diagnostic);
         } catch (error) {
@@ -10217,6 +10306,7 @@ var require_upload_duplicate_guard = __commonJS({
       YANDEX_AI_STUDIO_RESPONSES_URL,
       YANDEX_AI_STUDIO_DEFAULT_MODEL,
       normalizedYandexAiStudioModel,
+      primaryImageVisionProviderForConfig,
       receiptVisionProviderForConfig,
       receiptVisionProviderConfigured,
       receiptVisionProviderCacheKey,
@@ -10939,15 +11029,18 @@ var C = class extends j.App {
             G.emitTarsTraceV1(traceLogger, trace, {
               component: "vision", stage: "primary_classification", event: "finish", outcome: selectedPrimaryDecision ? "ok" : "failed", reason_code: selectedPrimaryDecision ? "PRIMARY_CLASSIFIED" : "PRIMARY_EMPTY",
               duration_ms: Date.now() - primaryTraceStartedAt,
-              ids: { message: e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e.room && e.room.id, sender: e.sender && e.sender.id }, attrs: { pass: "primary" }
+              attempt: primaryRoutingDiagnostic && primaryRoutingDiagnostic.primary_attempt,
+              ids: { message: e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e.room && e.room.id, sender: e.sender && e.sender.id }, attrs: { pass: "primary", provider: primaryRoutingDiagnostic && primaryRoutingDiagnostic.primary_provider }
             });
             visionRoute = G.primaryVisionDominantKind(selectedPrimaryDecision);
           } catch (visionError) {
             selectedPrimaryVisionUnavailable = true;
             this.getLogger().warn(`Primary Vision intent verification failed: ${visionError && visionError.message || visionError}`);
             G.emitTarsTraceV1(traceLogger, trace, {
-              component: "vision", stage: "primary_classification", event: "finish", outcome: "failed", reason_code: "PRIMARY_CLASSIFICATION_FAILED", error_class: "unknown",
-              ids: { message: e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e.room && e.room.id, sender: e.sender && e.sender.id }, attrs: { pass: "primary" }
+              component: "vision", stage: "primary_classification", event: "finish", outcome: "failed", reason_code: primaryRoutingDiagnostic && primaryRoutingDiagnostic.primary_reason_code || "PRIMARY_CLASSIFICATION_FAILED", error_class: primaryRoutingDiagnostic && primaryRoutingDiagnostic.primary_error_class || "unknown",
+              attempt: primaryRoutingDiagnostic && primaryRoutingDiagnostic.primary_attempt,
+              duration_ms: Date.now() - primaryTraceStartedAt,
+              ids: { message: e.id, origin_message: originalEvent && originalEvent.id, upload: uploadIds[0], room: e.room && e.room.id, sender: e.sender && e.sender.id }, attrs: { pass: "primary", provider: primaryRoutingDiagnostic && primaryRoutingDiagnostic.primary_provider }
             });
           }
           G.scheduleImageClassificationV1Shadow({
