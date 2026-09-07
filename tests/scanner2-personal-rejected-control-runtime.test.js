@@ -22,6 +22,7 @@ function runtimeScenario(guard, mode, suffix) {
   const records = new Map();
   const sourceContent = Buffer.from(`personal-receipt-control-${mode}-${suffix}`);
   const sourceContents = new Map();
+  const uploadFiles = new Map();
   const personalRoom = { id: `personal-${suffix}`, type: "d", slugifiedName: `tars-master-${suffix}` };
   const controlRoom = { id: "control-room", type: "p", slugifiedName: "cheki-kontrol", displayName: "Контроль чеков" };
   const owner = { id: `owner-${suffix}`, username: `master-${suffix}`, name: `Master ${suffix}` };
@@ -30,6 +31,7 @@ function runtimeScenario(guard, mode, suffix) {
   const shura = { id: "shura-id", username: "shura", name: "Shura" };
   const messageFile = { _id: `upload-${suffix}`, id: `upload-${suffix}`, name: `image-${suffix}.jpg`, type: "image/jpeg" };
   sourceContents.set(messageFile.id, sourceContent);
+  uploadFiles.set(messageFile.id, messageFile);
   const message = {
     id: `message-${suffix}`,
     room: personalRoom,
@@ -199,7 +201,7 @@ function runtimeScenario(guard, mode, suffix) {
           return content;
         },
         async getById(uploadId) {
-          return uploadId === messageFile.id ? messageFile : undefined;
+          return uploadFiles.get(uploadId);
         }
       };
     },
@@ -346,7 +348,8 @@ function runtimeScenario(guard, mode, suffix) {
     records,
     requiredDate,
     sourceContent,
-    sourceContents
+    sourceContents,
+    uploadFiles
   };
 }
 
@@ -501,6 +504,7 @@ async function receiptIndex(guard, scenario) {
     files: [registryBFile]
   };
   accepted.sourceContents.set(registryBFile.id, registryBContent);
+  accepted.uploadFiles.set(registryBFile.id, registryBFile);
   const registryBResult = await acceptedGuard.processPersonalMediaV2(
     registryBMessage, accepted.read, accepted.persistence, accepted.modify,
     { info() {}, warn() {}, error() {} }, accepted.http, accepted.config
@@ -533,6 +537,7 @@ async function receiptIndex(guard, scenario) {
     files: [registryCFile]
   };
   accepted.sourceContents.set(registryCFile.id, registryCContent);
+  accepted.uploadFiles.set(registryCFile.id, registryCFile);
   const registryCResult = await acceptedGuard.processPersonalMediaV2(
     registryCMessage, accepted.read, accepted.persistence, accepted.modify,
     { info() {}, warn() {}, error() {} }, accepted.http, accepted.config
