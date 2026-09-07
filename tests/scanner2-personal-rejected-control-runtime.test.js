@@ -21,6 +21,7 @@ function runtimeScenario(guard, mode, suffix) {
   const consensusMode = mode === "rejected-consensus";
   const records = new Map();
   const sourceContent = Buffer.from(`personal-receipt-control-${mode}-${suffix}`);
+  const sourceContents = new Map();
   const personalRoom = { id: `personal-${suffix}`, type: "d", slugifiedName: `tars-master-${suffix}` };
   const controlRoom = { id: "control-room", type: "p", slugifiedName: "cheki-kontrol", displayName: "Контроль чеков" };
   const owner = { id: `owner-${suffix}`, username: `master-${suffix}`, name: `Master ${suffix}` };
@@ -28,6 +29,7 @@ function runtimeScenario(guard, mode, suffix) {
   const teimur = { id: "teimur-id", username: "teimur", name: "Teimur" };
   const shura = { id: "shura-id", username: "shura", name: "Shura" };
   const messageFile = { _id: `upload-${suffix}`, id: `upload-${suffix}`, name: `image-${suffix}.jpg`, type: "image/jpeg" };
+  sourceContents.set(messageFile.id, sourceContent);
   const message = {
     id: `message-${suffix}`,
     room: personalRoom,
@@ -188,8 +190,9 @@ function runtimeScenario(guard, mode, suffix) {
     getUploadReader() {
       return {
         async getBufferById(uploadId) {
-          assert.strictEqual(uploadId, messageFile.id);
-          return sourceContent;
+          const content = sourceContents.get(uploadId);
+          assert.ok(content, `unexpected upload ${uploadId}`);
+          return content;
         },
         async getById(uploadId) {
           return uploadId === messageFile.id ? messageFile : undefined;
@@ -337,7 +340,8 @@ function runtimeScenario(guard, mode, suffix) {
     receiptCalls: () => receiptCalls,
     records,
     requiredDate,
-    sourceContent
+    sourceContent,
+    sourceContents
   };
 }
 
@@ -467,6 +471,35 @@ async function receiptIndex(guard, scenario) {
   const acceptedDetails = accepted.publishedMessages.find((item) => /^✅ ЧЕК ПРИНЯТ/.test(String(item.text || "")));
   assert.ok(acceptedDetails, "accepted receipt must publish its result");
   assert.strictEqual(acceptedDetails.threadId, accepted.message.id, "accepted result must be attached to the corresponding receipt image");
+
+  // E. Two distinct uploads with the same strictly extracted stable identity
+  // must take the real direct-room identity-duplicate branch.
+  const firstConfirmed = index.photos.find((entry) => entry.source === "confirmed");
+  assert.ok(firstConfirmed, "first receipt must establish a confirmed identity");
+  assert.match(firstConfirmed.receiptIdentity, /^(id:|txn:|text:)/, "first receipt must have a stable production identity");
+  const secondContent = Buffer.from("personal-receipt-identity-duplicate-second-bytes");
+  const secondFile = { _id: "upload-valid-fallback-identity-second", id: "upload-valid-fallback-identity-second", name: "identity-second.jpg", type: "image/jpeg" };
+  const secondMessage = {
+    ...accepted.message,
+    id: "message-valid-fallback-identity-second",
+    file: secondFile,
+    files: [secondFile]
+  };
+  accepted.sourceContents.set(secondFile.id, secondContent);
+  const secondResult = await acceptedGuard.processPersonalMediaV2(
+    secondMessage, accepted.read, accepted.persistence, accepted.modify,
+    { info() {}, warn() {}, error() {} }, accepted.http, accepted.config
+  );
+  await acceptedGuard.flushReceiptCaseV1ForTests();
+  index = await receiptIndex(acceptedGuard, accepted);
+  const secondExact = acceptedGuard.exactHash(secondContent);
+  const duplicateEntry = index.photos.find((entry) => entry.exact === secondExact);
+  assert.strictEqual(secondResult.handled, true, "identity duplicate must be handled by the receipt path");
+  assert.ok(duplicateEntry, "second upload must be recorded in the receipt index");
+  assert.notStrictEqual(duplicateEntry.exact, firstConfirmed.exact, "identity test uploads must have different exact hashes");
+  assert.strictEqual(duplicateEntry.receiptIdentity, firstConfirmed.receiptIdentity, "controlled OCR must build the same stable receipt identity");
+  assert.strictEqual(duplicateEntry.source, "duplicate", "M1 oracle: matching stable identity must reject the second receipt");
+  assert.strictEqual(index.photos.filter((entry) => entry.source === "confirmed").length, 1, "M1 oracle: identity duplicate must not create a second confirmed receipt");
 
   console.log("PASS: personal fallback keeps rejected receipts private without affecting unknown images or accepted totals");
 })().catch((error) => {
