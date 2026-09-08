@@ -508,7 +508,9 @@ async function run() {
   console.log("PASS: Yandex AI Studio is an isolated private Vision provider with unchanged OpenAI fallback");
 }
 
-run().catch((error) => {
+run().then(() => {
+  require("child_process").execFileSync(process.execPath, [require("path").join(__dirname, "openrouter-vision-v1.runtime.js")], { stdio: "inherit" });
+}).catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });

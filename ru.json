@@ -1,4 +1,8 @@
 {
+    "openrouter_vision_enabled_label": "Использовать OpenRouter Gemini Vision",
+    "openrouter_vision_enabled_description": "Явное переключение на Gemini 3.5 Flash с отдельным ключом. До проверки ключа и runtime оставить выключенным.",
+    "openrouter_vision_api_key_label": "Приватный API-ключ OpenRouter Vision",
+    "openrouter_vision_api_key_description": "Только новый отдельный ключ. Не использовать ключ OpenAI/Yandex или ключ, опубликованный в исходниках.",
     "report_button": "ЗАПОЛНИТЬ ОТЧЁТ",
     "report_command_params": "[profil]",
     "report_command_description": "Открыть мой отчёт или выбрать профиль мастера",

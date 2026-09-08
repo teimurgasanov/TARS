@@ -1,4 +1,5 @@
 "use strict";
+const OpenRouterVisionV1 = require("./vision/openrouter-vision-v1");
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -1224,7 +1225,7 @@ var require_upload_duplicate_guard = __commonJS({
         attrs: {
           source_type: allowed(rawAttrs.source_type, ["original", "preview_fallback", "unknown"], "unknown"),
           intent: allowed(rawAttrs.intent, ["photo", "receipt", "mailing", "none", "ambiguous"], "none"),
-          provider: allowed(rawAttrs.provider, ["yandex_ai_studio", "yandex_ocr", "openai", "none", "unknown"], "none"),
+          provider: allowed(rawAttrs.provider, ["yandex_ai_studio", "yandex_ocr", "openai", "openrouter", "none", "unknown"], "none"),
           pass: allowed(rawAttrs.pass, ["primary", "receipt_engine", "ocr", "date_focus", "amount_focus", "none"], "none"),
           cache: allowed(rawAttrs.cache, ["hit", "miss", "na"], "na"),
           from_state: allowed(rawAttrs.from_state, ["NONE", "RECEIVED", "PROCESSING", "ACCEPTED", "CONTROL", "DUPLICATE", "FAILED"], "NONE"),
@@ -2824,6 +2825,7 @@ var require_upload_duplicate_guard = __commonJS({
       return void 0;
     }
     function openAiVisionProviderForConfig(config, openAiModel) {
+      if (OpenRouterVisionV1.enabled(config)) return OpenRouterVisionV1.providerForConfig(config);
       if (!config) return void 0;
       const openAiKey = String(config.openaiApiKey || "").trim();
       if (!openAiKey) return void 0;
@@ -2836,9 +2838,11 @@ var require_upload_duplicate_guard = __commonJS({
       };
     }
     function receiptVisionProviderForConfig(config, openAiModel) {
+      if (OpenRouterVisionV1.enabled(config)) return OpenRouterVisionV1.providerForConfig(config);
       return yandexAiStudioVisionProviderForConfig(config) || openAiVisionProviderForConfig(config, openAiModel);
     }
     function primaryImageVisionProviderForConfig(config) {
+      if (OpenRouterVisionV1.enabled(config)) return OpenRouterVisionV1.providerForConfig(config);
       return yandexAiStudioVisionProviderForConfig(config) || openAiVisionProviderForConfig(config, PRIMARY_IMAGE_VISION_MODEL);
     }
     function receiptVisionProviderConfigured(config) {
@@ -3286,6 +3290,9 @@ var require_upload_duplicate_guard = __commonJS({
     async function maybeRunImageClassificationV1Shadow(input) {
       try {
         if (!input || input.enabled !== true) return Object.freeze({ attempted: false, recorded: false });
+        // The legacy observation schema identifies only OpenAI. Do not record
+        // a Gemini result as an OpenAI benchmark during this migration.
+        if (input.config && input.config.openRouterVisionEnabled === true) return Object.freeze({ attempted: false, recorded: false });
         if (!input.content || !input.content.length || !input.config || !input.config.openaiApiKey) return Object.freeze({ attempted: false, recorded: false });
         const classification = typeof input.classify === "function"
           ? await input.classify(input.file, input.content, input.http, input.config, input.logger)
@@ -3326,17 +3333,15 @@ var require_upload_duplicate_guard = __commonJS({
     const RECEIPT_VISUAL_CRITERIA = "КРИТЕРИИ БАНКОВСКОГО ЧЕКА. Считай изображение чеком, банковской квитанцией или справкой по операции, если главным объектом является официальный банковский документ, банковский экран либо чек, открытый на экране другого телефона. Ищи совокупность признаков: название или логотип банка/платёжного сервиса; слова Чек, Квитанция, Справка по операции, Перевод, Платёж, Оплата, СБП или SberPay; дата и время операции; итоговая сумма рядом с ₽, руб, Р, RUB или RUR; статус Успешно, Исполнено, Выполнено, Оплачено, Completed или иной статус; отправитель, получатель, счёт/карта, номер операции, QR или СБП. Чек может быть повёрнут, снят под углом, с бликами, на белом PDF-листе или на экране телефона. Для классификации достаточно ясно видимого банковского интерфейса/документа и нескольких согласованных признаков; для зачёта суммы обязательно отдельно прочитай именно итог операции. Не считай чеком: одиночное число без банковского контекста, баланс, время, номер телефона/карты, обычную переписку, рассылку, интерфейс Rocket.Chat, фото человека или салонной работы. ";
     const WORK_PHOTO_VISUAL_CRITERIA = "СТРОГИЕ КРИТЕРИИ ФОТО РАБОТЫ САЛОНА. Считай изображение фото работы только когда одновременно выполнены все условия: 1) главным объектом является реальный человек целиком, клиент либо крупно показанная часть его тела; 2) ясно видна конкретная зона салонной услуги; 3) зона относится ровно к одному виду: HAIR — волосы, стрижка, окрашивание, укладка, причёска, затылок, виски или борода; NAILS — руки, пальцы или ногти; PEDICURE — стопы, пальцы ног или ногти на ногах; BROWS_LASHES — лицо крупно, глаза, брови или ресницы; 4) изображение не является документом, экраном телефона, скриншотом, перепиской или рекламным материалом. Не требуй коллаж до/после и не требуй идеального крупного плана, но человек и релевантная зона услуги должны быть реально видимы, а не предполагаться по обстановке. Обычный портрет без различимой зоны услуги, человек только на заднем плане, пустой интерьер, рабочее место, инструменты, товар или случайная фотография — не фото работы. Никогда не считай работой банковский чек, квитанцию, справку по операции, банковский экран, экран телефона, QR/СБП, документ, чек на экране другого телефона, переписку/рассылку или интерфейс Rocket.Chat. Если виден читаемый документ или экран с банковскими реквизитами, суммой, датой, статусом, отправителем или получателем, всегда классифицируй изображение как документ/чек, даже когда в кадре также видны руки или человек. При сомнении не подтверждай фото работы. ";
     async function requestOpenAiWorkPhotoCheckUncached(file, content, http, config, logger, diagnostic) {
-      if (!config || !config.openaiApiKey || !content || !content.length || !http) return "";
-      const model = String(config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+      const provider = openAiVisionProviderForConfig(config);
+      if (!provider || !content || !content.length || !http) return "";
+      const model = provider.model;
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
           if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 500));
-          const response = await http.post("https://api.openai.com/v1/responses", {
-          headers: {
-            Authorization: "Bearer " + config.openaiApiKey,
-            "Content-Type": "application/json"
-          },
+          const response = await OpenRouterVisionV1.post(http, provider, {
+          headers: provider.headers,
           data: {
             model,
             input: [{
@@ -3399,7 +3404,7 @@ var require_upload_duplicate_guard = __commonJS({
     const workPhotoCheckCache = /* @__PURE__ */ new Map();
     async function requestOpenAiWorkPhotoCheck(file, content, http, config, logger, diagnostic) {
       if (!content || !content.length) return "";
-      const key = `${expectedReceiptDate(config)}:${exactHash(content)}`;
+      const key = `${OpenRouterVisionV1.enabled(config) ? "openrouter:" + OpenRouterVisionV1.MODEL + ":" : ""}${expectedReceiptDate(config)}:${exactHash(content)}`;
       let cached = workPhotoCheckCache.get(key);
       const cacheHit = Boolean(cached && Date.now() - cached.createdAt < 10 * 60 * 1e3);
       capturePersonalImageCacheTelemetry(diagnostic, "dedicated_cache", cacheHit);
@@ -3422,7 +3427,7 @@ var require_upload_duplicate_guard = __commonJS({
     async function shouldForwardConfirmedWorkPhoto(file, content, http, config, logger, explicitPhotoIntent = false, diagnostic, options = {}) {
       const activeDiagnostic = diagnostic || options.manualPhotoSafetyOnly && createPersonalImageClassificationDiagnostic() || void 0;
       let primaryDecision = options.primaryVisionDecision;
-      if (!primaryDecision && options.primaryVisionAttempted !== true && config && config.openaiApiKey) {
+      if (!primaryDecision && options.primaryVisionAttempted !== true && config && (config.openaiApiKey || OpenRouterVisionV1.enabled(config))) {
         try {
           primaryDecision = await primaryVisionDecisionForImage(file, content, http, config, logger, activeDiagnostic);
         } catch (error) {
@@ -4944,7 +4949,7 @@ var require_upload_duplicate_guard = __commonJS({
       let aiReceipt = false;
       let aiMailing = false;
       let aiPhoto = false;
-      if (config.openaiApiKey) {
+      if (config.openaiApiKey || OpenRouterVisionV1.enabled(config)) {
         try {
           const aiCandidate = await requestOpenAiReceiptCheck(file, content, http, config, expectedReceiptDate(config), logger);
           if (aiCandidate) {
@@ -4976,7 +4981,7 @@ var require_upload_duplicate_guard = __commonJS({
     function receiptPrimaryEvidenceKey(file, content, config) {
       const uploadId = String(file && (file._id || file.id) || "").trim();
       if (!uploadId || !content || !content.length) return "";
-      const model = String(config && config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+      const model = OpenRouterVisionV1.enabled(config) ? "openrouter:" + OpenRouterVisionV1.MODEL : String(config && config.openaiReceiptModel || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
       return `${uploadId}:${exactHash(content)}:${expectedReceiptDate(config)}:${model}`;
     }
     function receiptStageContext(file, content, config) {
@@ -5052,7 +5057,7 @@ var require_upload_duplicate_guard = __commonJS({
         return primaryVisionDecisionFromCandidate(void 0, "no_json");
       }
       const model = provider.model;
-      const yandexPrimary = provider.id === "yandex_ai_studio";
+      const yandexPrimary = provider.id === "yandex_ai_studio" || provider.id === "openrouter";
       if (diagnostic) {
         diagnostic.primary_provider = provider.id;
         diagnostic.primary_attempt = retryAttempt + 1;
@@ -5062,7 +5067,7 @@ var require_upload_duplicate_guard = __commonJS({
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
       try {
-        response = await http.post(provider.url, {
+        response = await OpenRouterVisionV1.post(http, provider, {
           headers: provider.headers,
           data: {
             model,
@@ -5984,7 +5989,7 @@ var require_upload_duplicate_guard = __commonJS({
       const imageUrl = `data:${receiptImageMimeType(file, content)};base64,${bytesToBase64(content)}`;
       let response;
       try {
-        response = await http.post(provider.url, {
+        response = await OpenRouterVisionV1.post(http, provider, {
           headers: provider.headers,
           data: {
             model: provider.model,
@@ -6067,14 +6072,14 @@ var require_upload_duplicate_guard = __commonJS({
       const amount = isValidReceiptAmount(source.amount) ? Math.round(Number(source.amount) * 100) / 100 : null;
       const confidence = typeof source.confidence === "number" && Number.isFinite(source.confidence) && source.confidence >= 0 && source.confidence <= 1 ? Math.round(source.confidence * 1e3) / 1e3 : null;
       return {
-        provider: allowed(source.provider, ["yandex_ai_studio", "openai", "yandex_ocr", "decision"], "unknown"),
+        provider: allowed(source.provider, ["yandex_ai_studio", "openai", "openrouter", "yandex_ocr", "decision"], "unknown"),
         pass: allowed(source.pass, ["receipt_vision_engine", "ocr", "date_focus", "amount_focus", "decision"], "decision"),
         amount,
         date,
         confidence,
         source: allowed(source.source, ["vision", "ocr", "focused", "decision"], "decision"),
         layout: allowed(source.layout, ["page", "page-column-sort", "table", "markdown", "none"], "none"),
-        selected_authority: allowed(source.selectedAuthority, ["yandex_qwen", "openai_vision", "ocr_confirmed", "control", "none"], "none"),
+        selected_authority: allowed(source.selectedAuthority, ["yandex_qwen", "openai_vision", "openrouter_vision", "ocr_confirmed", "control", "none"], "none"),
         disagreement: source.disagreement === true,
         reason_code: allowed(source.reasonCode, [
           "observed", "no_disagreement", "date_disagreement", "amount_disagreement", "date_and_amount_disagreement",
@@ -6288,7 +6293,7 @@ var require_upload_duplicate_guard = __commonJS({
       const requestPrompt = focusedPrompt + (fieldFocus ? fieldFocusContract : receiptStatusPrompt + fullReceiptContract);
       let response;
       try {
-        response = await http.post(provider.url, {
+        response = await OpenRouterVisionV1.post(http, provider, {
           headers: provider.headers,
           data: {
             model,
@@ -6357,6 +6362,9 @@ var require_upload_duplicate_guard = __commonJS({
           const transcribedAmount = normalizeReceiptAmount(parsed && parsed.amount_text);
           if (isValidReceiptAmount(transcribedAmount)) candidate.receiptAmount = transcribedAmount;
         }
+        // Keep the legacy AI evidence family (and its independence rules).
+        // Gemini always has ONE model source, including targeted passes.
+        // The actual transport is separately reported in receiptProvider.
         candidate.receiptAmountSource = `openai:${model}`;
         candidate.receiptProvider = provider.id;
         candidate.receiptPass = focusDate ? "date_focus" : focusAmount ? "amount_focus" : "primary";
@@ -6946,11 +6954,11 @@ var require_upload_duplicate_guard = __commonJS({
     }
     function normalizedReceiptReplayProvider(value) {
       const provider = String(value || "");
-      return ["yandex_ai_studio", "openai", "yandex_ocr", "decision"].indexOf(provider) !== -1 ? provider : "unknown";
+      return ["yandex_ai_studio", "openai", "openrouter", "yandex_ocr", "decision"].indexOf(provider) !== -1 ? provider : "unknown";
     }
     function normalizedReceiptReplayAuthority(value) {
       const authority = String(value || "");
-      return ["yandex_qwen", "openai_vision", "ocr_confirmed", "legacy_consensus", "control", "none"].indexOf(authority) !== -1 ? authority : "none";
+      return ["yandex_qwen", "openai_vision", "openrouter_vision", "ocr_confirmed", "legacy_consensus", "control", "none"].indexOf(authority) !== -1 ? authority : "none";
     }
     function normalizedReceiptReplayContainerVetoSource(value) {
       const source = String(value || "");
@@ -7095,6 +7103,7 @@ var require_upload_duplicate_guard = __commonJS({
       const authority = normalizedReceiptReplayAuthority(trace && trace.selectedAuthority);
       if (authority === "yandex_qwen") return "yandex_ai_studio";
       if (authority === "openai_vision") return "openai";
+      if (authority === "openrouter_vision") return "openrouter";
       if (authority === "ocr_confirmed") return "yandex_ocr";
       return "decision";
     }
@@ -7416,7 +7425,7 @@ var require_upload_duplicate_guard = __commonJS({
         });
       };
       const receiptVisionIdentityText = () => candidates.filter((candidate) => candidate && !candidate.combinedReceipt && !candidate.receiptVisionAuthority).map((candidate) => String(candidate.text || "")).filter(Boolean).concat(receiptVisionAuthority ? [String(receiptVisionAuthority.text || "")] : []).join("\n");
-      const receiptVisionSelectedAuthority = () => receiptVisionAuthority && receiptVisionAuthority.receiptProvider === "yandex_ai_studio" ? "yandex_qwen" : "openai_vision";
+      const receiptVisionSelectedAuthority = () => receiptVisionAuthority && receiptVisionAuthority.receiptProvider === "openrouter" ? "openrouter_vision" : receiptVisionAuthority && receiptVisionAuthority.receiptProvider === "yandex_ai_studio" ? "yandex_qwen" : "openai_vision";
       const logReceiptVisionEngineDisagreement = () => {
         if (!receiptVisionAuthority) return receiptVisionAuthorityDisagreement(receiptVisionAuthority, candidates);
         const comparable = candidates.filter((candidate) => candidate && !candidate.combinedReceipt && !candidate.receiptVisionAuthority);
@@ -10478,6 +10487,23 @@ var C = class extends j.App {
       i18nDescription: "openai_receipt_api_key_description"
     });
     await e.settings.provideSetting({
+      id: "openrouter_vision_enabled",
+      type: z.SettingType.BOOLEAN,
+      packageValue: false,
+      required: false,
+      public: false,
+      i18nLabel: "openrouter_vision_enabled_label",
+      i18nDescription: "openrouter_vision_enabled_description"
+    });
+    await e.settings.provideSetting({
+      id: "openrouter_vision_api_key",
+      type: z.SettingType.PASSWORD,
+      required: false,
+      public: false,
+      i18nLabel: "openrouter_vision_api_key_label",
+      i18nDescription: "openrouter_vision_api_key_description"
+    });
+    await e.settings.provideSetting({
       id: "openai_receipt_model",
       type: z.SettingType.STRING,
       packageValue: "gpt-4.1-mini",
@@ -11151,6 +11177,8 @@ var C = class extends j.App {
       yandexAiStudioFolderId: String(await n.getValueById("yandex_ai_studio_folder_id") || "").replace(/[^A-Za-z0-9_-]/g, ""),
       yandexAiStudioModel: G.normalizedYandexAiStudioModel(await n.getValueById("yandex_ai_studio_model")),
       openaiApiKey: String(await n.getValueById("openai_receipt_api_key") || "").trim(),
+      openRouterVisionEnabled: String(await n.getValueById("openrouter_vision_enabled") || "").toLowerCase() === "true",
+      openRouterApiKey: String(await n.getValueById("openrouter_vision_api_key") || "").trim(),
       openaiReceiptModel: String(await n.getValueById("openai_receipt_model") || "gpt-4.1-mini").trim() || "gpt-4.1-mini",
       imageClassificationV1ShadowEnabled: imageClassificationV1ShadowEnabledSetting === true || String(imageClassificationV1ShadowEnabledSetting || "").toLowerCase() === "true",
       tarsMemoryV1WriteEnabled: memoryWriteEnabledSetting === true || String(memoryWriteEnabledSetting || "").toLowerCase() === "true",
