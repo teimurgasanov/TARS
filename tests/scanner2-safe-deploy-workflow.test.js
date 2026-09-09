@@ -20,6 +20,9 @@ const manualGate = "if: github.event_name == 'workflow_dispatch' && inputs.actio
 assert.match(workflow, /push:\s*\n\s*branches: \[develop\]/, "develop pushes must run validation");
 assert.match(workflow, /workflow_dispatch:[\s\S]*action:[\s\S]*type: choice[\s\S]*- DEPLOY[\s\S]*- SESSION_CLEANUP/);
 assert.match(workflow, /commit_sha:[\s\S]*required: false[\s\S]*confirm:[\s\S]*required: true/);
+const workflowHeader = workflow.slice(0, workflow.indexOf("\njobs:"));
+assert.match(workflowHeader, /permissions:\s*\n\s*contents: read/, "default workflow permissions must remain read-only");
+assert.doesNotMatch(workflowHeader, /deployments:\s*write/, "validation-only pushes must not receive deployment write capability");
 assert.match(workflow, /uses: actions\/setup-node@v4[\s\S]*node-version: "20"/);
 assert.match(workflow, /sudo apt-get install --yes --no-install-recommends zsh/);
 assert.match(workflow, /npm ci/);
@@ -53,6 +56,28 @@ const verifyCommit = step("Verify exact develop commit");
 assert.match(verifyCommit, /TARGET_SHA.*REQUESTED_SHA/);
 assert.match(verifyCommit, /git merge-base --is-ancestor "\$TARGET_SHA" origin\/develop/);
 
+const provenanceStart = workflow.indexOf("\n  deployment_provenance:");
+const provenanceEnd = workflow.indexOf("\n  session_cleanup:", provenanceStart);
+assert.ok(provenanceStart >= 0 && provenanceEnd > provenanceStart, "deployment provenance must be a dedicated job");
+const deploymentProvenance = workflow.slice(provenanceStart, provenanceEnd);
+assert.match(deploymentProvenance, /needs: validate/);
+assert.match(deploymentProvenance, /needs\.validate\.result == 'success'/);
+assert.ok(deploymentProvenance.includes(manualGate), "deployment provenance must remain manual DEPLOY only");
+assert.match(deploymentProvenance, /permissions:\s*\n\s*contents: read\s*\n\s*deployments: write/);
+assert.match(deploymentProvenance, /TARGET_SHA: \$\{\{ needs\.validate\.outputs\.target_sha \}\}/);
+assert.match(deploymentProvenance, /BUNDLE_SHA256: \$\{\{ needs\.validate\.outputs\.bundle_sha256 \}\}/);
+assert.match(deploymentProvenance, /ZIP_SHA256: \$\{\{ needs\.validate\.outputs\.zip_sha256 \}\}/);
+assert.match(deploymentProvenance, /github\.rest\.repos\.createDeployment\(/);
+assert.match(deploymentProvenance, /ref: targetSha/);
+assert.match(deploymentProvenance, /environment: 'rocketchat-production'/);
+assert.match(deploymentProvenance, /github\.rest\.repos\.createDeploymentStatus\(/);
+assert.match(deploymentProvenance, /state: 'success'/);
+assert.match(deploymentProvenance, /target_sha: targetSha/);
+assert.match(deploymentProvenance, /bundle_sha256: bundleSha/);
+assert.match(deploymentProvenance, /zip_sha256: zipSha/);
+assert.doesNotMatch(deploymentProvenance, /actions\/checkout|secrets\.ROCKETCHAT_|ROCKETCHAT_(?:URL|USER|PASSWORD)/,
+  "deployment provenance job must not check out product code or receive Rocket.Chat secrets");
+
 [
   "Validate Rocket.Chat deployment secrets",
   "Authenticate, revoke previous sessions, update app, and logout"
@@ -65,6 +90,11 @@ assert.ok(firstSecret > workflow.indexOf("Validate Rocket.Chat deployment secret
 const beforeSecretGate = workflow.slice(0, workflow.indexOf("      - name: Validate Rocket.Chat deployment secrets"));
 assert.doesNotMatch(beforeSecretGate, /secrets\.ROCKETCHAT_|\/api\/v1\/login|\/api\/apps\/update/,
   "validation-only path must not inspect secrets or call Rocket.Chat");
+assert.doesNotMatch(beforeSecretGate, /createDeployment|createDeploymentStatus/,
+  "validation-only path must not create GitHub Deployment records");
+assert.match(step("Verify canonical package gate"), /id: package/);
+assert.match(step("Verify canonical package gate"), /bundle_sha256=.*GITHUB_OUTPUT/);
+assert.match(step("Verify canonical package gate"), /zip_sha256=.*GITHUB_OUTPUT/);
 assert.match(step("Authenticate, revoke previous sessions, update app, and logout"), /\/api\/apps\/update/);
 assert.match(workflow, /session_cleanup:[\s\S]*if: github\.event_name == 'workflow_dispatch' && inputs\.action == 'SESSION_CLEANUP'/);
 assert.match(step("Validate guarded session cleanup request"), /inputs\.confirm.*CLEANUP/);

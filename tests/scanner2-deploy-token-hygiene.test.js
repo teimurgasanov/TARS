@@ -36,6 +36,18 @@ const cleanupGuarded = step("Revoke previous sessions and logout cleanup session
 const cleanupScript = runScript(cleanupGuarded);
 const manualGate = "if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY'";
 const cleanupJobGate = "if: github.event_name == 'workflow_dispatch' && inputs.action == 'SESSION_CLEANUP'";
+const provenanceStart = workflow.indexOf("\n  deployment_provenance:");
+const provenanceEnd = workflow.indexOf("\n  session_cleanup:", provenanceStart);
+assert.ok(provenanceStart >= 0 && provenanceEnd > provenanceStart, "deployment provenance job must exist");
+const provenance = workflow.slice(provenanceStart, provenanceEnd);
+
+assert.ok(provenance.includes(manualGate), "deployment provenance must remain manual DEPLOY only");
+assert.match(provenance, /TARGET_SHA/);
+assert.match(provenance, /BUNDLE_SHA256/);
+assert.match(provenance, /ZIP_SHA256/);
+assert.match(provenance, /needs\.validate\.result == 'success'/);
+assert.doesNotMatch(provenance, /actions\/checkout|ROCKETCHAT_(?:URL|USER|PASSWORD)|secrets\.ROCKETCHAT_|AUTH_TOKEN|USER_ID|UPDATE_RESPONSE|LOGIN_JSON/,
+  "deployment provenance metadata must not receive Rocket.Chat credentials, tokens, or response bodies");
 
 assert.ok(guarded.includes(manualGate), "all authenticated Rocket.Chat calls must remain manual DEPLOY only");
 assert.match(guarded, /\/api\/v1\/login/, "guarded step must authenticate locally");
