@@ -21,6 +21,8 @@ function runtimeScenario(guard, mode, suffix) {
   const consensusMode = mode === "rejected-consensus";
   const records = new Map();
   const sourceContent = Buffer.from(`personal-receipt-control-${mode}-${suffix}`);
+  const sourceContents = new Map();
+  const uploadFiles = new Map();
   const personalRoom = { id: `personal-${suffix}`, type: "d", slugifiedName: `tars-master-${suffix}` };
   const controlRoom = { id: "control-room", type: "p", slugifiedName: "cheki-kontrol", displayName: "Контроль чеков" };
   const owner = { id: `owner-${suffix}`, username: `master-${suffix}`, name: `Master ${suffix}` };
@@ -28,6 +30,8 @@ function runtimeScenario(guard, mode, suffix) {
   const teimur = { id: "teimur-id", username: "teimur", name: "Teimur" };
   const shura = { id: "shura-id", username: "shura", name: "Shura" };
   const messageFile = { _id: `upload-${suffix}`, id: `upload-${suffix}`, name: `image-${suffix}.jpg`, type: "image/jpeg" };
+  sourceContents.set(messageFile.id, sourceContent);
+  uploadFiles.set(messageFile.id, messageFile);
   const message = {
     id: `message-${suffix}`,
     room: personalRoom,
@@ -60,6 +64,8 @@ function runtimeScenario(guard, mode, suffix) {
   let receiptCalls = 0;
   let dedicatedCalls = 0;
   let yandexCalls = 0;
+  let lastRequestedUploadId = messageFile.id;
+  const amountOverrides = new Map();
   const providerCalls = [];
   const http = {
     async post(url, options) {
@@ -114,12 +120,12 @@ function runtimeScenario(guard, mode, suffix) {
       const focusedPass = prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА ДАТЫ") ? "date-focus" : prompt.includes("ПОВТОРНАЯ НЕЗАВИСИМАЯ ПРОВЕРКА СУММЫ") ? "amount-focus" : "";
       providerCalls.push(focusedPass ? `openai:${focusedPass}` : "openai:primary");
       if (focusedPass) {
-        const amount = mode === "unknown" ? null : 1200;
+        const amount = mode === "unknown" ? null : (amountOverrides.get(lastRequestedUploadId) || 1200);
         return openAiResponse({
           date: mode === "unknown" ? null : observedDate,
           time: null,
           amount,
-          amount_text: amount === null ? null : "1200 RUB",
+          amount_text: amount === null ? null : `${amount} RUB`,
           amount_label: amount === null ? null : "amount",
           currency: amount === null ? "unknown" : "RUB",
           confidence: mode === "unknown" ? 0.2 : 0.98,
@@ -141,6 +147,7 @@ function runtimeScenario(guard, mode, suffix) {
           bank: null
         });
       }
+      const primaryAmount = amountOverrides.get(lastRequestedUploadId) || 1200;
       return openAiResponse({
         is_receipt: true,
         has_readable_text: true,
@@ -148,8 +155,8 @@ function runtimeScenario(guard, mode, suffix) {
         is_mailing_proof: false,
         is_screenshot_of_chat: false,
         date: observedDate,
-        amount: 1200,
-        amount_text: "1200 RUB",
+        amount: primaryAmount,
+        amount_text: `${primaryAmount} RUB`,
         amount_label: "amount",
         status: "success",
         bank: "test-bank"
@@ -188,11 +195,13 @@ function runtimeScenario(guard, mode, suffix) {
     getUploadReader() {
       return {
         async getBufferById(uploadId) {
-          assert.strictEqual(uploadId, messageFile.id);
-          return sourceContent;
+          lastRequestedUploadId = uploadId;
+          const content = sourceContents.get(uploadId);
+          assert.ok(content, `unexpected upload ${uploadId}`);
+          return content;
         },
         async getById(uploadId) {
-          return uploadId === messageFile.id ? messageFile : undefined;
+          return uploadFiles.get(uploadId);
         }
       };
     },
@@ -320,6 +329,7 @@ function runtimeScenario(guard, mode, suffix) {
   };
   const logger = { info() {}, warn() {}, error() {} };
   return {
+    amountOverrides,
     config,
     controlRoom,
     controlUploads,
@@ -337,7 +347,9 @@ function runtimeScenario(guard, mode, suffix) {
     receiptCalls: () => receiptCalls,
     records,
     requiredDate,
-    sourceContent
+    sourceContent,
+    sourceContents,
+    uploadFiles
   };
 }
 
@@ -358,7 +370,7 @@ async function receiptIndex(guard, scenario) {
   }, rejected.read, rejected.persistence, rejected.modify, { info() {}, warn() {}, error() {} }, rejected.http, rejected.config);
   let preIndex = await receiptIndex(rejectedGuard, rejected);
   assert.strictEqual(preIndex.photos.length, 0, "personal pre-upload must not make a financial receipt decision");
-  assert.strictEqual(rejected.providerCalls.length, 0, "personal pre-upload must not invoke OCR/Vision before the original settles");
+  assert.strictEqual(rejected.providerCalls.length, 0, "personal pre-upload must not invoke Vision/fallback before the original settles");
   assert.strictEqual(rejected.privateNotifications.length, 0, "private CONTROL actions must wait for the post-message strict decision");
   const rejectedResult = await rejectedGuard.processPersonalMediaV2(
     rejected.message, rejected.read, rejected.persistence, rejected.modify,
@@ -467,6 +479,85 @@ async function receiptIndex(guard, scenario) {
   const acceptedDetails = accepted.publishedMessages.find((item) => /^✅ ЧЕК ПРИНЯТ/.test(String(item.text || "")));
   assert.ok(acceptedDetails, "accepted receipt must publish its result");
   assert.strictEqual(acceptedDetails.threadId, accepted.message.id, "accepted result must be attached to the corresponding receipt image");
+
+  // E. Symmetric three-upload identity registry over the same fallback path.
+  // Registry-A is the receipt already confirmed above (1200 RUB). Registry-B
+  // is a distinct upload of the SAME payment (same strictly extracted stable
+  // identity) and must take the real direct-room identity-duplicate branch
+  // without inflating the confirmed running total (M1 oracle: removing
+  // duplicate detection lets registry-B through as a second confirmed
+  // receipt). Registry-C is a genuinely different, later payment (1300 RUB)
+  // and must be independently confirmed and added to the running total
+  // (overblock oracle: removing identity equality wrongly rejects registry-C
+  // as a duplicate of registry-A).
+  const registryA = index.photos.find((entry) => entry.source === "confirmed");
+  assert.ok(registryA, "registry-A receipt must establish a confirmed identity");
+  assert.match(registryA.receiptIdentity, /^(id:|txn:|text:)/, "registry-A must have a stable production identity");
+
+  // Registry-B: same payment (1200 RUB), same strictly-extracted identity.
+  const registryBContent = Buffer.from("personal-receipt-identity-duplicate-second-bytes");
+  const registryBFile = { _id: "upload-valid-fallback-identity-second", id: "upload-valid-fallback-identity-second", name: "identity-second.jpg", type: "image/jpeg" };
+  const registryBMessage = {
+    ...accepted.message,
+    id: "message-valid-fallback-identity-second",
+    file: registryBFile,
+    files: [registryBFile]
+  };
+  accepted.sourceContents.set(registryBFile.id, registryBContent);
+  accepted.uploadFiles.set(registryBFile.id, registryBFile);
+  const registryBResult = await acceptedGuard.processPersonalMediaV2(
+    registryBMessage, accepted.read, accepted.persistence, accepted.modify,
+    { info() {}, warn() {}, error() {} }, accepted.http, accepted.config
+  );
+  await acceptedGuard.flushReceiptCaseV1ForTests();
+  index = await receiptIndex(acceptedGuard, accepted);
+  const registryBExact = acceptedGuard.exactHash(registryBContent);
+  const registryBEntry = index.photos.find((entry) => entry.exact === registryBExact);
+  assert.strictEqual(registryBResult.handled, true, "registry-B identity duplicate must be handled by the receipt path");
+  assert.ok(registryBEntry, "registry-B upload must be recorded in the receipt index");
+  assert.notStrictEqual(registryBEntry.exact, registryA.exact, "registry-A/B uploads must have different exact hashes");
+  assert.strictEqual(registryBEntry.receiptIdentity, registryA.receiptIdentity, "controlled Vision/fallback must build the same stable receipt identity for registry-B");
+  assert.strictEqual(registryBEntry.source, "duplicate", "M1 oracle: matching stable identity must reject registry-B");
+  assert.strictEqual(index.photos.filter((entry) => entry.source === "confirmed").length, 1, "M1 oracle: registry-B identity duplicate must not create a second confirmed receipt");
+  const afterBSummary = await acceptedGuard.confirmedTransferSummaryForUser(
+    accepted.read, accepted.config, accepted.owner.id, accepted.requiredDate, [], undefined, accepted.message.room.id
+  );
+  assert.strictEqual(afterBSummary.count, 1, "M1 oracle (financial invariant): registry-B must not be counted in the running total");
+  assert.strictEqual(afterBSummary.total, 1200, "M1 oracle (financial invariant): registry-B must not inflate the running total");
+
+  // Registry-C: a genuinely different, later payment (1300 RUB instead of
+  // 1200 RUB) -> a genuinely different production-built stable identity.
+  const registryCContent = Buffer.from("personal-receipt-identity-distinct-third-bytes");
+  const registryCFile = { _id: "upload-valid-fallback-identity-third", id: "upload-valid-fallback-identity-third", name: "identity-third.jpg", type: "image/jpeg" };
+  accepted.amountOverrides.set(registryCFile.id, 1300);
+  const registryCMessage = {
+    ...accepted.message,
+    id: "message-valid-fallback-identity-third",
+    file: registryCFile,
+    files: [registryCFile]
+  };
+  accepted.sourceContents.set(registryCFile.id, registryCContent);
+  accepted.uploadFiles.set(registryCFile.id, registryCFile);
+  const registryCResult = await acceptedGuard.processPersonalMediaV2(
+    registryCMessage, accepted.read, accepted.persistence, accepted.modify,
+    { info() {}, warn() {}, error() {} }, accepted.http, accepted.config
+  );
+  await acceptedGuard.flushReceiptCaseV1ForTests();
+  index = await receiptIndex(acceptedGuard, accepted);
+  const registryCExact = acceptedGuard.exactHash(registryCContent);
+  const registryCEntry = index.photos.find((entry) => entry.exact === registryCExact);
+  assert.strictEqual(registryCResult.handled, true, "registry-C distinct payment must be handled by the receipt path");
+  assert.ok(registryCEntry, "registry-C upload must be recorded in the receipt index");
+  assert.strictEqual(registryCEntry.receiptAmount, 1300, "registry-C must be recognized as its own 1300 RUB payment");
+  assert.match(registryCEntry.receiptIdentity, /^(id:|txn:|text:)/, "registry-C must have a stable production identity");
+  assert.notStrictEqual(registryCEntry.receiptIdentity, registryA.receiptIdentity, "overblock oracle: a different payment must build a genuinely different stable identity");
+  assert.strictEqual(registryCEntry.source, "confirmed", "overblock oracle: a genuinely different stable identity must not be rejected as a duplicate");
+  assert.strictEqual(index.photos.filter((entry) => entry.source === "confirmed").length, 2, "overblock oracle: registry-C must be a second confirmed receipt");
+  const afterCSummary = await acceptedGuard.confirmedTransferSummaryForUser(
+    accepted.read, accepted.config, accepted.owner.id, accepted.requiredDate, [], undefined, accepted.message.room.id
+  );
+  assert.strictEqual(afterCSummary.count, 2, "overblock oracle (financial invariant): registry-C must be counted in the running total");
+  assert.strictEqual(afterCSummary.total, 2500, "overblock oracle (financial invariant): registry-C must add its own 1300 RUB to the running total");
 
   console.log("PASS: personal fallback keeps rejected receipts private without affecting unknown images or accepted totals");
 })().catch((error) => {
