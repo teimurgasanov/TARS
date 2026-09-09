@@ -34,6 +34,10 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY')
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      target_sha: ${{ steps.target.outputs.sha }}
+      bundle_sha256: ${{ steps.package.outputs.bundle_sha256 }}
+      zip_sha256: ${{ steps.package.outputs.zip_sha256 }}
 
     steps:
       - name: Resolve reviewed target
@@ -227,6 +231,7 @@ jobs:
           ./build-tars.sh
 
       - name: Verify canonical package gate
+        id: package
         shell: bash
         run: |
           set -euo pipefail
@@ -259,6 +264,8 @@ jobs:
           echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
           echo "BUNDLE_SHA256=$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
           echo "ZIP_SHA256=$(sha256sum "$ZIP_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "bundle_sha256=$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "zip_sha256=$(sha256sum "$ZIP_PATH" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           {
             echo "ZIP_CONTENTS<<EOF"
             printf '%s\n' "$ZIP_CONTENTS"
@@ -444,6 +451,56 @@ jobs:
           python3 -c 'import json; print("Version:", json.load(open("app.json"))["version"])'
           echo "Bundle SHA-256: $BUNDLE_SHA256"
           echo "ZIP SHA-256: $ZIP_SHA256"
+
+  deployment_provenance:
+    name: Record successful Rocket.Chat deployment provenance
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY' && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    env:
+      TARGET_SHA: ${{ needs.validate.outputs.target_sha }}
+      BUNDLE_SHA256: ${{ needs.validate.outputs.bundle_sha256 }}
+      ZIP_SHA256: ${{ needs.validate.outputs.zip_sha256 }}
+    steps:
+      - name: Create immutable deployment receipt
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const targetSha = process.env.TARGET_SHA;
+            const bundleSha = process.env.BUNDLE_SHA256;
+            const zipSha = process.env.ZIP_SHA256;
+            if (!/^[0-9a-f]{40}$/i.test(targetSha) || !/^[0-9a-f]{64}$/i.test(bundleSha) || !/^[0-9a-f]{64}$/i.test(zipSha)) {
+              core.setFailed('Deployment provenance blocked: verified commit or package hash is invalid.');
+              return;
+            }
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: targetSha,
+              environment: 'rocketchat-production',
+              transient_environment: false,
+              production_environment: true,
+              auto_merge: false,
+              required_contexts: [],
+              description: `Rocket.Chat apps/update succeeded for verified commit ${targetSha}`,
+              payload: JSON.stringify({
+                schema_version: 'tars-deployment-provenance-v1',
+                target_sha: targetSha,
+                bundle_sha256: bundleSha,
+                zip_sha256: zipSha
+              })
+            });
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: deployment.data.id,
+              state: 'success',
+              environment: 'rocketchat-production',
+              description: `Rocket.Chat apps/update succeeded for verified commit ${targetSha}`
+            });
 
   session_cleanup:
     name: Revoke Rocket.Chat deployment-user sessions without deploy
