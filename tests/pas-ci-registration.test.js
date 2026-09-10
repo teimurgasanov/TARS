@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 
 const root = path.resolve(__dirname, "..");
-const expectedPasTestCount = 2;
+const expectedPasTestCount = 3;
 const workflowNames = [
   "deploy-rocketchat.yml",
   "scanner2-packaging-ci.yml"
@@ -37,6 +37,7 @@ for (const workflowName of workflowNames) {
   );
   const legacyStep = workflowStep(workflow, "Run 83 legacy TARS tests");
   const pasStep = workflowStep(workflow, "Run PAS financial-core tests");
+  assert.match(pasStep, /npm ci --prefix pas\/authority/, "isolated SQLite dependency must be installed before PAS tests");
 
   assert.match(
     legacyStep,
@@ -59,6 +60,7 @@ const guardedReview = fs.readFileSync(
   path.join(root, ".github", "workflows", "tars-guarded-review-build.yml"),
   "utf8"
 );
+assert.match(guardedReview, /npm ci --prefix pas\/authority/, "all-tests CI must install the isolated PAS dependency");
 assert.match(
   guardedReview,
   /for test_file in tests\/\*\.test\.js; do/,

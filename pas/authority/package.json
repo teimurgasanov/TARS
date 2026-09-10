@@ -1,0 +1,8 @@
+{
+  "name": "tars-isolated-pas-authority",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "engines": { "node": ">=20" },
+  "dependencies": { "better-sqlite3": "11.10.0" }
+}
