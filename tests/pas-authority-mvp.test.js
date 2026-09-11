@@ -111,6 +111,14 @@ async function compete(f, commands) {
     assert.strictEqual(f.count("CommandLog"), 1);
     assert.strictEqual(f.count("FinancialEffect"), 2);
     assert.strictEqual(f.sql.pragma("journal_mode", { simple: true }), "wal");
+    const slot = f.sql.prepare("SELECT * FROM PaymentSlot").get();
+    const version = f.sql.prepare("SELECT * FROM ConfirmedPayment").get();
+    assert.strictEqual(slot.canonicalPaymentId, first.result.canonicalPaymentId);
+    assert.strictEqual(version.canonicalPaymentId, slot.canonicalPaymentId);
+    assert.strictEqual(slot.liveConfirmationId, version.confirmationId);
+    assert.match(version.confirmationId, /^[0-9a-f-]{36}$/);
+    assert.notStrictEqual(version.confirmationId, slot.canonicalPaymentId);
+    assert.deepStrictEqual(f.sql.pragma("foreign_key_check"), []);
   });
 
   await fixtureTest("C: new observation resolves same ID and shares financial effect", f => {
@@ -136,7 +144,9 @@ async function compete(f, commands) {
     assert.strictEqual(f.count("PaymentSlot"), 1);
     assert.strictEqual(f.count("ConfirmedPayment"), 1);
     assert.strictEqual(f.count("CommandLog"), 2);
-    assert.strictEqual(f.sql.prepare("SELECT count(*) AS n FROM ConfirmedPayment WHERE status = 'LIVE'").get().n, 1);
+    assert.strictEqual(f.sql.prepare(`SELECT count(*) AS n FROM PaymentSlot s
+      JOIN ConfirmedPayment p ON p.confirmationId = s.liveConfirmationId
+        AND p.canonicalPaymentId = s.canonicalPaymentId`).get().n, 1);
   });
 
   await fixtureTest("D/B: competing identical command returns identical committed response", async f => {
@@ -337,9 +347,13 @@ async function compete(f, commands) {
   await fixtureTest("SQL constraints enforce immutable confirmations, slot uniqueness and non-null success ID", f => {
     f.authority.confirmPayment(command("immutable"));
     const payment = f.sql.prepare("SELECT * FROM ConfirmedPayment").get();
+    assert.throws(() => f.sql.prepare(`INSERT INTO PaymentSlot
+      (canonicalPaymentId, liveConfirmationId) VALUES (?, ?)`)
+      .run(payment.canonicalPaymentId, payment.confirmationId), /immutable slot/);
     assert.throws(() => f.sql.prepare(`INSERT INTO ConfirmedPayment
-      (canonicalPaymentId, slotId, status, amountMinorUnits, currency, paymentDate, firstCommandJson)
-      VALUES ('other', ?, 'LIVE', 1, 'RUB', '2026-09-09', '{}')`).run(payment.slotId), /UNIQUE/);
+      (confirmationId, canonicalPaymentId, amountMinorUnits, currency, paymentDate, firstCommandJson)
+      VALUES (?, ?, 1, 'RUB', '2026-09-09', '{}')`)
+      .run(payment.confirmationId, payment.canonicalPaymentId), /immutable confirmation/);
     for (const table of ["PaymentSlot", "ConfirmedPayment", "IdentityAlias", "CommandLog", "CommandEvidence", "CommandEffect"]) {
       assert.throws(() => f.sql.exec("DELETE FROM " + table), /immutable/);
     }
@@ -351,6 +365,127 @@ async function compete(f, commands) {
     }
     assert.deepStrictEqual(f.sql.pragma("foreign_key_check"), []);
     assert.strictEqual(f.sql.pragma("integrity_check", { simple: true }), "ok");
+  });
+
+  await fixtureTest("stable identity: schema supports historical A and live B without changing aliases or history", f => {
+    const input = command("version-a");
+    const first = f.authority.confirmPayment(input);
+    const versionA = f.sql.prepare("SELECT * FROM ConfirmedPayment").get();
+    const aliases = f.sql.prepare("SELECT * FROM IdentityAlias ORDER BY kind, aliasValue").all();
+    const before = stateCounts(f);
+    // Schema capability only: no production replace/void command or effect delivery.
+    f.sql.transaction(() => {
+      f.sql.prepare(`INSERT INTO ConfirmedPayment
+        (confirmationId, canonicalPaymentId, amountMinorUnits, currency, paymentDate, firstCommandJson)
+        VALUES ('synthetic-version-b', ?, 130000, 'RUB', '2026-09-10', '{}')`).run(first.canonicalPaymentId);
+      assert.strictEqual(f.sql.prepare("SELECT liveConfirmationId FROM PaymentSlot").get().liveConfirmationId, versionA.confirmationId);
+      f.sql.prepare("UPDATE PaymentSlot SET liveConfirmationId = 'synthetic-version-b' WHERE canonicalPaymentId = ?")
+        .run(first.canonicalPaymentId);
+    }).immediate();
+
+    const reopened = new PaymentAuthority(f.filename);
+    try {
+      assert.deepStrictEqual(f.sql.prepare("SELECT * FROM PaymentSlot").get(), {
+        canonicalPaymentId: first.canonicalPaymentId, liveConfirmationId: "synthetic-version-b"
+      });
+      assert.deepStrictEqual(f.sql.prepare("SELECT * FROM ConfirmedPayment WHERE confirmationId = ?").get(versionA.confirmationId), versionA);
+      assert.deepStrictEqual(f.sql.prepare("SELECT * FROM IdentityAlias ORDER BY kind, aliasValue").all(), aliases);
+      assert.deepStrictEqual(stateCounts(f), before.map((count, index) => count + (index === 1 ? 1 : 0)));
+      assert.strictEqual(f.sql.prepare("SELECT count(*) n FROM ConfirmedPayment WHERE canonicalPaymentId = ?").get(first.canonicalPaymentId).n, 2);
+      assert.deepStrictEqual(reopened.confirmPayment(input), first, "old command still replays its exact stored result");
+      assert.strictEqual(reopened.confirmPayment(command("stale-values")).reasonCode, "CONFIRMED_VALUES_CONFLICT",
+        "new commands must compare the live version, not an arbitrary historical row");
+      assert.deepStrictEqual(reopened.confirmPayment(command("live-values", "payment-a", { extracted: {
+        amount: { minorUnits: 130000, currency: "RUB" }, date: "2026-09-10"
+      } })), { ...first, status: "ALREADY_CONFIRMED" });
+      assert.strictEqual(f.count("ConfirmedPayment"), 2, "retries never append confirmation versions");
+    } finally { reopened.close(); }
+    assert.deepStrictEqual(f.sql.pragma("foreign_key_check"), []);
+    assert.strictEqual(f.sql.pragma("integrity_check", { simple: true }), "ok");
+  });
+
+  await fixtureTest("live pointer: cross-identity and missing targets fail at commit and roll back", f => {
+    const x = f.authority.confirmPayment(command("pointer-x", "x"));
+    const y = f.authority.confirmPayment(command("pointer-y", "y"));
+    const slots = f.sql.prepare("SELECT * FROM PaymentSlot ORDER BY canonicalPaymentId").all();
+    const yVersion = slots.find(slot => slot.canonicalPaymentId === y.canonicalPaymentId).liveConfirmationId;
+    for (const invalidTarget of [yVersion, "missing-version"]) {
+      assert.throws(() => f.sql.transaction(() => {
+        f.sql.prepare("UPDATE PaymentSlot SET liveConfirmationId = ? WHERE canonicalPaymentId = ?")
+          .run(invalidTarget, x.canonicalPaymentId);
+        assert.strictEqual(f.sql.prepare("SELECT liveConfirmationId FROM PaymentSlot WHERE canonicalPaymentId = ?")
+          .get(x.canonicalPaymentId).liveConfirmationId, invalidTarget, "FK is deferred only until commit");
+      }).immediate(), /FOREIGN KEY/);
+      assert.strictEqual(f.sql.inTransaction, false);
+      assert.deepStrictEqual(f.sql.prepare("SELECT * FROM PaymentSlot ORDER BY canonicalPaymentId").all(), slots);
+    }
+    assert.throws(() => f.sql.transaction(() => {
+      f.sql.prepare("INSERT INTO PaymentSlot VALUES ('dangling-slot', 'missing-version')").run();
+    }).immediate(), /FOREIGN KEY/);
+    assert.strictEqual(f.count("PaymentSlot"), 2);
+    assert.throws(() => f.sql.prepare(`INSERT INTO ConfirmedPayment VALUES
+      ('orphan-version', 'missing-slot', 1, 'RUB', '2026-09-09', '{}')`).run(), /FOREIGN KEY/);
+    assert.deepStrictEqual(f.sql.pragma("foreign_key_check"), []);
+  });
+
+  await fixtureTest("historical versions and canonical identity resist update, delete, upsert and REPLACE", f => {
+    const first = f.authority.confirmPayment(command("history"));
+    const version = f.sql.prepare("SELECT * FROM ConfirmedPayment").get();
+    const slot = f.sql.prepare("SELECT * FROM PaymentSlot").get();
+    f.sql.prepare(`INSERT INTO ConfirmedPayment VALUES
+      ('history-b', ?, 130000, 'RUB', '2026-09-10', '{}')`).run(first.canonicalPaymentId);
+    f.sql.exec("UPDATE PaymentSlot SET liveConfirmationId = 'history-b'");
+    for (const [column, value] of Object.entries({
+      confirmationId: "renamed", canonicalPaymentId: "another-slot", amountMinorUnits: 1,
+      currency: "USD", paymentDate: "2026-09-11", firstCommandJson: "{}"
+    })) {
+      assert.throws(() => f.sql.prepare(`UPDATE ConfirmedPayment SET ${column} = ? WHERE confirmationId = ?`)
+        .run(value, version.confirmationId), /immutable confirmation/);
+    }
+    assert.throws(() => f.sql.prepare("DELETE FROM ConfirmedPayment WHERE confirmationId = ?")
+      .run(version.confirmationId), /immutable confirmation/);
+    assert.throws(() => f.sql.exec("UPDATE PaymentSlot SET canonicalPaymentId = 'renamed'"), /immutable slot/);
+    // SQLite REPLACE can skip delete triggers; test both connection configurations.
+    for (const recursive of [0, 1]) {
+      f.sql.pragma("recursive_triggers = " + recursive);
+      assert.throws(() => f.sql.prepare(`INSERT OR REPLACE INTO ConfirmedPayment VALUES
+        (?, ?, 1, 'RUB', '2026-09-09', '{}')`).run(version.confirmationId, first.canonicalPaymentId), /immutable confirmation/);
+      assert.throws(() => f.sql.prepare("INSERT OR REPLACE INTO PaymentSlot VALUES (?, ?)")
+        .run(first.canonicalPaymentId, version.confirmationId), /immutable slot/);
+      assert.throws(() => f.sql.prepare(`INSERT INTO ConfirmedPayment VALUES
+        (?, ?, 1, 'RUB', '2026-09-09', '{}') ON CONFLICT(confirmationId) DO UPDATE SET amountMinorUnits = 1`)
+        .run(version.confirmationId, first.canonicalPaymentId), /immutable confirmation/);
+    }
+    for (const table of ["PaymentSlot", "ConfirmedPayment"]) {
+      assert.throws(() => f.sql.prepare("SELECT rowid FROM " + table), /no such column/,
+        "no hidden rowid conflict may bypass the primary-key REPLACE guard");
+    }
+    assert.deepStrictEqual(f.sql.prepare("SELECT * FROM ConfirmedPayment WHERE confirmationId = ?").get(version.confirmationId), version);
+    assert.deepStrictEqual(f.sql.prepare("SELECT * FROM PaymentSlot").get(), { ...slot, liveConfirmationId: "history-b" });
+    assert.strictEqual(f.count("ConfirmedPayment"), 2);
+    assert.deepStrictEqual(f.sql.pragma("foreign_key_check"), []);
+  });
+
+  await fixtureTest("stable identity: aliases, command log, evidence and effects reference PaymentSlot", f => {
+    const first = f.authority.confirmPayment(command("stable-refs"));
+    for (const table of ["IdentityAlias", "CommandLog", "CommandEvidence", "FinancialEffect", "ConfirmedPayment"]) {
+      const reference = f.sql.pragma("foreign_key_list(" + table + ")").find(fk => fk.from === "canonicalPaymentId");
+      assert.strictEqual(reference.table, "PaymentSlot", table);
+      assert.strictEqual(reference.to, "canonicalPaymentId", table);
+      assert.ok(f.sql.prepare("SELECT canonicalPaymentId FROM " + table).all()
+        .every(row => row.canonicalPaymentId === first.canonicalPaymentId));
+    }
+  });
+
+  await fixtureTest("schema can retain identity/history without a live version; confirm fails closed", f => {
+    const first = f.authority.confirmPayment(command("no-live"));
+    const before = stateCounts(f);
+    f.sql.exec("UPDATE PaymentSlot SET liveConfirmationId = NULL");
+    assert.strictEqual(f.authority.confirmPayment(command("no-live-retry")).status, "AUTHORITY_UNAVAILABLE");
+    assert.deepStrictEqual(stateCounts(f), before);
+    assert.strictEqual(f.count("CommandLog"), 1);
+    assert.strictEqual(f.sql.prepare("SELECT canonicalPaymentId FROM PaymentSlot").get().canonicalPaymentId, first.canonicalPaymentId);
+    assert.deepStrictEqual(f.sql.pragma("foreign_key_check"), []);
   });
 
   await fixtureTest("weak-only and missing identity evidence hold; equal amount/date do not merge payments", f => {
@@ -398,9 +533,15 @@ async function compete(f, commands) {
     db.exec("CREATE TABLE Unrelated (value TEXT)");
     db.close();
     assert.throws(() => new PaymentAuthority(foreign), /foreign database/);
+    assert.strictEqual(f.sql.pragma("user_version", { simple: true }), 2);
+    const schemaBefore = f.sql.prepare("SELECT sql FROM sqlite_master ORDER BY name").all();
+    for (const unsupportedVersion of [1, 3]) {
+      f.sql.pragma("user_version = " + unsupportedVersion);
+      assert.throws(() => new PaymentAuthority(f.filename), /migrations are not supported/);
+      assert.strictEqual(f.sql.pragma("user_version", { simple: true }), unsupportedVersion);
+      assert.deepStrictEqual(f.sql.prepare("SELECT sql FROM sqlite_master ORDER BY name").all(), schemaBefore);
+    }
     f.sql.pragma("user_version = 2");
-    assert.throws(() => new PaymentAuthority(f.filename), /migrations are not supported/);
-    f.sql.pragma("user_version = 1");
   });
 
   console.log("PASS: isolated durable SQLite PAS authority MVP; A-H and failure/constraint guards");

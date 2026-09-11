@@ -1,21 +1,25 @@
 CREATE TABLE PaymentSlot (
-  slotId TEXT PRIMARY KEY NOT NULL CHECK (length(slotId) > 0)
-) STRICT;
+  canonicalPaymentId TEXT PRIMARY KEY NOT NULL CHECK (length(canonicalPaymentId) > 0),
+  liveConfirmationId TEXT,
+  FOREIGN KEY (canonicalPaymentId, liveConfirmationId)
+    REFERENCES ConfirmedPayment(canonicalPaymentId, confirmationId)
+    DEFERRABLE INITIALLY DEFERRED
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE ConfirmedPayment (
-  canonicalPaymentId TEXT PRIMARY KEY NOT NULL CHECK (length(canonicalPaymentId) > 0),
-  slotId TEXT NOT NULL UNIQUE REFERENCES PaymentSlot(slotId),
-  status TEXT NOT NULL CHECK (status = 'LIVE'),
+  confirmationId TEXT PRIMARY KEY NOT NULL CHECK (length(confirmationId) > 0),
+  canonicalPaymentId TEXT NOT NULL REFERENCES PaymentSlot(canonicalPaymentId),
   amountMinorUnits INTEGER NOT NULL CHECK (amountMinorUnits > 0),
   currency TEXT NOT NULL CHECK (length(currency) = 3),
   paymentDate TEXT NOT NULL,
-  firstCommandJson TEXT NOT NULL CHECK (json_valid(firstCommandJson))
-) STRICT;
+  firstCommandJson TEXT NOT NULL CHECK (json_valid(firstCommandJson)),
+  UNIQUE (canonicalPaymentId, confirmationId)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE IdentityAlias (
   kind TEXT NOT NULL CHECK (kind IN ('receiptCaseId', 'exactHash', 'observation', 'visualHash')),
   aliasValue TEXT NOT NULL CHECK (length(aliasValue) > 0),
-  canonicalPaymentId TEXT NOT NULL REFERENCES ConfirmedPayment(canonicalPaymentId),
+  canonicalPaymentId TEXT NOT NULL REFERENCES PaymentSlot(canonicalPaymentId),
   PRIMARY KEY (kind, aliasValue)
 ) STRICT;
 
@@ -23,7 +27,7 @@ CREATE TABLE CommandLog (
   commandId TEXT PRIMARY KEY NOT NULL CHECK (length(commandId) > 0),
   commandJson TEXT NOT NULL CHECK (json_valid(commandJson)),
   status TEXT NOT NULL CHECK (status IN ('CONFIRMED', 'ALREADY_CONFIRMED', 'CONFLICT', 'REJECTED')),
-  canonicalPaymentId TEXT REFERENCES ConfirmedPayment(canonicalPaymentId),
+  canonicalPaymentId TEXT REFERENCES PaymentSlot(canonicalPaymentId),
   resultJson TEXT NOT NULL CHECK (json_valid(resultJson)),
   CHECK (status NOT IN ('CONFIRMED', 'ALREADY_CONFIRMED') OR canonicalPaymentId IS NOT NULL),
   CHECK (json_extract(resultJson, '$.status') IS status),
@@ -32,13 +36,13 @@ CREATE TABLE CommandLog (
 
 CREATE TABLE CommandEvidence (
   commandId TEXT PRIMARY KEY NOT NULL REFERENCES CommandLog(commandId),
-  canonicalPaymentId TEXT NOT NULL REFERENCES ConfirmedPayment(canonicalPaymentId),
+  canonicalPaymentId TEXT NOT NULL REFERENCES PaymentSlot(canonicalPaymentId),
   evidenceJson TEXT NOT NULL CHECK (json_valid(evidenceJson))
 ) STRICT;
 
 CREATE TABLE FinancialEffect (
   effectId TEXT PRIMARY KEY NOT NULL CHECK (length(effectId) > 0),
-  canonicalPaymentId TEXT NOT NULL REFERENCES ConfirmedPayment(canonicalPaymentId),
+  canonicalPaymentId TEXT NOT NULL REFERENCES PaymentSlot(canonicalPaymentId),
   kind TEXT NOT NULL CHECK (kind IN ('WRITE_CONFIRMED_PROJECTION', 'ASSOCIATE_OBSERVATION')),
   dedupeKey TEXT NOT NULL,
   payloadJson TEXT NOT NULL CHECK (json_valid(payloadJson)),
@@ -54,10 +58,19 @@ CREATE TABLE CommandEffect (
   PRIMARY KEY (commandId, effectId)
 ) STRICT;
 
-CREATE TRIGGER slot_no_update BEFORE UPDATE ON PaymentSlot BEGIN SELECT RAISE(ABORT, 'immutable slot'); END;
+CREATE TRIGGER slot_identity_immutable BEFORE UPDATE ON PaymentSlot
+WHEN NEW.canonicalPaymentId IS NOT OLD.canonicalPaymentId
+BEGIN SELECT RAISE(ABORT, 'immutable slot'); END;
 CREATE TRIGGER slot_no_delete BEFORE DELETE ON PaymentSlot BEGIN SELECT RAISE(ABORT, 'immutable slot'); END;
+-- REPLACE must not bypass immutability when recursive delete triggers are disabled.
+CREATE TRIGGER slot_no_replace BEFORE INSERT ON PaymentSlot
+WHEN EXISTS (SELECT 1 FROM PaymentSlot WHERE canonicalPaymentId = NEW.canonicalPaymentId)
+BEGIN SELECT RAISE(ABORT, 'immutable slot'); END;
 CREATE TRIGGER payment_no_update BEFORE UPDATE ON ConfirmedPayment BEGIN SELECT RAISE(ABORT, 'immutable confirmation'); END;
 CREATE TRIGGER payment_no_delete BEFORE DELETE ON ConfirmedPayment BEGIN SELECT RAISE(ABORT, 'immutable confirmation'); END;
+CREATE TRIGGER payment_no_replace BEFORE INSERT ON ConfirmedPayment
+WHEN EXISTS (SELECT 1 FROM ConfirmedPayment WHERE confirmationId = NEW.confirmationId)
+BEGIN SELECT RAISE(ABORT, 'immutable confirmation'); END;
 CREATE TRIGGER alias_no_update BEFORE UPDATE ON IdentityAlias BEGIN SELECT RAISE(ABORT, 'immutable alias'); END;
 CREATE TRIGGER alias_no_delete BEFORE DELETE ON IdentityAlias BEGIN SELECT RAISE(ABORT, 'immutable alias'); END;
 CREATE TRIGGER command_no_update BEFORE UPDATE ON CommandLog BEGIN SELECT RAISE(ABORT, 'immutable command'); END;

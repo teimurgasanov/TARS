@@ -5,7 +5,7 @@ const path = require("path");
 const Database = require("better-sqlite3");
 
 // New isolated files only. Unknown databases/versions are refused, never migrated.
-function openDatabase(filename, schemaName, applicationId, timeout = 5000) {
+function openDatabase(filename, schemaName, applicationId, timeout = 5000, schemaVersion = 1) {
   if (typeof filename !== "string" || !path.isAbsolute(filename) || filename.includes(":memory:")) {
     throw new TypeError("PAS requires an absolute persistent SQLite filename");
   }
@@ -21,8 +21,8 @@ function openDatabase(filename, schemaName, applicationId, timeout = 5000) {
         if (count !== 0) throw new Error("PAS refuses an existing foreign database");
         db.exec(fs.readFileSync(path.join(__dirname, schemaName), "utf8"));
         db.pragma("application_id = " + applicationId);
-        db.pragma("user_version = 1");
-      } else if (version !== 1 || app !== applicationId) {
+        db.pragma("user_version = " + schemaVersion);
+      } else if (version !== schemaVersion || app !== applicationId) {
         throw new Error("PAS database identity/version mismatch; migrations are not supported");
       }
     }).immediate();

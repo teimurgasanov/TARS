@@ -29,13 +29,34 @@ downstream completion. `getCommandCompletion(commandId)` explicitly reports
 
 | Record | Meaning / database constraint |
 | --- | --- |
-| PaymentSlot | PAS-created slot; immutable primary key |
-| ConfirmedPayment | Opaque canonical ID; unique slot FK; only LIVE in this MVP; immutable amount, currency, date and first command with provenance |
-| IdentityAlias | Globally unique `(kind, aliasValue)` within this isolated DB; immutable canonical owner |
+| PaymentSlot | Stable opaque `canonicalPaymentId` primary key; immutable identity; only `liveConfirmationId` can change |
+| ConfirmedPayment | Separate immutable `confirmationId` primary key; canonical FK to PaymentSlot; many versions per canonical payment; immutable amount, currency, date and first command with provenance |
+| IdentityAlias | Globally unique `(kind, aliasValue)` within this isolated DB; immutable canonical owner FK to PaymentSlot, independent of confirmation versions |
 | CommandLog | Unique command ID; normalized full command and deterministic response; immutable |
 | CommandEvidence | Successful command's observation/evidence association to the canonical payment |
 | FinancialEffect | Durable PENDING/COMPLETED outbox; immutable payload and ID; unique `(canonicalPaymentId, kind, dedupeKey)`; monotonic state and attempt counter |
 | CommandEffect | Links every successful command to its required effects, including an existing payment's shared financial effect |
+
+`PaymentSlot(canonicalPaymentId, liveConfirmationId)` has a composite foreign key
+to `ConfirmedPayment(canonicalPaymentId, confirmationId)`, deferred until commit.
+It cannot point at another payment's version or a missing version. The reverse
+canonical FK is immediate. New confirmation creates the slot and its first version
+in the same transaction; no incomplete reference can commit. Liveness is determined
+only by the slot pointer, not by a mutable status on immutable confirmation history.
+Aliases, CommandLog, CommandEvidence and FinancialEffect reference the stable slot.
+
+Both identity/history tables are `WITHOUT ROWID`. Update/delete triggers and
+duplicate-ID insert guards prohibit identity changes, history deletion and history
+rewrites, including `INSERT OR REPLACE` with recursive triggers disabled; there is
+no hidden rowid through which REPLACE can bypass those guards.
+
+The schema can append version B under the same canonical ID as historical version A
+and atomically change the live pointer A -> B. A null pointer can represent an
+identity with no live version without deleting history. These are schema capabilities
+only: this MVP exposes no void/replace operation, never changes an existing pointer,
+and fails closed on a new confirm command for a slot without a live version.
+An exact old command still replays its committed result. Replacement authorization,
+void records, reversal effects and downstream reconciliation require a separate task.
 
 The reference downstream database has `Projection`, `ObservationProjection`, and
 `EffectInbox`. It models local projections exclusively for the isolated MVP;
@@ -58,8 +79,8 @@ these tables are not TARS financial records.
    - a new slot needs a case ID or exact hash; otherwise HOLD;
    - amount and date are authoritative values, not identity keys. Different real
      payments can have the same amount/date and must not be merged for that reason.
-5. Create one PAS slot/confirmation if unresolved; otherwise verify the already
-   confirmed amount, currency and date match. Changes to confirmed values HOLD
+5. Create one PAS slot/confirmation with separate IDs and a live pointer if unresolved;
+   otherwise follow the slot's live pointer and verify its amount, currency and date match. Changes to confirmed values HOLD
    with `CONFIRMED_VALUES_CONFLICT`, even for MANUAL. No history is overwritten.
 6. Add previously unowned aliases; record command/evidence and required effects.
 7. Commit all successful authority records and outbox work together. Storage
@@ -75,6 +96,9 @@ SQLite uses foreign keys, WAL and `synchronous=FULL`. Write contention exceeding
 the bounded timeout fails closed. Files must be explicit absolute persistent
 paths; `:memory:` is refused. The schema is created only in an empty file.
 Application ID/version mismatches and foreign databases are refused, not migrated.
+The corrected authority schema uses `user_version = 2`; version 1 files from
+`2127ec0787c93e98e94a076bae34e5d208e414d7` are refused without modification.
+The separate projection schema remains version 1. No migration is provided.
 Initialization errors throw before an authority can be used; operational storage
 errors return unavailable. Completion API storage failures throw, never return
 completed.
@@ -147,7 +171,7 @@ initial write lock. It is not `Promise.all` around two synchronous confirmations
 | A | First command confirms with non-null opaque ID and two pending effects |
 | B | Exact replay, reopen, concurrent same command, changed-input rejection |
 | C | New observation and newly learned alias resolve the same payment; financial effect shared |
-| D | Competing connections return one CONFIRMED and one ALREADY_CONFIRMED; one LIVE row |
+| D | Competing connections return one CONFIRMED and one ALREADY_CONFIRMED; one slot, one version, one live pointer |
 | E | Cross-owner aliases HOLD; all authority/effect counts unchanged; only conflict response recorded |
 | F | Lost transport response and abrupt process exit after commit; durable replay without duplicate |
 | G | Partial completion, lost consumer ack, parallel dispatch, inbox write failure and retry |
@@ -156,6 +180,15 @@ initial write lock. It is not `Promise.all` around two synchronous confirmations
 Additional guards cover rollback after late outbox failure, unavailable/locked
 storage, SQL uniqueness/immutability, null success IDs, weak/missing identity,
 invalid input, wrong acknowledgements and schema refusal.
+
+The same registered `pas-authority-mvp.test.js` also proves stable identity/version
+separation, A -> B pointer switching with historical A and aliases preserved,
+live-version lookup, exact old-command replay, cross-identity/missing-target rejection
+at commit with rollback, orphan-version rejection, update/delete/upsert/REPLACE
+immutability, canonical FK targets, and fail-closed behavior for a null live pointer.
+The A -> B setup is direct synthetic SQL; it does not deliver replacement effects or
+claim that a production void/replacement workflow exists. No test files were added
+or renamed, so CI registration is unchanged.
 
 ## Limits and review scope
 
@@ -166,7 +199,7 @@ invalid input, wrong acknowledgements and schema refusal.
   alias quality must be established before any future production authority work.
 - One local database represents one authority namespace. There is no tenant or
   bank namespace, authenticated service, authorization layer or public endpoint.
-- No reversals, replacements, refunds, voids, historic migration, or cutover.
+- No operational reversals, replacements, refunds, voids, historic migration, or cutover.
   Confirmed values cannot be corrected in place; conflicting commands HOLD.
 - Outbox draining is explicit and synchronous per consumer call, with no background
   scheduler, paging, leases, network delivery, or production recovery operation.

@@ -60,7 +60,7 @@ class PaymentAuthority {
   #db;
 
   constructor(filename, { timeout = 5000 } = {}) {
-    this.#db = openDatabase(filename, "schema.sql", 0x50415331, timeout);
+    this.#db = openDatabase(filename, "schema.sql", 0x50415331, timeout, 2);
   }
 
   close() { this.#db.close(); }
@@ -133,18 +133,24 @@ class PaymentAuthority {
     const amount = command.payment.amount.value;
     const paymentDate = command.payment.date.value;
     if (canonicalPaymentId) {
-      const payment = this.#db.prepare("SELECT * FROM ConfirmedPayment WHERE canonicalPaymentId = ?").get(canonicalPaymentId);
+      const payment = this.#db.prepare(`SELECT p.* FROM PaymentSlot s
+        JOIN ConfirmedPayment p ON p.canonicalPaymentId = s.canonicalPaymentId
+          AND p.confirmationId = s.liveConfirmationId
+        WHERE s.canonicalPaymentId = ?`).get(canonicalPaymentId);
+      if (!payment) throw new Error("No live confirmation; operation is not supported by this MVP");
       if (payment.amountMinorUnits !== amount.minorUnits || payment.currency !== amount.currency || payment.paymentDate !== paymentDate) {
         throw new Hold("CONFIRMED_VALUES_CONFLICT");
       }
     } else {
       canonicalPaymentId = randomUUID();
-      const slotId = randomUUID();
-      this.#db.prepare("INSERT INTO PaymentSlot (slotId) VALUES (?)").run(slotId);
+      const confirmationId = randomUUID();
+      // The deferred composite FK is checked at the outer commit, after both inserts.
+      this.#db.prepare("INSERT INTO PaymentSlot (canonicalPaymentId, liveConfirmationId) VALUES (?, ?)")
+        .run(canonicalPaymentId, confirmationId);
       this.#db.prepare(`INSERT INTO ConfirmedPayment
-        (canonicalPaymentId, slotId, status, amountMinorUnits, currency, paymentDate, firstCommandJson)
-        VALUES (?, ?, 'LIVE', ?, ?, ?, ?)`)
-        .run(canonicalPaymentId, slotId, amount.minorUnits, amount.currency, paymentDate, commandJson);
+        (confirmationId, canonicalPaymentId, amountMinorUnits, currency, paymentDate, firstCommandJson)
+        VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(confirmationId, canonicalPaymentId, amount.minorUnits, amount.currency, paymentDate, commandJson);
     }
     for (const alias of resolved) {
       if (!alias.payment) this.#db.prepare(
