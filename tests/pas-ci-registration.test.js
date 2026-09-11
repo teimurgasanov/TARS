@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 
 const root = path.resolve(__dirname, "..");
-const expectedPasTestCount = 3;
+const expectedPasTestCount = 4;
 const workflowNames = [
   "deploy-rocketchat.yml",
   "scanner2-packaging-ci.yml"

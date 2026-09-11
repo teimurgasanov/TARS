@@ -213,7 +213,7 @@ jobs:
             node "$test_file"
             pas_count=$((pas_count + 1))
           done < <(find tests -maxdepth 1 -type f -name 'pas-*.test.js' | sort)
-          test "$pas_count" -eq 3
+          test "$pas_count" -eq 4
           echo "PAS_TEST_COUNT=$pas_count" >> "$GITHUB_ENV"
 
       - name: Run 83 legacy TARS tests
