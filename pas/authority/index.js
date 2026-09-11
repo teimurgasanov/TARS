@@ -59,11 +59,34 @@ function aliasesFor(command) {
 class PaymentAuthority {
   #db;
 
-  constructor(filename, { timeout = 5000 } = {}) {
-    this.#db = openDatabase(filename, "schema.sql", 0x50415331, timeout, 2);
+  constructor(filename, { timeout = 5000, existingOnly = false } = {}) {
+    this.#db = openDatabase(filename, "schema.sql", 0x50415331, timeout, 2, { existingOnly });
   }
 
   close() { this.#db.close(); }
+
+  // Retrieval cursor is an append-only outbox row position, never completion state.
+  readEffects({ after = 0, limit = 50, includeCompleted = false } = {}) {
+    if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100
+      || typeof includeCompleted !== "boolean") throw new TypeError("Invalid effect page");
+    const rows = this.#db.prepare(`SELECT rowid AS position, * FROM FinancialEffect
+      WHERE rowid > ? AND (? OR state = 'PENDING') ORDER BY rowid LIMIT ?`).all(after, includeCompleted ? 1 : 0, limit);
+    return { effects: rows.map(row => ({ effectId: row.effectId, kind: row.kind,
+      payload: JSON.parse(row.payloadJson), payloadDigest: row.payloadDigest, state: row.state })),
+    nextCursor: rows.length ? rows[rows.length - 1].position : after };
+  }
+
+  acknowledgeEffect({ effectId, payloadDigest }) {
+    if (typeof effectId !== "string" || !effectId.trim() || typeof payloadDigest !== "string"
+      || !/^[a-f0-9]{64}$/.test(payloadDigest)) throw new TypeError("Invalid effect acknowledgement");
+    return this.#db.transaction(() => {
+      const effect = this.#db.prepare("SELECT payloadDigest FROM FinancialEffect WHERE effectId = ?").get(effectId);
+      if (!effect) return { status: "UNKNOWN_EFFECT" };
+      if (effect.payloadDigest !== payloadDigest) return { status: "EFFECT_DIGEST_MISMATCH" };
+      this.#db.prepare("UPDATE FinancialEffect SET state = 'COMPLETED' WHERE effectId = ? AND state = 'PENDING'").run(effectId);
+      return { status: "COMPLETED", effectId, payloadDigest };
+    }).immediate();
+  }
 
   confirmPayment(input) {
     let command;

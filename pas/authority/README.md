@@ -1,5 +1,11 @@
 # WP-022: isolated PAS authority MVP
 
+WP-023 adds an isolated local HTTP process around this core; see
+[service/README.md](../service/README.md) for the existing-only startup mode,
+bounded effect reads/acknowledgements and transport tests. The WP-022 description
+below records the original slice; its no-service and three-PAS-test statements
+are superseded by that separate service document. No authority schema changes.
+
 Base: `develop@f79b582f18069c071724d6f9a23f5012936dae2e`.
 Branch: `financial-core/wp-022-pas-authority-mvp`.
 
