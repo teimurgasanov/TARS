@@ -23,6 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Set up Node.js 20
         uses: actions/setup-node@v4
@@ -61,6 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Verify Claude credential exists
         shell: bash
@@ -76,6 +78,7 @@ jobs:
           github_token: ${{ github.token }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
+            Immutable review identity: checked-out merge candidate ${{ github.sha }}, PR head ${{ github.event.pull_request.head.sha }}, PR base ${{ github.event.pull_request.base.sha }}. Review git diff between those exact base/head commits; do not substitute current branch tips. The canonical artifact will be built from that exact merge candidate after your PASS.
             TARS ECONOMY REVIEW. Read CLAUDE.md first. Review ONLY this PR diff against develop and only minimal surrounding context. Do not edit, write, commit, push, deploy, or create files. Baseline 0.9.344 behavior is protected. Check regressions in receipts, duplicate protection, OCR, reports, photos, calculations, and Rocket.Chat. For receipt-date changes require one Europe/Astrakhan calendar-date semantic across acceptance, index, duplicate identity, sums, summaries, /cheki, /prinyat, repair and archive, while report/workday behavior remains unchanged. Your final line MUST be exactly FINAL_VERDICT: PASS if there is no blocking regression, or FINAL_VERDICT: BLOCK if there is one. Put any concise reason before that final line.
           claude_args: >-
             --model claude-sonnet-5
@@ -105,26 +108,44 @@ jobs:
           PY
 
   build:
-    name: Build reviewed ZIP
+    name: Build reviewed canonical ZIP
     needs: [tests, claude-review]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Build ZIP
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install canonical build dependencies
         shell: bash
         run: |
           set -euo pipefail
-          node --check TarsReportApp.js
-          VERSION="$(python3 -c 'import json; print(json.load(open("app.json"))["version"])')"
-          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
-          ZIP_NAME="tars-report_${VERSION}_${SHORT_SHA}.zip"
-          zip -q -j "$ZIP_NAME" app.json TarsReportApp.js en.json ru.json icon.png
-          unzip -t "$ZIP_NAME"
-          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          npm ci
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends zsh
+          test "$(node -p 'process.versions.node.split(".")[0]')" = "20"
+          test "$(node -p 'require("esbuild/package.json").version')" = "0.12.29"
+      - name: Build and verify reviewed canonical package
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          ./build-tars.sh
+          VERSION="$(node -p 'require("./app.json").version')"
+          ZIP_PATH="$PWD/tars-report_${VERSION}.zip"
+          node tools/tars-canonical-manifest.js "$ZIP_PATH" "$RUNNER_TEMP/reviewed-provenance.json"
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+          mkdir "$RUNNER_TEMP/reviewed-artifact"
+          cp "$ZIP_PATH" "$RUNNER_TEMP/reviewed-provenance.json" "$RUNNER_TEMP/reviewed-artifact/"
       - uses: actions/upload-artifact@v4
         with:
-          name: reviewed-tars-zip-${{ github.sha }}
-          path: ${{ env.ZIP_NAME }}
+          name: reviewed-tars-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reviewed-artifact/
           if-no-files-found: error
           retention-days: 14

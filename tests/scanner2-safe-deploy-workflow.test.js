@@ -103,3 +103,8 @@ assert.match(workflow, /uses: actions\/upload-artifact@v4[\s\S]*path: \$\{\{ env
 assert.match(step("Validation summary"), /Validation-only develop push completed\. No Rocket\.Chat deployment was attempted\./);
 
 console.log("PASS: production workflow builds canonically and cannot deploy on develop push");
+
+require("./helpers/reviewed-artifact-provenance")().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

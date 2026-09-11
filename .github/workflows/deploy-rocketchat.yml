@@ -16,6 +16,10 @@ on:
         description: "Exact reviewed develop commit SHA (required for DEPLOY only)"
         required: false
         type: string
+      review_run_id:
+        description: "Exact successful Guarded Review PR run ID (required for DEPLOY only)"
+        required: false
+        type: string
       confirm:
         description: "Type DEPLOY for deployment or CLEANUP for session cleanup"
         required: true
@@ -34,10 +38,15 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY')
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       target_sha: ${{ steps.target.outputs.sha }}
       bundle_sha256: ${{ steps.package.outputs.bundle_sha256 }}
       zip_sha256: ${{ steps.package.outputs.zip_sha256 }}
+      review_evidence: ${{ steps.reviewed.outputs.evidence }}
 
     steps:
       - name: Resolve reviewed target
@@ -87,18 +96,6 @@ jobs:
           sudo apt-get install --yes --no-install-recommends zsh
           zsh --version
 
-      - name: Install pinned build dependency
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm ci
-          NODE_VERSION="$(node --version)"
-          ESBUILD_VERSION="$(node -p 'require("esbuild/package.json").version')"
-          test "${NODE_VERSION%%.*}" = "v20"
-          test "$ESBUILD_VERSION" = "0.12.29"
-          echo "NODE_VERSION=$NODE_VERSION" >> "$GITHUB_ENV"
-          echo "ESBUILD_VERSION=$ESBUILD_VERSION" >> "$GITHUB_ENV"
-
       - name: Verify exact develop commit
         shell: bash
         run: |
@@ -119,6 +116,47 @@ jobs:
             exit 1
           fi
           echo "Develop commit verified: $TARGET_SHA"
+
+      - name: Load verifier from immutable workflow revision
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY'
+        shell: bash
+        env:
+          CONTROL_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CONTROL_SHA" =~ ^[0-9a-f]{40}$ ]]
+          mkdir "$RUNNER_TEMP/tars-provenance-control"
+          for file in tars-canonical-manifest.js tars-reviewed-provenance.js verify-tars-bundle.js; do
+            git show "$CONTROL_SHA:tools/$file" > "$RUNNER_TEMP/tars-provenance-control/$file"
+          done
+
+      - name: Verify immutable guarded review provenance
+        id: reviewed
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY'
+        uses: actions/github-script@v7
+        env:
+          REVIEW_RUN_ID: ${{ inputs.review_run_id }}
+        with:
+          script: |
+            const { verifyReviewedProvenance } = require(`${process.env.RUNNER_TEMP}/tars-provenance-control/tars-reviewed-provenance.js`);
+            const evidence = await verifyReviewedProvenance({
+              github, context, runId: process.env.REVIEW_RUN_ID
+            });
+            core.setOutput('evidence', JSON.stringify(evidence));
+            await core.summary.addHeading('Verified guarded review provenance')
+              .addCodeBlock(JSON.stringify(evidence, null, 2), 'json').write();
+
+      - name: Install pinned build dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          NODE_VERSION="$(node --version)"
+          ESBUILD_VERSION="$(node -p 'require("esbuild/package.json").version')"
+          test "${NODE_VERSION%%.*}" = "v20"
+          test "$ESBUILD_VERSION" = "0.12.29"
+          echo "NODE_VERSION=$NODE_VERSION" >> "$GITHUB_ENV"
+          echo "ESBUILD_VERSION=$ESBUILD_VERSION" >> "$GITHUB_ENV"
 
       - name: Verify repository and manifest safety
         shell: bash
@@ -293,6 +331,16 @@ jobs:
           path: ${{ env.ZIP_PATH }}
           if-no-files-found: error
           retention-days: 2
+
+      - name: Match deployment package to reviewed evidence
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY'
+        uses: actions/github-script@v7
+        env:
+          REVIEW_EVIDENCE: ${{ steps.reviewed.outputs.evidence }}
+        with:
+          script: |
+            const { assertCanonicalMatch } = require(`${process.env.RUNNER_TEMP}/tars-provenance-control/tars-canonical-manifest.js`);
+            assertCanonicalMatch(process.env.ZIP_PATH, JSON.parse(process.env.REVIEW_EVIDENCE));
 
       - name: Validation summary
         shell: bash
@@ -479,6 +527,7 @@ jobs:
       TARGET_SHA: ${{ needs.validate.outputs.target_sha }}
       BUNDLE_SHA256: ${{ needs.validate.outputs.bundle_sha256 }}
       ZIP_SHA256: ${{ needs.validate.outputs.zip_sha256 }}
+      REVIEW_EVIDENCE: ${{ needs.validate.outputs.review_evidence }}
     steps:
       - name: Create immutable deployment receipt
         uses: actions/github-script@v7
@@ -487,6 +536,11 @@ jobs:
             const targetSha = process.env.TARGET_SHA;
             const bundleSha = process.env.BUNDLE_SHA256;
             const zipSha = process.env.ZIP_SHA256;
+            const reviewEvidence = JSON.parse(process.env.REVIEW_EVIDENCE);
+            if (reviewEvidence.target_commit !== targetSha || reviewEvidence.members['TarsReportApp.js'] !== bundleSha) {
+              core.setFailed('Deployment receipt does not match verified review evidence.');
+              return;
+            }
             if (!/^[0-9a-f]{40}$/i.test(targetSha) || !/^[0-9a-f]{64}$/i.test(bundleSha) || !/^[0-9a-f]{64}$/i.test(zipSha)) {
               core.setFailed('Deployment provenance blocked: verified commit or package hash is invalid.');
               return;
@@ -505,7 +559,8 @@ jobs:
                 schema_version: 'tars-deployment-provenance-v1',
                 target_sha: targetSha,
                 bundle_sha256: bundleSha,
-                zip_sha256: zipSha
+                zip_sha256: zipSha,
+                reviewed_canonical: reviewEvidence
               })
             });
             await github.rest.repos.createDeploymentStatus({
