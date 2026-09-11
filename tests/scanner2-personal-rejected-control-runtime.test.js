@@ -494,6 +494,106 @@ async function receiptIndex(guard, scenario) {
   assert.ok(registryA, "registry-A receipt must establish a confirmed identity");
   assert.match(registryA.receiptIdentity, /^(id:|txn:|text:)/, "registry-A must have a stable production identity");
 
+  // F. Exact-hash M2 oracle. Receipt A2 is a NEW message/upload of the SAME
+  // bytes as registry-A. The receipt findExactDuplicate path must reject it
+  // before receipt/OCR analysis. Confirmed count/total/identity alone are
+  // not sufficient: with exact-hash removed, the later stable-identity
+  // guard (registry-B / M1) could still reject A2 and hide the gap.
+  //
+  // Same-bytes personal re-uploads are intercepted first by findDuplicate on
+  // personal-image-duplicate-index-v1 ("ПОВТОР ФОТО/ЧЕКА"). That is a different
+  // function than findExactDuplicate, so it cannot kill historical M2. Drop
+  // A's personal-image fingerprint and force receipt intent so A2 reaches the
+  // kassa exact-hash branch without a new production path.
+  const personalImageIndexName = "personal-image-duplicate-index-v1";
+  const personalImageIndex = await acceptedGuard.readIndex(accepted.read, personalImageIndexName);
+  personalImageIndex.photos = (personalImageIndex.photos || []).filter((entry) => {
+    if (!entry) return false;
+    if (entry.exact && entry.exact === registryA.exact) return false;
+    if (registryA.visual && entry.visual && entry.visual === registryA.visual) return false;
+    return true;
+  });
+  await acceptedGuard.writeIndex(accepted.persistence, personalImageIndexName, personalImageIndex);
+
+  const registryA2Content = Buffer.from(accepted.sourceContent);
+  const registryA2File = {
+    _id: "upload-valid-fallback-exact-repeat",
+    id: "upload-valid-fallback-exact-repeat",
+    name: "exact-repeat.jpg",
+    type: "image/jpeg"
+  };
+  const registryA2Message = {
+    ...accepted.message,
+    id: "message-valid-fallback-exact-repeat",
+    file: registryA2File,
+    files: [registryA2File]
+  };
+  accepted.sourceContents.set(registryA2File.id, registryA2Content);
+  accepted.uploadFiles.set(registryA2File.id, registryA2File);
+  function receiptAnalysisCalls(calls) {
+    return calls.filter((call) => /^(openai:primary|openai:date-focus|openai:amount-focus|openai:vision-engine|yandex:)/.test(call));
+  }
+  const beforeA2ReceiptCalls = accepted.receiptCalls();
+  const beforeA2ReceiptProviderCalls = receiptAnalysisCalls(accepted.providerCalls).length;
+  const beforeA2Confirmed = index.photos.filter((entry) => entry.source === "confirmed").length;
+  const beforeA2Summary = await acceptedGuard.confirmedTransferSummaryForUser(
+    accepted.read, accepted.config, accepted.owner.id, accepted.requiredDate, [], undefined, accepted.message.room.id
+  );
+  const registryA2Exact = acceptedGuard.exactHash(registryA2Content);
+  assert.strictEqual(registryA2Exact, registryA.exact, "M2 oracle: A2 must have the same exact hash as A");
+  assert.notStrictEqual(registryA2Message.id, accepted.message.id, "M2 oracle: A2 must use a new messageId");
+  assert.notStrictEqual(registryA2File.id, String(accepted.message.file.id || accepted.message.file._id || ""), "M2 oracle: A2 must use a new uploadId");
+  const a2Logs = [];
+  const a2Logger = {
+    info(message) { a2Logs.push(String(message || "")); },
+    warn(message) { a2Logs.push(String(message || "")); },
+    error(message) { a2Logs.push(String(message || "")); }
+  };
+  const registryA2Result = await acceptedGuard.processPersonalMediaV2(
+    registryA2Message, accepted.read, accepted.persistence, accepted.modify,
+    a2Logger, accepted.http, accepted.config, "receipt"
+  );
+  await acceptedGuard.flushReceiptCaseV1ForTests();
+  index = await receiptIndex(acceptedGuard, accepted);
+  assert.strictEqual(registryA2Result.handled, true, "M2 oracle: same-bytes repeat must be handled by the receipt path");
+  assert.ok(
+    a2Logs.some((line) => /Deleted posted exact duplicate receipt/.test(line)),
+    "M2 oracle: A2 must take the posted exact-duplicate path"
+  );
+  assert.ok(
+    !a2Logs.some((line) => /stage=strict_validation_done/.test(line)),
+    "M2 oracle: exact-hash duplicate must not enter strict receipt/OCR validation"
+  );
+  assert.strictEqual(accepted.receiptCalls(), beforeA2ReceiptCalls, "M2 oracle: exact-hash duplicate must not re-invoke receipt/OCR analysis");
+  assert.strictEqual(
+    receiptAnalysisCalls(accepted.providerCalls).length,
+    beforeA2ReceiptProviderCalls,
+    "M2 oracle: exact-hash duplicate must not invoke receipt providers again"
+  );
+  assert.strictEqual(
+    index.photos.find((entry) => String(entry.uploadId || "") === registryA2File.id),
+    undefined,
+    "M2 oracle: exact-hash path must not write a new index row for A2"
+  );
+  assert.strictEqual(
+    index.photos.filter((entry) => entry.source === "confirmed").length,
+    beforeA2Confirmed,
+    "M2 oracle: A2 must not create a second confirmed receipt"
+  );
+  const afterA2Summary = await acceptedGuard.confirmedTransferSummaryForUser(
+    accepted.read, accepted.config, accepted.owner.id, accepted.requiredDate, [], undefined, accepted.message.room.id
+  );
+  assert.strictEqual(afterA2Summary.count, beforeA2Summary.count, "M2 oracle (financial invariant): A2 must not increase confirmed count");
+  assert.strictEqual(afterA2Summary.total, beforeA2Summary.total, "M2 oracle (financial invariant): A2 must not inflate the running total");
+  assert.ok(
+    accepted.privateNotifications.some((item) => String(item.notification && item.notification.text || "") === "🚫 ПОВТОР ЧЕКА"),
+    "M2 oracle: exact duplicate must use the existing duplicate notification"
+  );
+  assert.ok(
+    accepted.deletedMessages.includes(registryA2Message.id),
+    "M2 oracle: posted exact-duplicate receipt must be deleted"
+  );
+
   // Registry-B: same payment (1200 RUB), same strictly-extracted identity.
   const registryBContent = Buffer.from("personal-receipt-identity-duplicate-second-bytes");
   const registryBFile = { _id: "upload-valid-fallback-identity-second", id: "upload-valid-fallback-identity-second", name: "identity-second.jpg", type: "image/jpeg" };
