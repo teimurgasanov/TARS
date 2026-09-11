@@ -206,13 +206,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          npm ci --prefix pas/authority
           pas_count=0
           while IFS= read -r test_file; do
             echo "==> $test_file"
             node "$test_file"
             pas_count=$((pas_count + 1))
           done < <(find tests -maxdepth 1 -type f -name 'pas-*.test.js' | sort)
-          test "$pas_count" -eq 2
+          test "$pas_count" -eq 3
           echo "PAS_TEST_COUNT=$pas_count" >> "$GITHUB_ENV"
 
       - name: Run 83 legacy TARS tests
