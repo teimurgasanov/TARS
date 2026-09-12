@@ -50,6 +50,11 @@ module.exports = async function testReviewedArtifactProvenance() {
   assert.match(deploy, /reviewed_canonical: reviewEvidence/);
   assert.deepStrictEqual(guarded.match(/\b[\w-]+: write/g), ["id-token: write"]);
   assert.deepStrictEqual(deploy.match(/\b[\w-]+: write/g), ["deployments: write"]);
+  assert.deepStrictEqual(guarded.match(/uses: anthropics\/claude-code-action@\S+/g),
+    ["uses: anthropics/claude-code-action@9cdae7f0d995e3ba7c33f226087fdf82a59cd520"],
+    "Claude review behavior must be pinned to the independently verified action commit");
+  assert.doesNotMatch(guarded, /anthropics\/claude-code-action@v1\b/,
+    "the mutable v1 tag must not control verdict/reason parsing");
   assert.match(guarded, /display_report: 'false'/, "full action report must stay hidden");
   assert.match(guarded, /show_full_output: 'false'/, "full Claude transcript must stay hidden");
   assert.match(guarded, /--json-schema '[^\n]*"verdict"[^\n]*"reason"/,
