@@ -1,4 +1,8 @@
 {
+    "openrouter_vision_enabled_label": "Use OpenRouter Gemini Vision",
+    "openrouter_vision_enabled_description": "Explicit opt-in. Uses Gemini 3.5 Flash with a separate key. Keep disabled until credentials and runtime smoke checks are verified.",
+    "openrouter_vision_api_key_label": "Private OpenRouter Vision API key",
+    "openrouter_vision_api_key_description": "New dedicated key only. Never paste an OpenAI/Yandex key or a key published in source code.",
     "report_button": "FILL REPORT",
     "report_command_params": "[profile]",
     "report_command_description": "Open my report or select a service profile",
