@@ -11269,7 +11269,7 @@ var C = class extends j.App {
     if (status === "REJECTED") return "⚠️ Подтверждение платежа отклонено. Сумма не зачтена.";
     return "⚠️ Сервис подтверждения платежей недоступен. Сумма не зачтена; повторите действие позже.";
   }
-  async confirmManualReceipt(read, persistence, http, selected, actor, privateAction, manualCorrections = {}) {
+  async confirmManualReceipt(read, persistence, http, selected, actor, privateAction) {
     return manualPaymentConfirmation.serializeManualConfirmation(async () => {
       let authoritySucceeded = false;
       try {
@@ -11285,16 +11285,18 @@ var C = class extends j.App {
         const association = new y.RocketChatAssociationRecord(y.RocketChatAssociationModel.MISC, `pas-manual-command-v1:${commandId}`);
         const saved = await read.getPersistenceReader().readByAssociation(association);
         let command = saved && saved[0] && saved[0].command;
+        let approvedBy = saved && saved[0] && saved[0].approvedBy;
         if (!command) {
           const receiptCase = await G.findReceiptCaseForInputV1({
             sourceMessageId: entry.messageId, sourceUploadId: entry.uploadId, masterId: entry.userId
           }, read);
           try {
-            command = manualPaymentConfirmation.buildManualConfirmation(entry, actor, receiptCase && receiptCase.caseId, commandId, manualCorrections);
+            command = manualPaymentConfirmation.buildManualConfirmation(entry, actor, receiptCase && receiptCase.caseId, commandId);
           } catch (_) { return { status: "CONFLICT" }; }
           // Persist the complete intention before sending. A lost response retries
           // the same command and actor/provenance, including after app restart.
-          await persistence.updateByAssociation(association, { command }, true);
+          approvedBy = actor.username || actor.name || actor.id || "";
+          await persistence.updateByAssociation(association, { command, approvedBy }, true);
         }
         if (command.payment.amount.value.minorUnits !== manualPaymentConfirmation.receiptAmount(entry.receiptAmount).minorUnits
           || command.payment.date.value !== entry.receiptDate
@@ -11314,7 +11316,14 @@ var C = class extends j.App {
         entry.invalidReason = "";
         entry.source = projected ? "confirmed" : "duplicate";
         if (projected) {
-          entry.approvedBy = command.actor.reference;
+          if (!approvedBy) {
+            // Older intentions have only the PAS actor ID. Resolve its display
+            // attribution without replacing the immutable command or its actor.
+            let originalActor = command.actor.reference === actor.id ? actor : void 0;
+            try { if (!originalActor) originalActor = await read.getUserReader().getById(command.actor.reference); } catch (_) {}
+            approvedBy = originalActor && (originalActor.username || originalActor.name || originalActor.id) || command.actor.reference;
+          }
+          entry.approvedBy = approvedBy;
           entry.approvedAt = Date.now();
           entry.validationVersion = 11;
           if (privateAction) entry.receiptCaseStatusPending = true;
@@ -11342,7 +11351,6 @@ var C = class extends j.App {
     }
     let targetUsername = "";
     let targetAmount;
-    let manualDateProvided = false;
     let targetDate = G.expectedReceiptDate(config);
     for (const rawArgument of a || []) {
       const argument = String(rawArgument || "").trim();
@@ -11350,12 +11358,10 @@ var C = class extends j.App {
       let dateMatch = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(argument);
       if (dateMatch) {
         targetDate = `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`;
-        manualDateProvided = true;
         continue;
       }
       if (/^\d{4}-\d{2}-\d{2}$/.test(argument)) {
         targetDate = argument;
-        manualDateProvided = true;
         continue;
       }
       const numeric = Number(argument.replace(/\s/g, "").replace(",", "."));
@@ -11369,9 +11375,6 @@ var C = class extends j.App {
       await notify("Формат: /prinyat @логин сумма [ДД.ММ.ГГГГ]\nНапример: /prinyat @teimur 1000");
       return;
     }
-    let manualAmount;
-    try { manualAmount = manualPaymentConfirmation.receiptAmount(targetAmount); }
-    catch (_) { await notify("⚠️ Укажите сумму в рублях с точностью до копейки."); return; }
     const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
     const candidates = (index.photos || []).filter((entry) => {
       if (!entry || entry.source !== "rejected") return false;
@@ -11387,9 +11390,7 @@ var C = class extends j.App {
       return;
     }
     const originalReason = entry.invalidReason || "";
-    const confirmation = await this.confirmManualReceipt(e, t, http, entry, r, false, {
-      amount: manualAmount, ...(manualDateProvided ? { date: targetDate } : {})
-    });
+    const confirmation = await this.confirmManualReceipt(e, t, http, entry, r, false);
     if (!confirmation.projected) { await notify(this.manualPaymentResultText(confirmation.status)); return; }
     G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, targetAmount, targetDate, e, t, config);
     if (entry.roomId) {

@@ -71,11 +71,66 @@ module.exports = async function testManualPaymentUniqueness() {
     console.log("PASS: WP-003 stable payment identity survives different observations");
   } finally { sql.close(); authority.close(); fs.rmSync(directory, { recursive: true, force: true }); }
   testIdentityParity();
+  await testSelectorSemantics();
   for (const entrypoint of ["M1", "M2", "M3"]) await testEntrypoint(entrypoint);
   await testTransportFailures();
 };
 
 module.exports.identity = identity;
+
+async function testSelectorSemantics() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "wp003-selectors-"));
+  try {
+    for (const args of [["@master", "600"], ["@master", "600", "06.09.2026"],
+      ["@master", "600", "2026-09-06"], ["@master", "600.001"], ["@master", "600,009"],
+      ["@master", "601"], ["@master", "600", "07.09.2026"]]) {
+      const authority = new PaymentAuthority(path.join(directory, "selector-" + args.join("_") + ".sqlite"));
+      try {
+        const loaded = loadTrackedAppWithGuard(), runtime = createRuntime(loaded), commands = [];
+        runtime.guard.expectedReceiptDate = () => "2026-09-06";
+        runtime.guard.scheduleTarsMemoryHumanReceiptConfirmationV1 = () => {};
+        runtime.guard.publishMasterTransferSummary = async () => {};
+        runtime.app.manualPaymentAuthority = async () => ({ confirmPayment: async command => {
+          commands.push(clone(command)); return authority.confirmPayment(command);
+        } });
+        const photos = runtime.records.get("receipt-duplicate-index-v1").photos;
+        // Baseline picks the newest matching rejected observation, not a newer
+        // receipt from a different master or a differently valued receipt.
+        photos.push({ ...clone(runtime.entry), exact: "b".repeat(64), messageId: "older", uploadedAt: 1 });
+        photos.push({ ...clone(runtime.entry), exact: "c".repeat(64), username: "other", uploadedAt: Date.now() + 1000 });
+        photos.push({ ...clone(runtime.entry), exact: "d".repeat(64), receiptAmount: 900, uploadedAt: Date.now() + 2000 });
+        const before = clone(Array.from(runtime.records.entries()));
+        const command = new loaded.__testApproveReceiptCommand(runtime.app);
+        await command.executor({ getRoom: () => runtime.room, getSender: () => runtime.teimur, getArguments: () => args },
+          runtime.read, runtime.modify, {}, runtime.persistence);
+        if (args[1] === "601" || args[2] === "07.09.2026") {
+          assert.deepStrictEqual(Array.from(runtime.records.entries()), before, "wrong selector must not mutate any receipt or save an intention");
+          assert.strictEqual(commands.length, 0, "wrong selector must not reach PAS");
+          assert.match(runtime.notifications.at(-1).message.text, /Не найден отклонённый чек/);
+          continue;
+        }
+        assert.strictEqual(commands.length, 1, "baseline matching selector must reach PAS, including extra decimal precision");
+        const sent = commands[0];
+        assert.strictEqual(sent.observation.messageId, runtime.entry.messageId);
+        assert.deepStrictEqual(sent.payment, {
+          amount: { value: { minorUnits: 60000, currency: "RUB" }, provenance: { source: "EXTRACTED", supersedesSource: null } },
+          date: { value: "2026-09-06", provenance: { source: "EXTRACTED", supersedesSource: null } }
+        }, "selector arguments must not replace receipt values or claim field correction");
+        const accepted = runtime.records.get("receipt-duplicate-index-v1").photos.filter(entry => entry.source === "confirmed");
+        assert.strictEqual(accepted.length, 1);
+        assert.strictEqual(accepted[0].messageId, runtime.entry.messageId);
+        assert.strictEqual(accepted[0].receiptAmount, 600);
+        assert.strictEqual(accepted[0].receiptDate, "2026-09-06");
+        assert.strictEqual(accepted[0].approvedBy, "teimur", "baseline approval attribution is username before name/id");
+        assert.strictEqual(accepted[0].manualApprovalNote, runtime.entry.invalidReason);
+        assert.strictEqual(accepted[0].invalidReason, "");
+        assert.strictEqual(accepted[0].validationVersion, 11);
+        assert.strictEqual(typeof accepted[0].approvedAt, "number");
+      } finally { authority.close(); }
+    }
+    console.log("PASS: WP-003 M3 selector parity: default/explicit date, tolerance, newest match, wrong amount/date no mutation, EXTRACTED provenance");
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+}
 
 function testIdentityParity() {
   const source = fs.readFileSync(path.join(__dirname, "../../TarsReportApp.js"), "utf8");
@@ -133,13 +188,13 @@ async function testEntrypoint(entrypoint) {
     getIndex().photos.push(entry);
     return entry;
   };
-  const invoke = async entry => {
+  const invoke = async (entry, actor = runtime.teimur) => {
     if (entrypoint === "M3") {
       const command = new loaded.__testApproveReceiptCommand(runtime.app);
-      await command.executor({ getRoom: () => runtime.room, getSender: () => runtime.teimur,
+      await command.executor({ getRoom: () => runtime.room, getSender: () => actor,
         getArguments: () => ["@master", "600", "06.09.2026"] }, runtime.read, runtime.modify, http, runtime.persistence);
     } else {
-      const action = { user: runtime.teimur,
+      const action = { user: actor,
         room: entrypoint === "M1" ? runtime.room : { id: "synthetic-control", slugifiedName: "cheki-kontrol", type: "c" },
         value: entrypoint === "M1" ? runtime.guard.receiptPrivateControlEntryTokenV1(entry) : entry.exact };
       action.actionId = "approve-rejected-receipt";
@@ -162,8 +217,10 @@ async function testEntrypoint(entrypoint) {
     assert.strictEqual(commands[0].mode, "MANUAL");
     assert.strictEqual(commands[0].actor.kind, "OPERATOR");
     assert.strictEqual(commands[0].receiptEvidence.receiptCaseId, firstCase.caseId);
-    assert.strictEqual(commands[0].payment.amount.provenance.source, entrypoint === "M3" ? "MANUAL_CORRECTION" : "EXTRACTED");
-    assert.strictEqual(commands[0].payment.date.provenance.source, entrypoint === "M3" ? "MANUAL_CORRECTION" : "EXTRACTED");
+    assert.strictEqual(commands[0].payment.amount.provenance.source, "EXTRACTED");
+    assert.strictEqual(commands[0].payment.date.provenance.source, "EXTRACTED");
+    assert.strictEqual(commands[0].actor.reference, runtime.teimur.id, "PAS retains the stable operator ID");
+    assert.strictEqual(getIndex().photos.find(entry => entry.exact === runtime.entry.exact).approvedBy, runtime.teimur.username);
     const second = add(2);
     assert.notStrictEqual(second.exact, runtime.entry.exact, "different bytes must have different exact hashes");
     const secondCase = await runtime.guard.findOrCreateReceiptCaseV1({ sourceMessageId: second.messageId, sourceUploadId: second.uploadId, masterId: second.userId }, runtime.read, runtime.persistence);
@@ -199,9 +256,10 @@ async function testEntrypoint(entrypoint) {
     assert.strictEqual(sql.prepare("SELECT count(*) n FROM ConfirmedPayment").get().n, 3);
     runtime = createRuntime(loadTrackedAppWithGuard(), runtime.records, runtime.messages);
     setup();
-    await invoke(pending);
+    await invoke(pending, { id: "shura-id", username: "shura" });
     assertCount(3);
     assert.deepStrictEqual(commands[commands.length - 1], retryCommand, "restart must resend original commandId, evidence, actor, provenance");
+    assert.strictEqual(getIndex().photos.find(entry => entry.exact === pending.exact).approvedBy, "teimur", "restart by another operator must retain the original display attribution");
     for (const raw of [undefined, "", "id:", "id:upload-123", "txn:2026-09-06|99:00|600"]) {
       const unsafe = add(5, raw);
       unsafe.receiptIdentity = raw;
@@ -230,8 +288,16 @@ async function testEntrypoint(entrypoint) {
     assert.strictEqual(getIndex().photos.filter(entry => entry.source === "confirmed").length, 3);
     assert.match(runtime.notifications[runtime.notifications.length - 1].message.text, /запись результата не завершена/);
     runtime.persistence.updateByAssociation = write;
-    await invoke(recovery);
+    const savedIntention = runtime.records.get("pas-manual-command-v1:" + manualCommandId(recovery));
+    delete savedIntention.approvedBy; // Compatibility with intentions saved before display metadata existed.
+    const originalCommand = clone(savedIntention.command);
+    const getUserReader = runtime.read.getUserReader;
+    runtime.read.getUserReader = () => ({ ...getUserReader(), getById: async id => id === runtime.teimur.id ? runtime.teimur : undefined });
+    await invoke(recovery, { id: "shura-id", username: "shura" });
     assertCount(4);
+    assert.strictEqual(getIndex().photos.find(entry => entry.exact === recovery.exact).approvedBy, "teimur");
+    assert.deepStrictEqual(commands.at(-1), originalCommand, "display attribution lookup must not rewrite a saved PAS command");
+    runtime.read.getUserReader = getUserReader;
     const afterCommit = add(7, "id:DOC3333333333|2026-09-06|600");
     runtime.persistence.updateByAssociation = async (association, ...args) => {
       const result = await write(association, ...args);
@@ -250,6 +316,19 @@ async function testEntrypoint(entrypoint) {
     await invoke(unconfigured);
     assertCount(5);
     assert.strictEqual(commands.length, beforeUnconfigured, "unconfigured TARS must not use a local confirmation fallback");
+    setup();
+    const actors = entrypoint === "M3" ? [{ id: runtime.teimur.id, username: "Teimur", name: "Synthetic Operator" }] : [
+      { id: runtime.teimur.id, username: "Teimur", name: "Synthetic Operator" },
+      { id: runtime.teimur.id, name: "Synthetic Operator" }, { id: runtime.teimur.id }
+    ];
+    for (const [i, actor] of actors.entries()) {
+      const attributed = add(10 + i, "id:DOC" + String(5 + i).repeat(10) + "|2026-09-06|600");
+      await invoke(attributed, actor);
+      assertCount(6 + i);
+      assert.strictEqual(getIndex().photos.find(entry => entry.exact === attributed.exact).approvedBy, actor.username || actor.name || actor.id);
+      assert.strictEqual(commands.at(-1).actor.reference, actor.id);
+    }
+    console.log("PASS: WP-003 " + entrypoint + " baseline approvedBy priority and original attribution on restart/older intention");
     console.log("PASS: WP-003 " + entrypoint + " P=one credit; duplicate/no effects; Q; concurrency; unavailable; lost response/restart; unsafe identity; intention/projection storage faults");
   } finally { sql.close(); authority.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 }

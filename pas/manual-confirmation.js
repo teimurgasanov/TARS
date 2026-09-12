@@ -30,7 +30,7 @@ function manualCommandId(entry) {
   ])).digest("hex");
 }
 
-function buildManualConfirmation(entry, actor, receiptCaseId, commandId, manualCorrections = {}) {
+function buildManualConfirmation(entry, actor, receiptCaseId, commandId) {
   return buildConfirmPaymentCommand({
     commandId, mode: "MANUAL", actor: { kind: "OPERATOR", reference: actor.id },
     observation: { messageId: entry.messageId || null, uploadId: entry.uploadId || null },
@@ -38,8 +38,7 @@ function buildManualConfirmation(entry, actor, receiptCaseId, commandId, manualC
       receiptCaseId: receiptCaseId || null, exactHash: entry.exact || null, visualHash: entry.visual || null,
       paymentIdentity: receiptIdentityEvidence(entry.receiptIdentity)
     },
-    extracted: { amount: receiptAmount(entry.receiptAmount), date: entry.receiptDate },
-    manualCorrections
+    extracted: { amount: receiptAmount(entry.receiptAmount), date: entry.receiptDate }
   });
 }
 
