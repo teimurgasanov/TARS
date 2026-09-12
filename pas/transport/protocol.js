@@ -1,6 +1,6 @@
 "use strict";
 
-const { createHash } = require("node:crypto");
+const { createHash } = require("crypto");
 const { assertConfirmPaymentCommand, assertPaymentAuthorityResult } = require("../contracts");
 const PROTOCOL = "PAS_HTTP_V1";
 const MAX_BODY = 65536;
@@ -35,7 +35,8 @@ function assertCommand(value) {
   id(value.commandId);
   keys(value.actor, ["kind", "reference"]);
   keys(value.observation, ["messageId", "uploadId"]);
-  keys(value.receiptEvidence, ["receiptCaseId", "exactHash", "visualHash"]);
+  keys(value.receiptEvidence, ["receiptCaseId", "exactHash", "visualHash",
+    ...(value.receiptEvidence.paymentIdentity === undefined ? [] : ["paymentIdentity"])]);
   keys(value.payment, ["amount", "date"]);
   keys(value.payment.amount.value, ["minorUnits", "currency"]);
   for (const field of [value.payment.amount, value.payment.date]) {

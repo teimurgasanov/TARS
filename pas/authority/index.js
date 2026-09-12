@@ -3,6 +3,7 @@
 const { randomUUID, createHash } = require("crypto");
 const { assertConfirmPaymentCommand, assertPaymentAuthorityResult, makePaymentAuthorityResult } = require("../contracts");
 const { openDatabase } = require("./database");
+const { paymentIdentityAliasValue } = require("../receipt-identity");
 
 const SUCCESS = new Set(["CONFIRMED", "ALREADY_CONFIRMED"]);
 
@@ -48,6 +49,9 @@ function aliasesFor(command) {
   const observationIdentity = command.observation.uploadId !== null
     ? { uploadId: command.observation.uploadId } : { messageId: command.observation.messageId };
   const aliases = [{ kind: "observation", value: stableJson(observationIdentity), strong: true }];
+  if (command.receiptEvidence.paymentIdentity) {
+    aliases.push({ kind: "tarsReceiptIdentityV1", value: paymentIdentityAliasValue(command.receiptEvidence.paymentIdentity), strong: true });
+  }
   for (const kind of ["receiptCaseId", "exactHash", "visualHash"]) {
     if (command.receiptEvidence[kind] !== null) {
       aliases.push({ kind, value: command.receiptEvidence[kind], strong: kind !== "visualHash" });
@@ -60,7 +64,7 @@ class PaymentAuthority {
   #db;
 
   constructor(filename, { timeout = 5000, existingOnly = false } = {}) {
-    this.#db = openDatabase(filename, "schema.sql", 0x50415331, timeout, 2, { existingOnly });
+    this.#db = openDatabase(filename, "schema.sql", 0x50415331, timeout, 3, { existingOnly });
   }
 
   close() { this.#db.close(); }
@@ -138,6 +142,9 @@ class PaymentAuthority {
   }
 
   #resolve(command, commandJson) {
+    if (command.mode === "MANUAL" && !command.receiptEvidence.paymentIdentity) {
+      throw new Hold("STABLE_PAYMENT_IDENTITY_REQUIRED");
+    }
     const aliases = aliasesFor(command);
     const resolved = aliases.map(alias => ({ ...alias, payment: this.#db.prepare(
       "SELECT canonicalPaymentId FROM IdentityAlias WHERE kind = ? AND aliasValue = ?"
@@ -147,8 +154,9 @@ class PaymentAuthority {
     const knownStrong = resolved.some(alias => alias.strong && alias.payment);
     if (owners.size && !knownStrong) throw new Hold("WEAK_ALIAS_ONLY");
     // No amount/date key; no canonical identity supplied or computed by TARS.
-    // New slots need a case or exact evidence anchor, not merely a new message or visual similarity.
-    if (!owners.size && !command.receiptEvidence.receiptCaseId && !command.receiptEvidence.exactHash) {
+    // MANUAL requires versioned payment evidence; legacy AUTO still needs a case
+    // or exact anchor rather than only a new message or visual similarity.
+    if (!owners.size && !command.receiptEvidence.paymentIdentity && !command.receiptEvidence.receiptCaseId && !command.receiptEvidence.exactHash) {
       throw new Hold("INSUFFICIENT_IDENTITY_EVIDENCE");
     }
     let canonicalPaymentId = owners.values().next().value;

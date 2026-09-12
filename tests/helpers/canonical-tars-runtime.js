@@ -79,7 +79,7 @@ function loadTrackedAppWithGuard() {
   const sourcePath = path.join(root, "TarsReportApp.js");
   const instrumentedPath = path.join(root, `.tars-runtime-${process.pid}-${Date.now()}.js`);
   const source = fs.readFileSync(sourcePath, "utf8");
-  fs.writeFileSync(instrumentedPath, `${source}\nmodule.exports.__testGuard = G;\n`, "utf8");
+  fs.writeFileSync(instrumentedPath, `${source}\nmodule.exports.__testGuard = G;\nmodule.exports.__testApproveReceiptCommand = ApproveReceiptCommand;\n`, "utf8");
   try {
     delete require.cache[require.resolve(instrumentedPath)];
     return withRocketChatStubs(() => require(instrumentedPath));

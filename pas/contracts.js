@@ -1,5 +1,7 @@
 "use strict";
 
+const { assertReceiptIdentityEvidence } = require("./receipt-identity");
+
 const ConfirmPaymentCommandType = "CONFIRM_PAYMENT";
 const ConfirmPaymentCommandVersion = "PAS_CONFIRM_PAYMENT_V1";
 
@@ -120,6 +122,7 @@ function assertReceiptEvidence(receiptEvidence) {
   assertNullableReference(receiptEvidence.receiptCaseId, "receiptEvidence.receiptCaseId");
   assertNullableReference(receiptEvidence.exactHash, "receiptEvidence.exactHash");
   assertNullableReference(receiptEvidence.visualHash, "receiptEvidence.visualHash");
+  if (receiptEvidence.paymentIdentity !== undefined) assertReceiptIdentityEvidence(receiptEvidence.paymentIdentity);
 }
 
 function assertPaymentField(field, value) {
@@ -187,6 +190,9 @@ function buildConfirmPaymentCommand(input) {
       date: buildPaymentField("date", extracted.date, manualCorrections.date)
     }
   };
+  if (input.receiptEvidence && input.receiptEvidence.paymentIdentity !== undefined) {
+    command.receiptEvidence.paymentIdentity = { ...assertReceiptIdentityEvidence(input.receiptEvidence.paymentIdentity) };
+  }
   return assertConfirmPaymentCommand(command);
 }
 

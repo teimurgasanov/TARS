@@ -1,4 +1,6 @@
 "use strict";
+var manualPaymentConfirmation = require("./pas/manual-confirmation");
+var RocketChatPaymentAuthority = require("./pas/transport/rocketchat-client").RocketChatPaymentAuthority;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -10428,6 +10430,12 @@ var C = class extends j.App {
     super(e, n, t);
   }
   async extendConfiguration(e) {
+    for (const setting of [
+      { id: "pas_manual_authority_url", type: z.SettingType.STRING, i18nLabel: "PAS manual authority URL" },
+      { id: "pas_manual_authority_token", type: z.SettingType.PASSWORD, i18nLabel: "PAS manual authority token" }
+    ]) {
+      await e.settings.provideSetting({ ...setting, required: false, public: false, packageValue: "" });
+    }
     await e.settings.provideSetting({
       id: "yandex_ocr_api_key",
       type: z.SettingType.PASSWORD,
@@ -11245,7 +11253,79 @@ var C = class extends j.App {
     if (entries.length > visibleEntries.length) text += `\nПоказано ${visibleEntries.length} из ${entries.length}. Укажите логин мастера: /cheki @login ${displayDate}`;
     await notify(text);
   }
-  async handleApproveReceiptCommand(e, n, t, s, r, a = []) {
+  async manualPaymentAuthority(read, http) {
+    try {
+      const settings = read.getEnvironmentReader().getSettings();
+      return new RocketChatPaymentAuthority(http, {
+        baseUrl: String(await settings.getValueById("pas_manual_authority_url") || ""),
+        token: String(await settings.getValueById("pas_manual_authority_token") || "")
+      });
+    } catch (_) { return new RocketChatPaymentAuthority(); }
+  }
+  manualPaymentResultText(status) {
+    if (status === "PROJECTION_PENDING") return "⚠️ Ответ сервиса подтверждения получен, но запись результата не завершена. Повторите действие для синхронизации.";
+    if (status === "ALREADY_CONFIRMED") return "ℹ️ Этот платёж уже зачтён. Повторный чек не увеличивает сумму.";
+    if (status === "CONFLICT") return "⚠️ Платёж оставлен на контроле: требуется сверка платёжных данных. Сумма не зачтена.";
+    if (status === "REJECTED") return "⚠️ Подтверждение платежа отклонено. Сумма не зачтена.";
+    return "⚠️ Сервис подтверждения платежей недоступен. Сумма не зачтена; повторите действие позже.";
+  }
+  async confirmManualReceipt(read, persistence, http, selected, actor, privateAction, manualCorrections = {}) {
+    return manualPaymentConfirmation.serializeManualConfirmation(async () => {
+      let authoritySucceeded = false;
+      try {
+        const token = G.receiptPrivateControlEntryTokenV1(selected);
+        if (!token) return { status: "CONFLICT" };
+        const index = await G.readIndex(read, G.PROTECTED_ROOMS.kassa.index);
+        const entry = index.photos.find(candidate => G.receiptPrivateControlEntryTokenV1(candidate) === token
+          && candidate.roomId === selected.roomId && candidate.messageId === selected.messageId && candidate.uploadId === selected.uploadId);
+        if (!entry) return { status: "CONFLICT" };
+        if (entry.source === "confirmed" || entry.source === "duplicate") return { status: "ALREADY_CONFIRMED" };
+        if (entry.source !== "rejected") return { status: "CONFLICT" };
+        const commandId = manualPaymentConfirmation.manualCommandId(entry);
+        const association = new y.RocketChatAssociationRecord(y.RocketChatAssociationModel.MISC, `pas-manual-command-v1:${commandId}`);
+        const saved = await read.getPersistenceReader().readByAssociation(association);
+        let command = saved && saved[0] && saved[0].command;
+        if (!command) {
+          const receiptCase = await G.findReceiptCaseForInputV1({
+            sourceMessageId: entry.messageId, sourceUploadId: entry.uploadId, masterId: entry.userId
+          }, read);
+          try {
+            command = manualPaymentConfirmation.buildManualConfirmation(entry, actor, receiptCase && receiptCase.caseId, commandId, manualCorrections);
+          } catch (_) { return { status: "CONFLICT" }; }
+          // Persist the complete intention before sending. A lost response retries
+          // the same command and actor/provenance, including after app restart.
+          await persistence.updateByAssociation(association, { command }, true);
+        }
+        if (command.payment.amount.value.minorUnits !== manualPaymentConfirmation.receiptAmount(entry.receiptAmount).minorUnits
+          || command.payment.date.value !== entry.receiptDate
+          || command.receiptEvidence.paymentIdentity.rawValue !== entry.receiptIdentity) return { status: "CONFLICT" };
+        const authority = await this.manualPaymentAuthority(read, http);
+        const outcome = await manualPaymentConfirmation.requestManualConfirmation(authority, command);
+        const status = outcome.result.status;
+        if (!outcome.decision.allowObservationAssociation) return { status };
+        authoritySucceeded = true;
+        const canonicalPaymentId = outcome.result.canonicalPaymentId;
+        // Only match PAS-returned opaque IDs here; never resolve raw identities.
+        const existingProjection = index.photos.find(candidate => candidate.source === "confirmed" && candidate.pasCanonicalPaymentId === canonicalPaymentId);
+        const projected = outcome.decision.allowNewConfirmedFinancialState && !existingProjection;
+        entry.pasCanonicalPaymentId = canonicalPaymentId;
+        entry.pasCommandId = command.commandId;
+        entry.manualApprovalNote = entry.invalidReason || "";
+        entry.invalidReason = "";
+        entry.source = projected ? "confirmed" : "duplicate";
+        if (projected) {
+          entry.approvedBy = command.actor.reference;
+          entry.approvedAt = Date.now();
+          entry.validationVersion = 11;
+          if (privateAction) entry.receiptCaseStatusPending = true;
+        }
+        await G.writeIndex(persistence, G.PROTECTED_ROOMS.kassa.index, index);
+        Object.assign(selected, entry);
+        return { status: projected ? status : "ALREADY_CONFIRMED", projected };
+      } catch (_) { return { status: authoritySucceeded ? "PROJECTION_PENDING" : "AUTHORITY_UNAVAILABLE" }; }
+    });
+  }
+  async handleApproveReceiptCommand(e, n, t, s, r, a = [], http) {
     if (!e || !n || !t || !s || !r) return;
     const config = await this.receiptOcrConfig(e);
     const currentUsername = String(r.username || "").toLowerCase();
@@ -11262,6 +11342,7 @@ var C = class extends j.App {
     }
     let targetUsername = "";
     let targetAmount;
+    let manualDateProvided = false;
     let targetDate = G.expectedReceiptDate(config);
     for (const rawArgument of a || []) {
       const argument = String(rawArgument || "").trim();
@@ -11269,10 +11350,12 @@ var C = class extends j.App {
       let dateMatch = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(argument);
       if (dateMatch) {
         targetDate = `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`;
+        manualDateProvided = true;
         continue;
       }
       if (/^\d{4}-\d{2}-\d{2}$/.test(argument)) {
         targetDate = argument;
+        manualDateProvided = true;
         continue;
       }
       const numeric = Number(argument.replace(/\s/g, "").replace(",", "."));
@@ -11286,6 +11369,9 @@ var C = class extends j.App {
       await notify("Формат: /prinyat @логин сумма [ДД.ММ.ГГГГ]\nНапример: /prinyat @teimur 1000");
       return;
     }
+    let manualAmount;
+    try { manualAmount = manualPaymentConfirmation.receiptAmount(targetAmount); }
+    catch (_) { await notify("⚠️ Укажите сумму в рублях с точностью до копейки."); return; }
     const index = await G.readIndex(e, G.PROTECTED_ROOMS.kassa.index);
     const candidates = (index.photos || []).filter((entry) => {
       if (!entry || entry.source !== "rejected") return false;
@@ -11301,13 +11387,10 @@ var C = class extends j.App {
       return;
     }
     const originalReason = entry.invalidReason || "";
-    entry.source = "confirmed";
-    entry.invalidReason = "";
-    entry.manualApprovalNote = originalReason;
-    entry.approvedBy = r.username || r.name || r.id || "";
-    entry.approvedAt = Date.now();
-    entry.validationVersion = 11;
-    await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+    const confirmation = await this.confirmManualReceipt(e, t, http, entry, r, false, {
+      amount: manualAmount, ...(manualDateProvided ? { date: targetDate } : {})
+    });
+    if (!confirmation.projected) { await notify(this.manualPaymentResultText(confirmation.status)); return; }
     G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, targetAmount, targetDate, e, t, config);
     if (entry.roomId) {
       try {
@@ -11381,7 +11464,7 @@ var C = class extends j.App {
     }
     if (!shown) await notify("✅ В этом чате нет чеков, ожидающих ручной проверки.");
   }
-  async handleApproveReceiptButton(e, n, t, a) {
+  async handleApproveReceiptButton(e, n, t, a, http) {
     if (!e || !n || !t || !a || !a.user || !a.room) return;
     const allowed = await this.privateReceiptControlActorAllowed(e, a.user);
     const appUser = await e.getUserReader().getByUsername("tars") || await e.getUserReader().getAppUser();
@@ -11455,15 +11538,8 @@ var C = class extends j.App {
       await notify(synchronized ? "✅ Статус принятого чека обновлён." : "⚠️ Чек уже зачтён, но статус пока не обновлён. Повторите /receipt-control.");
       return;
     }
-    const originalReason = entry.invalidReason || "";
-    entry.source = "confirmed";
-    entry.invalidReason = "";
-    entry.manualApprovalNote = originalReason;
-    entry.approvedBy = a.user.username || a.user.name || a.user.id || "";
-    entry.approvedAt = Date.now();
-    entry.validationVersion = 11;
-    if (privateAction) entry.receiptCaseStatusPending = true;
-    await G.writeIndex(t, G.PROTECTED_ROOMS.kassa.index, index);
+    const confirmation = await this.confirmManualReceipt(e, t, http, entry, a.user, privateAction);
+    if (!confirmation.projected) { await notify(this.manualPaymentResultText(confirmation.status)); return; }
     const config = await this.receiptOcrConfig(e);
     G.scheduleTarsMemoryHumanReceiptConfirmationV1(entry, amount, targetDate, e, t, config);
     let masterRoom = privateAction ? a.room : void 0;
@@ -11880,7 +11956,7 @@ var C = class extends j.App {
   async executeActionButtonHandler(e, n, t, s, r) {
     let a = e.getInteractionData();
     if (a.actionId === K) {
-      await this.handleApproveReceiptButton(n, r, s, a);
+      await this.handleApproveReceiptButton(n, r, s, a, t);
       return e.getInteractionResponder().successResponse();
     }
     if (a.actionId === MANUAL_IMAGE_RECEIPT_ACTION || a.actionId === MANUAL_IMAGE_PHOTO_ACTION || a.actionId === MANUAL_IMAGE_MAILING_ACTION) {
@@ -11916,7 +11992,7 @@ var C = class extends j.App {
   async executeBlockActionHandler(e, n, t, s, r) {
     let a = e.getInteractionData();
     if (a.actionId === K) {
-      await this.handleApproveReceiptButton(n, r, s, a);
+      await this.handleApproveReceiptButton(n, r, s, a, t);
       return e.getInteractionResponder().successResponse();
     }
     if (a.actionId === MANUAL_IMAGE_RECEIPT_ACTION || a.actionId === MANUAL_IMAGE_PHOTO_ACTION || a.actionId === MANUAL_IMAGE_MAILING_ACTION) {
@@ -14908,7 +14984,7 @@ var ApproveReceiptCommand = class {
     this.app = e, this.command = "prinyat", this.i18nParamsExample = "approve_receipt_command_params", this.i18nDescription = "approve_receipt_command_description", this.providesPreview = false;
   }
   async executor(e, n, t, s, r) {
-    await this.app.handleApproveReceiptCommand(n, t, r, e.getRoom(), e.getSender(), e.getArguments());
+    await this.app.handleApproveReceiptCommand(n, t, r, e.getRoom(), e.getSender(), e.getArguments(), s);
   }
 };
 var ReceiptControlCommand = class {

@@ -26,7 +26,7 @@ function createRuntime(loaded, sharedRecords, sharedMessages, sharedFaults) {
   const blocks = [];
   const counters = { persistenceReads: 0, indexWrites: 0, memory: 0, summary: 0, report: 0, publicMessages: 0, statusUpdates: 0 };
   const entry = {
-    exact: "a".repeat(64), source: "rejected", receiptIdentity: "id:operation-one",
+    exact: "a".repeat(64), source: "rejected", receiptIdentity: "id:DOC1234567890|2026-09-06|600",
     receiptAmount: 600, receiptDate: "2026-09-06", invalidReason: "provider disagreement",
     roomId: room.id, userId: master.id, username: master.username,
     messageId: "receipt-message", uploadId: "receipt-upload", uploadedAt: Date.now()
@@ -128,6 +128,10 @@ function createRuntime(loaded, sharedRecords, sharedMessages, sharedFaults) {
   };
   app.getLogger = () => ({ info() {}, warn() {}, error() {} });
   app.receiptOcrConfig = async () => ({});
+  // These are status/authorization UX tests; uniqueness uses the real PAS in WP-003.
+  app.manualPaymentAuthority = async () => ({ async confirmPayment(command) {
+    return { status: "CONFIRMED", canonicalPaymentId: "synthetic-" + command.commandId, reasonCode: null };
+  } });
   app.formatRubles = (value) => `${Number(value)} ₽`;
   app.refreshPreliminaryReportAnalysis = async () => { counters.report += 1; };
   return { guard, app, room, master, teimur, read, persistence, modify, records, messages, notifications, counters, entry, blocks, faults };
@@ -152,7 +156,9 @@ async function prepareControl(runtime) {
   return { caseId: created.caseId, statusMessageId: Array.from(runtime.messages.keys())[0] };
 }
 
-(async () => {
+module.exports = { createRuntime, prepareControl };
+
+if (require.main === module) (async () => {
   const loaded = loadTrackedAppWithGuard();
 
   const unauthorizedList = createRuntime(loaded);
