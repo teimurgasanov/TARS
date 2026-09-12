@@ -154,6 +154,55 @@ module.exports = async function testReviewedArtifactProvenance() {
     assert.notStrictEqual(mismatchedIdentity.result.status, 0,
       "scope loading must fail closed when exact PR identity cannot be established");
 
+    // Behind-base PR: H and newer base B1 diverge from B0. M retains both contributions.
+    const B0 = emptyBase;
+    const B1 = scopedBase;
+    scopeGit("read-tree", emptyTree);
+    fs.writeFileSync(path.join(scopeFixture, "feature.txt"), "feature contribution\n");
+    scopeGit("add", "feature.txt");
+    const featureTree = scopeGit("write-tree");
+    const H = scopeGit("commit-tree", featureTree, "-p", B0, "-m", "feature from old base");
+    scopeGit("read-tree", scopedTree);
+    scopeGit("add", "feature.txt");
+    const mergedTree = scopeGit("write-tree");
+    const M = scopeGit("commit-tree", mergedTree, "-p", B1, "-p", H, "-m", "behind-base merge");
+    assert.strictEqual(scopeGit("rev-parse", `${H}^`), B0);
+    assert.strictEqual(scopeGit("rev-parse", `${B1}^`), B0);
+    assert.strictEqual(scopeGit("rev-list", "--parents", "-n", "1", M), `${M} ${B1} ${H}`);
+    const surface = scopeGit("diff", "--name-status", B1, M, "--");
+    assert.strictEqual(surface, "A\tfeature.txt", "BASE to MERGE must contain only the feature contribution");
+    assert.strictEqual(scopeGit("diff", "--name-status", B1, H, "--"),
+      "D\t.github/review-scopes/pr-50.md\nA\tfeature.txt",
+      "BASE to HEAD would falsely report deletion of the base-only governance scope");
+    assert.strictEqual(scopeGit("show", `${M}:.github/review-scopes/pr-50.md`), wp003Scope.trim());
+    const behindBase = loadScope({ baseSha: B1, headSha: H, mergeSha: M, prNumber: 50 });
+    assert.strictEqual(behindBase.result.status, 0, "the real loader must accept a behind-base merge");
+    assert.match(behindBase.output, /M1\/M2\/M3/, "base-owned scope must survive the behind-base merge");
+    const extraParentMerge = scopeGit("commit-tree", mergedTree, "-p", B1, "-p", H, "-p", B0,
+      "-m", "invalid three-parent merge");
+    for (const identity of [
+      { baseSha: B1, headSha: B0, mergeSha: M },
+      { baseSha: B1, headSha: H, mergeSha: H },
+      { baseSha: B1, headSha: H, mergeSha: extraParentMerge }
+    ]) assert.notStrictEqual(loadScope({ ...identity, prNumber: 50 }).result.status, 0,
+      "loader must reject wrong HEAD, a non-merge commit, or an extra parent");
+
+    // Bind the real prompt command to the fixture, not a separately invented review command.
+    const reviewPrompt = workflowStep(guarded, "Review PR diff").split("          prompt: |\n")[1]
+      .split("          claude_args:")[0];
+    const reviewCommands = [...reviewPrompt.matchAll(/`git diff ([^`]+)`/g)];
+    assert.strictEqual(reviewCommands.length, 1, "prompt must specify one immutable review diff");
+    assert.strictEqual(reviewCommands[0][1],
+      "${{ github.event.pull_request.base.sha }} ${{ github.sha }} --",
+      "review contract must target BASE to MERGE, never BASE to HEAD or mutable tips");
+    const reviewArgs = reviewCommands[0][1]
+      .replace("${{ github.event.pull_request.base.sha }}", B1)
+      .replace("${{ github.sha }}", M).split(" ");
+    assert.strictEqual(scopeGit("diff", "--name-status", ...reviewArgs), surface);
+    assert.match(reviewPrompt, /PR head SHA is identity\/parent evidence; do not use the head tree as a substitute for the merge candidate/);
+    assert.doesNotMatch(reviewPrompt, /between those exact base\/head commits|PR diff against develop/);
+    console.log("PASS: behind-base review surface BASE -> MERGE; BASE -> HEAD false deletion reproduced; exact two-parent identity retained");
+
     execFileSync(path.join(root, "build-tars.sh"), [], { cwd: root, stdio: "pipe" });
     const zipName = `tars-report_${require("../../app.json").version}.zip`;
     const zipPath = path.join(root, zipName);
