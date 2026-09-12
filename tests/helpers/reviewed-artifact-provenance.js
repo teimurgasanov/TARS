@@ -11,6 +11,14 @@ const guarded = fs.readFileSync(path.join(root, ".github/workflows/tars-guarded-
 assert.match(guarded, /\.\/build-tars\.sh/, "guarded review must build the canonical package");
 assert.doesNotMatch(guarded, /zip -q -j/, "raw tracked JS must never be packaged as reviewed deployment code");
 
+function workflowStep(workflow, name) {
+  const marker = `      - name: ${name}`;
+  const start = workflow.indexOf(marker);
+  assert.ok(start >= 0, `workflow step is missing: ${name}`);
+  const next = workflow.indexOf("\n      - name:", start + marker.length);
+  return workflow.slice(start, next >= 0 ? next : workflow.length);
+}
+
 module.exports = async function testReviewedArtifactProvenance() {
   const { canonicalManifest, reviewedManifest, assertCanonicalMatch, sha256 } = require("../../tools/tars-canonical-manifest");
   const { verifyReviewedProvenance } = require("../../tools/tars-reviewed-provenance");
@@ -42,21 +50,104 @@ module.exports = async function testReviewedArtifactProvenance() {
   assert.match(deploy, /reviewed_canonical: reviewEvidence/);
   assert.deepStrictEqual(guarded.match(/\b[\w-]+: write/g), ["id-token: write"]);
   assert.deepStrictEqual(deploy.match(/\b[\w-]+: write/g), ["deployments: write"]);
+  assert.match(guarded, /display_report: 'false'/, "full action report must stay hidden");
+  assert.match(guarded, /show_full_output: 'false'/, "full Claude transcript must stay hidden");
+  assert.match(guarded, /--json-schema '[^\n]*"verdict"[^\n]*"reason"/,
+    "the gate must use the action's bounded structured output");
+  assert.doesNotMatch(workflowStep(guarded, "Enforce Claude verdict"), /execution_file|CLAUDE_EXECUTION_FILE/,
+    "the enforcement step must not read or expose the full execution transcript");
 
-  // Execute the actual verdict parser, including missing output and conflicting verdicts.
+  const wp003Scope = fs.readFileSync(path.join(root, ".github/review-scopes/pr-50.md"), "utf8");
+  for (const required of ["M1/M2/M3", "at most one live authoritative confirmation",
+    "PAS unavailable means no local financial confirmation", "duplicate observation grants no additional credit",
+    "recovery and adjudication through PAS"]) assert.match(wp003Scope, new RegExp(required));
+  for (const forbiddenDelta of ["`/prinyat` selector", "OCR behavior", "Date or calendar",
+    "Report or workday", "`approvedBy`", "Automatic confirmation", "Deployment or cutover",
+    "Migration", "Production topology"]) assert.match(wp003Scope, new RegExp(forbiddenDelta));
+
+  // Execute the actual verdict parser. It must fail closed and print only the bounded report.
   const parser = guarded.match(/python3 - <<'PY'\n([\s\S]*?)\n          PY/)[1]
     .split("\n").map((line) => line.slice(10)).join("\n");
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "tars-provenance-test-"));
   try {
-    const verdictFile = path.join(temp, "verdict.txt");
-    for (const [text, pass] of [[null, false], ["", false], ["PASS", false],
-      ["FINAL_VERDICT: BLOCK", false], ["FINAL_VERDICT: PASS\nFINAL_VERDICT: BLOCK", false],
-      ["FINAL_VERDICT: PASS", true]]) {
-      if (text !== null) fs.writeFileSync(verdictFile, text);
+    const transcriptMarker = "FULL_TRANSCRIPT_MUST_NOT_APPEAR";
+    const secretMarker = "sk-ant-sensitive-fixture-value";
+    const verdictCases = [
+      ["missing output", "success", "", false, "Reviewer output is missing or malformed."],
+      ["missing verdict", "success", JSON.stringify({ reason: "A reason without a verdict." }), false,
+        "Reviewer output does not match the required contract."],
+      ["reviewer block", "success", JSON.stringify({ verdict: "BLOCK", reason: "Fix duplicate credit handling." }),
+        false, "Fix duplicate credit handling."],
+      ["reviewer pass", "success", JSON.stringify({ verdict: "PASS", reason: "No blocking regression found." }),
+        true, "No blocking regression found."],
+      ["unsafe reason", "success", JSON.stringify({ verdict: "BLOCK", reason: `Leaked ${secretMarker}` }),
+        false, "Reviewer reason was withheld"],
+      ["failed execution", "failure", JSON.stringify({ verdict: "PASS", reason: "Should be ignored." }),
+        false, "Reviewer execution did not complete successfully."],
+    ];
+    for (const [name, conclusion, reviewJson, pass, visibleReason] of verdictCases) {
+      const summary = path.join(temp, `summary-${name.replaceAll(" ", "-")}.md`);
       const result = spawnSync("python3", ["-c", parser], { encoding: "utf8",
-        env: { ...process.env, CLAUDE_EXECUTION_FILE: verdictFile } });
-      assert.strictEqual(result.status === 0, pass, `Claude verdict gate: ${text}`);
+        env: { ...process.env, CLAUDE_CONCLUSION: conclusion, CLAUDE_REVIEW_JSON: reviewJson,
+          CLAUDE_EXECUTION_FILE: transcriptMarker, GITHUB_STEP_SUMMARY: summary } });
+      const summaryText = fs.readFileSync(summary, "utf8");
+      const exposed = `${result.stdout}${result.stderr}${summaryText}`;
+      assert.strictEqual(result.status === 0, pass, `Claude verdict gate: ${name}`);
+      assert.match(result.stdout, new RegExp(visibleReason), `concise reason must be visible in logs: ${name}`);
+      assert.match(summaryText, new RegExp(visibleReason), `concise reason must be visible in summary: ${name}`);
+      assert.doesNotMatch(exposed, new RegExp(transcriptMarker), "full execution transcript must stay hidden");
+      assert.doesNotMatch(exposed, new RegExp(secretMarker), "secret-like reviewer text must stay hidden");
     }
+
+    // Execute the exact base-scope loader against real merge commits.
+    const scopeStep = workflowStep(guarded, "Establish base-owned review scope");
+    const scopeScript = scopeStep.split("        run: |\n")[1].trimEnd()
+      .split("\n").map((line) => line.slice(10)).join("\n");
+    const scopeFixture = path.join(temp, "scope-fixture");
+    fs.mkdirSync(scopeFixture);
+    const scopeGit = (...args) => execFileSync("git", args, { cwd: scopeFixture, encoding: "utf8",
+      env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_COMMITTER_NAME: "Fixture",
+        GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_EMAIL: "fixture@example.invalid" } }).trim();
+    scopeGit("init", "--quiet");
+    const emptyTree = scopeGit("write-tree");
+    const emptyBase = scopeGit("commit-tree", emptyTree, "-m", "base without scope");
+    fs.mkdirSync(path.join(scopeFixture, ".github/review-scopes"), { recursive: true });
+    fs.writeFileSync(path.join(scopeFixture, ".github/review-scopes/pr-50.md"), wp003Scope);
+    scopeGit("add", ".github/review-scopes/pr-50.md");
+    const scopedTree = scopeGit("write-tree");
+    const headOnly = scopeGit("commit-tree", scopedTree, "-p", emptyBase, "-m", "head-only scope");
+    const headOnlyMerge = scopeGit("commit-tree", scopedTree, "-p", emptyBase, "-p", headOnly,
+      "-m", "head-only merge");
+    const scopedBase = scopeGit("commit-tree", scopedTree, "-p", emptyBase, "-m", "base-owned scope");
+    const scopedHead = scopeGit("commit-tree", scopedTree, "-p", scopedBase, "-m", "head");
+    const scopedMerge = scopeGit("commit-tree", scopedTree, "-p", scopedBase, "-p", scopedHead,
+      "-m", "authorized merge");
+
+    function loadScope({ baseSha, headSha, mergeSha, prNumber }) {
+      const output = path.join(temp, `scope-output-${prNumber}-${mergeSha}.txt`);
+      const result = spawnSync("bash", ["-c", scopeScript], { cwd: scopeFixture, encoding: "utf8",
+        env: { ...process.env, REVIEW_BASE_SHA: baseSha, REVIEW_HEAD_SHA: headSha,
+          REVIEW_MERGE_SHA: mergeSha, REVIEW_PR_NUMBER: String(prNumber), GITHUB_OUTPUT: output } });
+      return { result, output: fs.existsSync(output) ? fs.readFileSync(output, "utf8") : "" };
+    }
+
+    const ordinary = loadScope({ baseSha: scopedBase, headSha: scopedHead, mergeSha: scopedMerge, prNumber: 51 });
+    assert.strictEqual(ordinary.result.status, 0);
+    assert.match(ordinary.output, /No intentional behavioral change is authorized/,
+      "ordinary PRs must remain baseline-protected");
+    const authorized = loadScope({ baseSha: scopedBase, headSha: scopedHead, mergeSha: scopedMerge, prNumber: 50 });
+    assert.strictEqual(authorized.result.status, 0);
+    assert.match(authorized.output, /M1\/M2\/M3/,
+      "an authorized WP must receive only its base-owned scope");
+    const selfAuthorized = loadScope({ baseSha: emptyBase, headSha: headOnly, mergeSha: headOnlyMerge, prNumber: 50 });
+    assert.strictEqual(selfAuthorized.result.status, 0);
+    assert.match(selfAuthorized.output, /No intentional behavioral change is authorized/);
+    assert.doesNotMatch(selfAuthorized.output, /M1\/M2\/M3/,
+      "a head-only scope declaration must not authorize itself");
+    const mismatchedIdentity = loadScope({ baseSha: emptyBase, headSha: scopedHead,
+      mergeSha: scopedMerge, prNumber: 50 });
+    assert.notStrictEqual(mismatchedIdentity.result.status, 0,
+      "scope loading must fail closed when exact PR identity cannot be established");
 
     execFileSync(path.join(root, "build-tars.sh"), [], { cwd: root, stdio: "pipe" });
     const zipName = `tars-report_${require("../../app.json").version}.zip`;
