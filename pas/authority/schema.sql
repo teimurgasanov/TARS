@@ -17,7 +17,7 @@ CREATE TABLE ConfirmedPayment (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE IdentityAlias (
-  kind TEXT NOT NULL CHECK (kind IN ('receiptCaseId', 'exactHash', 'observation', 'visualHash')),
+  kind TEXT NOT NULL CHECK (kind IN ('receiptCaseId', 'exactHash', 'observation', 'visualHash', 'tarsReceiptIdentityV1')),
   aliasValue TEXT NOT NULL CHECK (length(aliasValue) > 0),
   canonicalPaymentId TEXT NOT NULL REFERENCES PaymentSlot(canonicalPaymentId),
   PRIMARY KEY (kind, aliasValue)
@@ -73,6 +73,9 @@ WHEN EXISTS (SELECT 1 FROM ConfirmedPayment WHERE confirmationId = NEW.confirmat
 BEGIN SELECT RAISE(ABORT, 'immutable confirmation'); END;
 CREATE TRIGGER alias_no_update BEFORE UPDATE ON IdentityAlias BEGIN SELECT RAISE(ABORT, 'immutable alias'); END;
 CREATE TRIGGER alias_no_delete BEFORE DELETE ON IdentityAlias BEGIN SELECT RAISE(ABORT, 'immutable alias'); END;
+CREATE TRIGGER alias_no_replace BEFORE INSERT ON IdentityAlias
+WHEN EXISTS (SELECT 1 FROM IdentityAlias WHERE kind = NEW.kind AND aliasValue = NEW.aliasValue)
+BEGIN SELECT RAISE(ABORT, 'immutable alias'); END;
 CREATE TRIGGER command_no_update BEFORE UPDATE ON CommandLog BEGIN SELECT RAISE(ABORT, 'immutable command'); END;
 CREATE TRIGGER command_no_delete BEFORE DELETE ON CommandLog BEGIN SELECT RAISE(ABORT, 'immutable command'); END;
 CREATE TRIGGER evidence_no_update BEFORE UPDATE ON CommandEvidence BEGIN SELECT RAISE(ABORT, 'immutable evidence'); END;

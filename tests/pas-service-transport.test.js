@@ -28,7 +28,9 @@ function command(commandId, mode = "AUTO") {
   return buildConfirmPaymentCommand({ commandId, mode,
     actor: { kind: mode === "AUTO" ? "SYSTEM" : "OPERATOR", reference: "synthetic-actor" },
     observation: { messageId: "m-" + commandId, uploadId: "u-" + commandId },
-    receiptEvidence: { receiptCaseId: "case-" + commandId },
+    receiptEvidence: { receiptCaseId: "case-" + commandId,
+      ...(mode === "MANUAL" ? { paymentIdentity: require("../pas/receipt-identity").receiptIdentityEvidence(
+        "id:" + require("crypto").createHash("sha256").update(commandId).digest("hex").toUpperCase() + "|2026-09-10|123") } : {}) },
     ...(mode === "AUTO" ? { extracted: fields } : { manualCorrections: fields }) });
 }
 function env(db = filename, mode = "existing") {
@@ -180,6 +182,29 @@ function projectionCounts(db) {
     const rows = snapshot(); assert.equal(rows[1].length, 3);
     assert.equal((await client(service).getCommandCompletion(auto.commandId)).data.result.canonicalPaymentId, original.data.canonicalPaymentId);
     assert.equal((await client(service).getCommandCompletion("absent")).data, null);
+  });
+  await test("WP-003: Apps-Engine adapter and separate PAS process resolve versioned raw identity", async () => {
+    const { RocketChatPaymentAuthority } = require("../pas/transport/rocketchat-client");
+    const adapter = new RocketChatPaymentAuthority({ async post(url, options) {
+      assert.equal(url, service.url + "/v1/operation");
+      const response = await raw(service, options.content, options.headers.Authorization.slice(7));
+      return { statusCode: response.status, content: JSON.stringify(response.body) };
+    } }, { baseUrl: service.url, token: commandToken });
+    const first = command("wp003-wire-first", "MANUAL");
+    const second = command("wp003-wire-second", "MANUAL");
+    first.receiptEvidence.exactHash = "synthetic-wire-bytes-one";
+    second.receiptEvidence.exactHash = "synthetic-wire-bytes-two";
+    second.receiptEvidence.paymentIdentity = structuredClone(first.receiptEvidence.paymentIdentity);
+    const result = await adapter.confirmPayment(first);
+    assert.equal(result.status, "CONFIRMED");
+    assert.deepEqual(await adapter.confirmPayment(second), { ...result, status: "ALREADY_CONFIRMED" });
+    assert.deepEqual(await adapter.confirmPayment(first), result);
+    const invalid = structuredClone(second);
+    invalid.receiptEvidence.paymentIdentity.functionVersion = "UNKNOWN_VERSION";
+    assert.equal((await raw(service, envelope("ConfirmPayment", invalid))).status, 400);
+    delete invalid.receiptEvidence.paymentIdentity;
+    invalid.commandId = "wp003-wire-missing";
+    assert.equal((await adapter.confirmPayment(invalid)).reasonCode, "STABLE_PAYMENT_IDENTITY_REQUIRED");
   });
   await test("auth failures and cross-role operations cause no mutation; explicit both-role grant only", async () => {
     const before = snapshot(); const body = envelope("ConfirmPayment", command("forbidden"));
@@ -357,14 +382,17 @@ function projectionCounts(db) {
     for (const secret of [commandToken, consumerToken]) assert.ok(!logs.join("").includes(secret));
     for (const line of logs.join("").trim().split("\n")) assert.ok(line === "PAS_STARTUP_FAILED" || /^\{"event":"PAS_(READY|STOPPED)"/.test(line));
   });
-  await test("transport dependency graph excludes authority/native SQLite; production wiring unchanged", async () => {
+  await test("transport dependency graph includes only the Apps-Engine adapter in TARS; authority/native SQLite remain isolated", async () => {
     const esbuild = require("esbuild");
     const transport = await esbuild.build({ entryPoints: [path.join(root, "pas/transport/client.js")], bundle: true, platform: "node", write: false, metafile: true, logLevel: "silent" });
     assert.ok(Object.keys(transport.metafile.inputs).every(p => !/pas\/authority|better-sqlite3/.test(p)));
     const product = await esbuild.build({ entryPoints: [path.join(root, "tools/tars-build-entry.js")], bundle: true, platform: "node", external: ["@rocket.chat/apps-engine/*"], write: false, metafile: true, logLevel: "silent" });
-    // WP-021 pure contracts/seam are already build-only imports in the baseline.
-    assert.ok(Object.keys(product.metafile.inputs).every(p => !/(^|\/)pas\/(authority|service|transport)\/|better-sqlite3/.test(p)));
-    assert.ok(!/PAS_HTTP_V1|PAS_READY|better-sqlite3/.test(product.outputFiles[0].text));
+    const inputs = Object.keys(product.metafile.inputs);
+    assert.ok(inputs.every(p => !/(^|\/)pas\/(authority|service)\/|better-sqlite3/.test(p)));
+    assert.deepEqual(inputs.filter(p => /(^|\/)pas\/transport\//.test(p)).map(p => path.basename(p)).sort(),
+      ["protocol.js", "rocketchat-client.js"]);
+    assert.ok(!/PAS_READY|better-sqlite3|require\(["']node:http/.test(product.outputFiles[0].text));
+    assert.match(product.outputFiles[0].text, /PAS_HTTP_V1/);
   });
   console.log(`PASS: WP-023 ${tests} deterministic process/transport scenarios on Node ${process.versions.node}`);
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {

@@ -1,5 +1,10 @@
 # WP-023: local separate-process PAS service
 
+WP-003 adds versioned raw payment identity evidence and an Apps-Engine caller
+adapter, while keeping this service isolated and inactive. See
+[WP-003](../WP-003.md) for the current schema version 3, manual requirements and
+non-live boundaries; the original slice description below is historical there.
+
 Baseline: `develop@4abc18c65af70d8d0ef677390ed42aaf992cae7b`.
 This is an isolated, non-production service MVP under FINAL FREEZE v1.0 and
 WP-019 preflight. It does not wire any live TARS writer, change receipt recognition,

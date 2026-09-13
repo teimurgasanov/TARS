@@ -20,7 +20,12 @@ function command(id, identity = "payment-a", options = {}) {
     observation: { messageId: "message-" + id, uploadId: "upload-" + id },
     receiptEvidence: { receiptCaseId: "case-" + identity, exactHash: "exact-" + identity, visualHash: "visual-" + identity },
     extracted: { amount: { minorUnits: 125000, currency: "RUB" }, date: "2026-09-09" },
-    ...options
+    ...options,
+    ...(mode === "MANUAL" && !options.receiptEvidence ? { receiptEvidence: {
+      receiptCaseId: "case-" + identity, exactHash: "exact-" + identity, visualHash: "visual-" + identity,
+      paymentIdentity: require("../pas/receipt-identity").receiptIdentityEvidence(
+        "id:" + digest(identity).toUpperCase() + "|2026-09-09|1250")
+    } } : {})
   });
 }
 
@@ -533,16 +538,32 @@ async function compete(f, commands) {
     db.exec("CREATE TABLE Unrelated (value TEXT)");
     db.close();
     assert.throws(() => new PaymentAuthority(foreign), /foreign database/);
-    assert.strictEqual(f.sql.pragma("user_version", { simple: true }), 2);
+    assert.strictEqual(f.sql.pragma("user_version", { simple: true }), 3);
     const schemaBefore = f.sql.prepare("SELECT sql FROM sqlite_master ORDER BY name").all();
-    for (const unsupportedVersion of [1, 3]) {
+    for (const unsupportedVersion of [1, 2, 4]) {
       f.sql.pragma("user_version = " + unsupportedVersion);
       assert.throws(() => new PaymentAuthority(f.filename), /migrations are not supported/);
       assert.strictEqual(f.sql.pragma("user_version", { simple: true }), unsupportedVersion);
       assert.deepStrictEqual(f.sql.prepare("SELECT sql FROM sqlite_master ORDER BY name").all(), schemaBefore);
     }
-    f.sql.pragma("user_version = 2");
+    f.sql.pragma("user_version = 3");
   });
 
+  await fixtureTest("WP-003: DB-serialized stable identity resolution across different observations", async f => {
+    const commands = ["one", "two"].map(id => {
+      const input = command("stable-race-" + id, "same-real-payment", { mode: "MANUAL" });
+      input.receiptEvidence.receiptCaseId = "different-case-" + id;
+      input.receiptEvidence.exactHash = "different-exact-" + id;
+      input.receiptEvidence.visualHash = null;
+      return input;
+    });
+    const results = await compete(f, commands);
+    assert.deepStrictEqual(results.map(item => item.status).sort(), ["ALREADY_CONFIRMED", "CONFIRMED"]);
+    assert.strictEqual(results[0].canonicalPaymentId, results[1].canonicalPaymentId);
+    assert.strictEqual(f.count("PaymentSlot"), 1);
+    assert.strictEqual(f.count("ConfirmedPayment"), 1);
+    assert.strictEqual(f.sql.prepare("SELECT count(*) n FROM FinancialEffect WHERE kind='WRITE_CONFIRMED_PROJECTION'").get().n, 1);
+  });
+  await require("./helpers/wp003-manual-payment")();
   console.log("PASS: isolated durable SQLite PAS authority MVP; A-H and failure/constraint guards");
 })().catch(error => { console.error(error); process.exitCode = 1; });

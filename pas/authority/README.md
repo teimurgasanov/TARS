@@ -1,5 +1,10 @@
 # WP-022: isolated PAS authority MVP
 
+WP-003 extends this baseline with required MANUAL stable identity evidence and
+authority schema version 3. See [WP-003](../WP-003.md) for the current contract,
+caller integration, schema refusal and non-live limitations. The original slice
+description below is historical where superseded by that document.
+
 WP-023 adds an isolated local HTTP process around this core; see
 [service/README.md](../service/README.md) for the existing-only startup mode,
 bounded effect reads/acknowledgements and transport tests. The WP-022 description
