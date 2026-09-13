@@ -52,18 +52,23 @@ jobs:
       - name: Resolve reviewed target
         id: target
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_ACTION: ${{ inputs.action }}
+          DISPATCH_CONFIRM: ${{ inputs.confirm }}
+          DISPATCH_COMMIT_SHA: ${{ inputs.commit_sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${{ inputs.action }}" != "DEPLOY" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$DISPATCH_ACTION" != "DEPLOY" ]; then
               echo "Deployment blocked: action must be exactly DEPLOY."
               exit 1
             fi
-            if [ "${{ inputs.confirm }}" != "DEPLOY" ]; then
+            if [ "$DISPATCH_CONFIRM" != "DEPLOY" ]; then
               echo "Deployment blocked: confirmation must be exactly DEPLOY."
               exit 1
             fi
-            TARGET_SHA="${{ inputs.commit_sha }}"
+            TARGET_SHA="$DISPATCH_COMMIT_SHA"
             [[ "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || {
               echo "Deployment blocked: commit_sha must be a full 40-character SHA."
               exit 1
@@ -582,22 +587,13 @@ jobs:
       - name: Validate guarded session cleanup request
         shell: bash
         env:
-          ROCKETCHAT_URL: ${{ secrets.ROCKETCHAT_URL }}
-          ROCKETCHAT_USER: ${{ secrets.ROCKETCHAT_USER }}
-          ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
+          CLEANUP_CONFIRM: ${{ inputs.confirm }}
         run: |
           set -euo pipefail
-          test "${{ inputs.confirm }}" = "CLEANUP" || {
+          test "$CLEANUP_CONFIRM" = "CLEANUP" || {
             echo "Session cleanup blocked: confirmation must be exactly CLEANUP."
             exit 1
           }
-          test -n "$ROCKETCHAT_URL" || { echo "ROCKETCHAT_URL is missing"; exit 1; }
-          test -n "$ROCKETCHAT_USER" || { echo "ROCKETCHAT_USER is missing"; exit 1; }
-          test -n "$ROCKETCHAT_PASSWORD" || { echo "ROCKETCHAT_PASSWORD is missing"; exit 1; }
-          case "$ROCKETCHAT_URL" in
-            https://*) ;;
-            *) echo "Session cleanup blocked: ROCKETCHAT_URL must use https://"; exit 1 ;;
-          esac
 
       - name: Revoke previous sessions and logout cleanup session
         shell: bash
@@ -607,6 +603,14 @@ jobs:
           ROCKETCHAT_PASSWORD: ${{ secrets.ROCKETCHAT_PASSWORD }}
         run: |
           set -euo pipefail
+          test -n "$ROCKETCHAT_URL" || { echo "ROCKETCHAT_URL is missing"; exit 1; }
+          test -n "$ROCKETCHAT_USER" || { echo "ROCKETCHAT_USER is missing"; exit 1; }
+          test -n "$ROCKETCHAT_PASSWORD" || { echo "ROCKETCHAT_PASSWORD is missing"; exit 1; }
+          case "$ROCKETCHAT_URL" in
+            https://*) ;;
+            *) echo "Session cleanup blocked: ROCKETCHAT_URL must use https://"; exit 1 ;;
+          esac
+
           AUTH_TOKEN=""
           USER_ID=""
           SESSION_OPEN=0
