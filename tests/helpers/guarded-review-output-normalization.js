@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
 
-const root = path.resolve(__dirname, "..");
+const root = path.resolve(__dirname, "../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/tars-guarded-review-build.yml"), "utf8");
 
 function workflowStep(name) {
