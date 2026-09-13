@@ -57,8 +57,20 @@ module.exports = async function testReviewedArtifactProvenance() {
     "the mutable v1 tag must not control verdict/reason parsing");
   assert.match(guarded, /display_report: 'false'/, "full action report must stay hidden");
   assert.match(guarded, /show_full_output: 'false'/, "full Claude transcript must stay hidden");
-  assert.match(guarded, /--json-schema '[^\n]*"verdict"[^\n]*"reason"/,
-    "the gate must use the action's bounded structured output");
+  const reviewStep = workflowStep(guarded, "Review PR diff");
+  const normalizeStep = workflowStep(guarded, "Normalize Claude review result");
+  assert.doesNotMatch(reviewStep, /--json-schema/,
+    "the gate must not depend on flaky SDK structured-output retries");
+  assert.match(reviewStep, /FINAL_REASON:/,
+    "the reviewer must emit an explicit bounded reason sentinel");
+  assert.match(reviewStep, /FINAL_VERDICT: PASS/);
+  assert.match(reviewStep, /FINAL_VERDICT: BLOCK/);
+  assert.match(normalizeStep, /CLAUDE_EXECUTION_FILE: \$\{\{ steps\.claude\.outputs\.execution_file \}\}/,
+    "the local normalizer must read the pinned action execution file");
+  assert.match(normalizeStep, /message\.type === 'result'/);
+  assert.match(normalizeStep, /message\.subtype === 'success'/);
+  assert.doesNotMatch(normalizeStep, /console\.log|process\.stdout/,
+    "the transcript parser must not print execution-file content");
   assert.doesNotMatch(workflowStep(guarded, "Enforce Claude verdict"), /execution_file|CLAUDE_EXECUTION_FILE/,
     "the enforcement step must not read or expose the full execution transcript");
 
