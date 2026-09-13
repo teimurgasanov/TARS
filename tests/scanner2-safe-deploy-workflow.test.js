@@ -15,6 +15,14 @@ function step(name) {
   return workflow.slice(start, next >= 0 ? next : workflow.length);
 }
 
+function runBody(name) {
+  const block = step(name);
+  const marker = "\n        run: |\n";
+  const start = block.indexOf(marker);
+  assert.ok(start >= 0, `workflow run block is missing: ${name}`);
+  return block.slice(start + marker.length);
+}
+
 const manualGate = "if: github.event_name == 'workflow_dispatch' && inputs.action == 'DEPLOY' && inputs.confirm == 'DEPLOY'";
 
 assert.match(workflow, /push:\s*\n\s*branches: \[develop\]/, "develop pushes must run validation");
@@ -49,8 +57,15 @@ assert.match(workflow, /git diff --check/);
 assert.match(workflow, /zsh -n build-tars\.sh/);
 
 const resolve = step("Resolve reviewed target");
-assert.match(resolve, /inputs\.action.*!= "DEPLOY"/);
-assert.match(resolve, /inputs\.confirm.*!= "DEPLOY"/);
+assert.ok(resolve.includes("EVENT_NAME: ${{ github.event_name }}"));
+assert.ok(resolve.includes("DISPATCH_ACTION: ${{ inputs.action }}"));
+assert.ok(resolve.includes("DISPATCH_CONFIRM: ${{ inputs.confirm }}"));
+assert.ok(resolve.includes("DISPATCH_COMMIT_SHA: ${{ inputs.commit_sha }}"));
+assert.match(runBody("Resolve reviewed target"), /\$DISPATCH_ACTION.*!= "DEPLOY"/);
+assert.match(runBody("Resolve reviewed target"), /\$DISPATCH_CONFIRM.*!= "DEPLOY"/);
+assert.match(runBody("Resolve reviewed target"), /TARGET_SHA="\$DISPATCH_COMMIT_SHA"/);
+assert.doesNotMatch(runBody("Resolve reviewed target"), /\$\{\{\s*inputs\./,
+  "dispatch values must enter the shell through environment variables, not expression interpolation");
 assert.match(resolve, /\^\[0-9a-fA-F\]\{40\}\$/);
 const verifyCommit = step("Verify exact develop commit");
 assert.match(verifyCommit, /TARGET_SHA.*REQUESTED_SHA/);
@@ -83,6 +98,8 @@ assert.doesNotMatch(deploymentProvenance, /actions\/checkout|secrets\.ROCKETCHAT
   "Authenticate, revoke previous sessions, update app, and logout"
 ].forEach((name) => {
   assert.ok(step(name).includes(manualGate), `${name} must have the manual DEPLOY gate`);
+  assert.doesNotMatch(runBody(name), /\$\{\{\s*inputs\./,
+    `${name} must not interpolate dispatch inputs into a secret-bearing shell`);
 });
 
 const firstSecret = workflow.indexOf("secrets.ROCKETCHAT_URL");
@@ -97,12 +114,28 @@ assert.match(step("Verify canonical package gate"), /bundle_sha256=.*GITHUB_OUTP
 assert.match(step("Verify canonical package gate"), /zip_sha256=.*GITHUB_OUTPUT/);
 assert.match(step("Authenticate, revoke previous sessions, update app, and logout"), /\/api\/apps\/update/);
 assert.match(workflow, /session_cleanup:[\s\S]*if: github\.event_name == 'workflow_dispatch' && inputs\.action == 'SESSION_CLEANUP'/);
-assert.match(step("Validate guarded session cleanup request"), /inputs\.confirm.*CLEANUP/);
+
+const cleanupGate = step("Validate guarded session cleanup request");
+assert.ok(cleanupGate.includes("CLEANUP_CONFIRM: ${{ inputs.confirm }}"));
+assert.doesNotMatch(cleanupGate, /secrets\.ROCKETCHAT_|ROCKETCHAT_(?:URL|USER|PASSWORD)/,
+  "cleanup confirmation must be validated before Rocket.Chat secrets enter any step");
+assert.match(runBody("Validate guarded session cleanup request"), /test "\$CLEANUP_CONFIRM" = "CLEANUP"/);
+assert.doesNotMatch(runBody("Validate guarded session cleanup request"), /\$\{\{\s*inputs\./,
+  "cleanup confirmation must remain inert shell data");
+
+const cleanupSecretStep = step("Revoke previous sessions and logout cleanup session");
+assert.match(cleanupSecretStep, /ROCKETCHAT_URL: \$\{\{ secrets\.ROCKETCHAT_URL \}\}/);
+assert.match(cleanupSecretStep, /ROCKETCHAT_USER: \$\{\{ secrets\.ROCKETCHAT_USER \}\}/);
+assert.match(cleanupSecretStep, /ROCKETCHAT_PASSWORD: \$\{\{ secrets\.ROCKETCHAT_PASSWORD \}\}/);
+assert.match(runBody("Revoke previous sessions and logout cleanup session"), /test -n "\$ROCKETCHAT_URL"/);
+assert.match(runBody("Revoke previous sessions and logout cleanup session"), /https:\/\/\*/);
+assert.doesNotMatch(runBody("Revoke previous sessions and logout cleanup session"), /\$\{\{\s*inputs\./,
+  "secret-bearing cleanup shell must not interpolate dispatch inputs");
 
 assert.match(workflow, /uses: actions\/upload-artifact@v4[\s\S]*path: \$\{\{ env\.ZIP_PATH \}\}[\s\S]*retention-days: 2/);
 assert.match(step("Validation summary"), /Validation-only develop push completed\. No Rocket\.Chat deployment was attempted\./);
 
-console.log("PASS: production workflow builds canonically and cannot deploy on develop push");
+console.log("PASS: production workflow builds canonically and keeps dispatch inputs inert before secret-bearing steps");
 
 require("./helpers/guarded-review-output-normalization");
 require("./helpers/reviewed-artifact-provenance")().catch((error) => {

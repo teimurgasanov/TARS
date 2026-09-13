@@ -63,7 +63,14 @@ assert.ok(
 assert.match(guarded, /Deployment blocked before apps\/update/, "revocation failure must fail closed before app update");
 assert.match(guarded, /No retry will be attempted/, "app update must not retry automatically");
 assert.ok(workflow.includes(cleanupJobGate), "session cleanup must be unavailable to develop pushes");
-assert.match(cleanupValidation, /inputs\.confirm.*CLEANUP/, "session cleanup must require exact CLEANUP confirmation");
+assert.match(cleanupValidation, /CLEANUP_CONFIRM: \$\{\{ inputs\.confirm \}\}/,
+  "session cleanup confirmation must enter the shell through an environment variable");
+assert.match(runScript(cleanupValidation), /test "\$CLEANUP_CONFIRM" = "CLEANUP"/,
+  "session cleanup must require exact CLEANUP confirmation");
+assert.doesNotMatch(cleanupValidation, /secrets\.ROCKETCHAT_|ROCKETCHAT_(?:URL|USER|PASSWORD)/,
+  "session cleanup confirmation must be validated before Rocket.Chat credentials are exposed");
+assert.doesNotMatch(runScript(cleanupValidation), /\$\{\{\s*inputs\./,
+  "session cleanup confirmation must remain inert shell data");
 assert.match(cleanupGuarded, /\/api\/v1\/login/, "session cleanup must authenticate locally");
 assert.match(cleanupGuarded, /::add-mask::\$AUTH_TOKEN/, "session-cleanup auth token must be masked");
 assert.match(cleanupGuarded, /::add-mask::\$USER_ID/, "session-cleanup user id must be masked");
@@ -72,6 +79,8 @@ assert.match(cleanupGuarded, /\/api\/v1\/users\.logoutOtherClients/, "session cl
 assert.match(cleanupGuarded, /\/api\/v1\/logout/, "session cleanup must logout its fresh session");
 assert.doesNotMatch(cleanupGuarded, /\/api\/apps\/update/, "session cleanup must never update the application");
 assert.doesNotMatch(cleanupGuarded, /ZIP_PATH|build-tars|upload-artifact/, "session cleanup must not require a package");
+assert.doesNotMatch(cleanupScript, /\$\{\{\s*inputs\./,
+  "credential-bearing cleanup shell must not interpolate dispatch inputs");
 
 assert.doesNotMatch(workflow, /(?:AUTH_TOKEN|USER_ID)=.*>>\s*["']?\$GITHUB_ENV/,
   "dynamic credentials must never be written to GITHUB_ENV");
