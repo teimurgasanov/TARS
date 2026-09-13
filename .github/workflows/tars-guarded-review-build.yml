@@ -122,20 +122,80 @@ jobs:
             REVIEW SCOPE LOADED FROM THE EXACT PR BASE COMMIT (never from PR head):
             ${{ steps.review-scope.outputs.text }}
 
-            Return structured output matching the required schema. Set verdict to PASS only when there is no blocking regression. Set verdict to BLOCK otherwise. Reason must be concise and actionable (maximum 600 characters). Do not include hidden reasoning, transcripts, tool traces, secrets, credentials, private links, or unrelated environment data.
+            Give your review normally, but the FINAL TWO LINES of your response MUST be exactly:
+            FINAL_REASON: <one-line concise actionable reason, maximum 600 characters>
+            FINAL_VERDICT: PASS
+            or:
+            FINAL_REASON: <one-line concise actionable reason, maximum 600 characters>
+            FINAL_VERDICT: BLOCK
+            Use PASS only when there is no blocking regression. Do not write anything after FINAL_VERDICT. Do not put secrets, credentials, private links, tool traces, or transcript content in FINAL_REASON.
           claude_args: >-
             --model claude-sonnet-5
             --max-turns 32
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
-            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["PASS","BLOCK"]},"reason":{"type":"string","minLength":1,"maxLength":600}},"required":["verdict","reason"],"additionalProperties":false}'
           display_report: 'false'
           show_full_output: 'false'
-      - name: Enforce Claude verdict
+      - name: Normalize Claude review result
+        id: review-result
         if: always()
         shell: bash
         env:
           CLAUDE_CONCLUSION: ${{ steps.claude.outputs.conclusion }}
-          CLAUDE_REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
+          CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+
+          const outputPath = process.env.GITHUB_OUTPUT || '';
+          const executionPath = process.env.CLAUDE_EXECUTION_FILE || '';
+
+          function emit(conclusion, review = {}) {
+            if (!outputPath) process.exit(1);
+            const delimiter = 'TARS_BOUNDED_REVIEW_JSON';
+            fs.appendFileSync(outputPath, `conclusion=${conclusion}\n`);
+            fs.appendFileSync(outputPath, `review_json<<${delimiter}\n${JSON.stringify(review)}\n${delimiter}\n`);
+          }
+
+          if (process.env.CLAUDE_CONCLUSION !== 'success' || !executionPath || !fs.existsSync(executionPath)) {
+            emit('failure');
+            process.exit(0);
+          }
+
+          let messages;
+          try {
+            messages = JSON.parse(fs.readFileSync(executionPath, 'utf8'));
+          } catch {
+            emit('failure');
+            process.exit(0);
+          }
+          if (!Array.isArray(messages)) {
+            emit('failure');
+            process.exit(0);
+          }
+
+          const results = messages.filter((message) => message && message.type === 'result' &&
+            message.subtype === 'success' && message.is_error === false && typeof message.result === 'string');
+          if (results.length !== 1) {
+            emit('failure');
+            process.exit(0);
+          }
+
+          const text = results[0].result.replace(/\r\n/g, '\n');
+          const match = text.match(/(?:^|\n)FINAL_REASON:[ \t]*([^\n]{1,600})\nFINAL_VERDICT:[ \t]*(PASS|BLOCK)[ \t]*$/);
+          if (!match) {
+            emit('failure');
+            process.exit(0);
+          }
+
+          emit('success', { verdict: match[2], reason: match[1] });
+          NODE
+      - name: Enforce Claude verdict
+        if: always()
+        shell: bash
+        env:
+          CLAUDE_CONCLUSION: ${{ steps.review-result.outputs.conclusion }}
+          CLAUDE_REVIEW_JSON: ${{ steps.review-result.outputs.review_json }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
