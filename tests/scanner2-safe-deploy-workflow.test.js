@@ -104,6 +104,7 @@ assert.match(step("Validation summary"), /Validation-only develop push completed
 
 console.log("PASS: production workflow builds canonically and cannot deploy on develop push");
 
+require("./helpers/guarded-review-output-normalization");
 require("./helpers/reviewed-artifact-provenance")().catch((error) => {
   console.error(error);
   process.exitCode = 1;
