@@ -1,5 +1,6 @@
 "use strict";
 var manualPaymentConfirmation = require("./pas/manual-confirmation");
+var automaticPaymentConfirmation = require("./pas/automatic-confirmation");
 var RocketChatPaymentAuthority = require("./pas/transport/rocketchat-client").RocketChatPaymentAuthority;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __commonJS = (cb, mod) => function __require() {
@@ -3564,6 +3565,8 @@ var require_upload_duplicate_guard = __commonJS({
       const preclassifiedReceipt = Array.isArray(receiptIndex.photos) && receiptIndex.photos.find((entry) => preUploadEntryMatchesPostedContent(entry, postedExact, message));
       if (preclassifiedReceipt) {
         if (logger) logger.info(`FAST_PHOTO_FORWARD_BLOCKED_PRECLASSIFIED_RECEIPT upload=${uploadId}`);
+        // Classification is routing evidence, not financial authority.
+        if (!acceptedReceiptEntry(preclassifiedReceipt)) return false;
         if (!preclassifiedReceipt.resultMessageId) {
           try {
             if (await publishAcceptedReceipt(preclassifiedReceipt, message, read, modify, config, logger)) {
@@ -8122,6 +8125,38 @@ var require_upload_duplicate_guard = __commonJS({
       if (!entry) return false;
       return entry.source !== "pre" && entry.source !== "invalid" && entry.source !== "rejected" && entry.source !== "archive_failed" && entry.source !== "duplicate" && Boolean(entry.receiptDate || entry.receiptIdentity);
     }
+    function automaticPaymentAuthority(http, config) {
+      return new RocketChatPaymentAuthority(http, {
+        baseUrl: String(config && config.pasAuthorityUrl || ""),
+        token: String(config && config.pasAuthorityToken || "")
+      });
+    }
+    async function authorizeAutomaticReceiptProjection(entry, index, http, config) {
+      try {
+        const commandId = automaticPaymentConfirmation.automaticCommandId(entry);
+        // The id represents the immutable observation; every attempt rebuilds
+        // amount, date, and evidence from the current receipt state.
+        const command = automaticPaymentConfirmation.buildAutomaticConfirmation(entry, commandId);
+        const outcome = await automaticPaymentConfirmation.requestAutomaticConfirmation(automaticPaymentAuthority(http, config), command);
+        const status = outcome.result && outcome.result.status || "AUTHORITY_UNAVAILABLE";
+        if (!outcome.decision || !outcome.decision.allowObservationAssociation) return { status, projected: false, command };
+        const canonicalPaymentId = outcome.result.canonicalPaymentId;
+        const existingProjection = (index && Array.isArray(index.photos) ? index.photos : []).find((candidate) => candidate && candidate !== entry && candidate.source === "confirmed" && candidate.pasCanonicalPaymentId === canonicalPaymentId);
+        entry.pasCanonicalPaymentId = canonicalPaymentId;
+        entry.pasCommandId = commandId;
+        if (existingProjection) {
+          entry.source = "duplicate";
+          return { status, projected: false, command };
+        }
+        // ALREADY_CONFIRMED is only observation association in W1; missing
+        // local projection repair must not create a new financial row here.
+        if (!outcome.decision.allowNewConfirmedFinancialState) return { status, projected: false, command };
+        entry.source = "confirmed";
+        return { status, projected: true, command };
+      } catch (_) {
+        return { status: "AUTHORITY_UNAVAILABLE", projected: false };
+      }
+    }
     const PERSONAL_CHAT_ARCHIVING_ENABLED = false;
     function personalChatDaySeparator(now = Date.now(), config) {
       const date = receiptCalendarDateForTimestamp(now, config);
@@ -8946,8 +8981,8 @@ var require_upload_duplicate_guard = __commonJS({
             ids: { message: message.id, upload: messageFileId, room: message.room && message.room.id, sender: message.sender && message.sender.id },
             attrs: { intent: protectedRoom.kind === "receipt" ? "receipt" : "photo" }
           });
-          const isSameConfirmedMessage = exactMatch && exactMatch.messageId && message.id && exactMatch.messageId === message.id;
-          const isSameConfirmedUpload = exactMatch && exactMatch.uploadId && messageFileId && String(exactMatch.uploadId) === String(messageFileId) && exactMatch.source !== "duplicate" && exactMatch.source !== "rejected";
+          const isSameConfirmedMessage = exactMatch && exactMatch.messageId && message.id && exactMatch.messageId === message.id && (protectedRoom.kind !== "receipt" || exactMatch.source === "confirmed");
+          const isSameConfirmedUpload = exactMatch && exactMatch.uploadId && messageFileId && String(exactMatch.uploadId) === String(messageFileId) && (protectedRoom.kind === "receipt" ? exactMatch.source === "confirmed" : exactMatch.source !== "duplicate" && exactMatch.source !== "rejected");
           if (isSameConfirmedMessage || isSameConfirmedUpload) {
             if (!exactMatch.messageId && message.id) exactMatch.messageId = message.id;
             if (!exactMatch.uploadId && messageFileId) exactMatch.uploadId = messageFileId;
@@ -9011,7 +9046,20 @@ var require_upload_duplicate_guard = __commonJS({
                 );
                 if (!archived || archived.archiveStatus !== "stored" || !archived.archiveKey) throw new Error("Rocket.Chat receipt archive did not confirm storage");
                 Object.assign(exactMatch, archived);
-                exactMatch.source = "confirmed";
+                const authorityEntry = {
+                  ...exactMatch,
+                  roomId: message.room && message.room.id || exactMatch.roomId || "",
+                  messageId: message.id || exactMatch.messageId || "",
+                  uploadId: messageFileId || exactMatch.uploadId || ""
+                };
+                const authority = await authorizeAutomaticReceiptProjection(authorityEntry, index, http, ocrConfig);
+                Object.assign(exactMatch, authorityEntry);
+                if (!authority.projected) {
+                  delete exactMatch.postProcessedAt;
+                  await writeIndex(persistence, protectedRoom.index, index);
+                  if (logger) logger.warn(`Archive repair left receipt unconfirmed after PAS status=${authority.status}`);
+                  return true;
+                }
                 exactMatch.invalidReason = "";
                 exactMatch.postProcessedAt = Date.now();
                 await writeIndex(persistence, protectedRoom.index, index);
@@ -9175,6 +9223,14 @@ var require_upload_duplicate_guard = __commonJS({
             exactMatch.messageId = message.id || exactMatch.messageId || "";
             exactMatch.uploadId = messageFileId;
             if (exactMatch.sourceRoomIsDirect) exactMatch.expiresAt = Date.now() + 24 * 60 * 60 * 1e3;
+            if (protectedRoom.kind === "receipt") {
+              const authority = await authorizeAutomaticReceiptProjection(exactMatch, index, http, ocrConfig);
+              if (!authority.projected) {
+                await writeIndex(persistence, protectedRoom.index, index);
+                if (logger) logger.warn(`Automatic receipt confirmation blocked by PAS status=${authority.status}`);
+                return true;
+              }
+            }
             if (protectedRoom.kind === "photo" && exactMatch.sourceRoomIsDirect && !exactMatch.reportMessageId) {
               exactMatch.reportQueuedAt = Date.now();
             }
@@ -9368,7 +9424,7 @@ var require_upload_duplicate_guard = __commonJS({
             receiptAmount,
             receiptWarning,
             validationVersion: protectedRoom.kind === "receipt" ? 10 : void 0,
-            source: protectedRoom.kind === "receipt" ? "confirmed" : "post",
+            source: protectedRoom.kind === "receipt" ? "pre" : "post",
             uploadedAt: acceptedAt,
             userId: message.sender && message.sender.id || "",
             username: message.sender && message.sender.username || "",
@@ -9379,8 +9435,18 @@ var require_upload_duplicate_guard = __commonJS({
             messageId: message.id || "",
             uploadId: messageFileId,
             reportQueuedAt: protectedRoom.kind === "photo" && isPersonalTarsRoom(message.room) ? acceptedAt : void 0,
-            postProcessedAt: Date.now()
+            postProcessedAt: protectedRoom.kind === "photo" ? Date.now() : void 0
           };
+          if (protectedRoom.kind === "receipt") {
+            const authority = await authorizeAutomaticReceiptProjection(acceptedEntry, index, http, ocrConfig);
+            if (!authority.projected) {
+              index.photos.push(acceptedEntry);
+              await writeIndex(persistence, protectedRoom.index, index);
+              if (logger) logger.warn(`Automatic receipt confirmation blocked by PAS status=${authority.status}`);
+              return true;
+            }
+            acceptedEntry.postProcessedAt = Date.now();
+          }
           if (protectedRoom.kind === "receipt" && receiptWarning) {
             await publishRejectedReceiptReview(messageFile, content, {
               reason: receiptWarning,
@@ -10314,6 +10380,8 @@ var require_upload_duplicate_guard = __commonJS({
       sendTodayTransferSummary,
       confirmedTransferSummaryForUser,
       publishMasterTransferSummary,
+      acceptedReceiptEntry,
+      authorizeAutomaticReceiptProjection,
       readIndex,
       writeIndex,
       PROTECTED_ROOMS,
@@ -11179,7 +11247,9 @@ var C = class extends j.App {
       archiveEnabled: archiveEnabledSetting === true || String(archiveEnabledSetting || "").toLowerCase() === "true",
       archiveBucket: String(await n.getValueById("receipt_archive_bucket") || "").trim(),
       archiveAccessKey: String(await n.getValueById("receipt_archive_access_key") || "").trim(),
-      archiveSecretKey: String(await n.getValueById("receipt_archive_secret_key") || "").trim()
+      archiveSecretKey: String(await n.getValueById("receipt_archive_secret_key") || "").trim(),
+      pasAuthorityUrl: String(await n.getValueById("pas_manual_authority_url") || "").trim(),
+      pasAuthorityToken: String(await n.getValueById("pas_manual_authority_token") || "")
     };
   }
   async handleReceiptReplayCommand(read, http, sender, args = []) {
@@ -11941,7 +12011,7 @@ var C = class extends j.App {
     remember(message.file);
     for (const file of Array.isArray(message.files) ? message.files : []) remember(file);
     const index = await G.readIndex(read, G.PROTECTED_ROOMS.kassa.index);
-    return (index.photos || []).some((entry) => entry && entry.source !== "rejected" && entry.source !== "invalid" && (
+    return (index.photos || []).some((entry) => entry && entry.source !== "pre" && entry.source !== "rejected" && entry.source !== "invalid" && (
       messageId && String(entry.messageId || "") === messageId ||
       uploadIds.indexOf(String(entry.uploadId || "")) !== -1
     ));

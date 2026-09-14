@@ -57,7 +57,9 @@ function runtimeScenario(guard, mode, suffix) {
     ownerUsername: "teimur",
     adminUsername: "shura",
     reviewRejectedReceipts: true,
-    archiveEnabled: false
+    archiveEnabled: false,
+    pasAuthorityUrl: "http://127.0.0.1:12345",
+    pasAuthorityToken: "synthetic_pas_token_1234567890abcdef"
   };
   const requiredDate = guard.expectedReceiptDate(config);
   const observedDate = mode === "rejected" || consensusMode ? previousCalendarDate(requiredDate) : requiredDate;
@@ -67,8 +69,24 @@ function runtimeScenario(guard, mode, suffix) {
   let lastRequestedUploadId = messageFile.id;
   const amountOverrides = new Map();
   const providerCalls = [];
+  const pasCalls = [];
+  let pasOutcome = { status: "CONFIRMED", canonicalPaymentId: `pas-${suffix}`, reasonCode: null };
   const http = {
+    async put(url, options) {
+      if (String(url).includes("storage.yandexcloud.net")) {
+        return { statusCode: 200, content: "" };
+      }
+      throw new Error(`unexpected PUT ${url}`);
+    },
     async post(url, options) {
+      if (String(url).includes("127.0.0.1:12345/v1/operation")) {
+        const envelope = JSON.parse(String(options && options.content || "{}"));
+        pasCalls.push(envelope.payload);
+        if (pasOutcome === "malformed") return { statusCode: 200, content: "{}" };
+        if (pasOutcome === "unavailable") return { statusCode: 503, content: "" };
+        const outcome = pasOutcome.status === "CONFIRMED" ? { ...pasOutcome, canonicalPaymentId: `${pasOutcome.canonicalPaymentId}-${envelope.payload.payment.amount.value.minorUnits}` } : pasOutcome;
+        return { statusCode: 200, content: JSON.stringify({ protocol: envelope.protocol, requestId: envelope.requestId, operation: envelope.operation, data: outcome }) };
+      }
       if (String(url).includes("ocr.api.cloud.yandex.net")) {
         yandexCalls += 1;
         const model = String(options && options.data && options.data.model || "unknown");
@@ -339,6 +357,8 @@ function runtimeScenario(guard, mode, suffix) {
     message,
     modify,
     owner,
+    pasCalls,
+    setPasOutcome(value) { pasOutcome = value; },
     persistence,
     privateNotifications,
     providerCalls,
@@ -479,6 +499,116 @@ async function receiptIndex(guard, scenario) {
   const acceptedDetails = accepted.publishedMessages.find((item) => /^✅ ЧЕК ПРИНЯТ/.test(String(item.text || "")));
   assert.ok(acceptedDetails, "accepted receipt must publish its result");
   assert.strictEqual(acceptedDetails.threadId, accepted.message.id, "accepted result must be attached to the corresponding receipt image");
+
+  // W1 regression: this is the shared rejectDuplicateMessage photo fast path,
+  // not a copy of its same-message/same-upload predicate. A normal, already
+  // posted direct-room work photo must remain reusable when Rocket.Chat gives
+  // us the original message again, or a wrapper with the same upload.
+  for (const photoCase of ["same-message", "same-upload"]) {
+    const photoGuard = loadTrackedAppWithGuard().__testGuard;
+    const photo = runtimeScenario(photoGuard, "unknown", `photo-post-${photoCase}`);
+    const photoIndex = { photos: [{
+      exact: photoGuard.exactHash(photo.sourceContent),
+      visual: photoGuard.visualHash(photo.message.file, photo.sourceContent),
+      source: "post",
+      messageId: photoCase === "same-message" ? photo.message.id : "earlier-photo-message",
+      uploadId: photo.message.file.id,
+      roomId: photo.message.room.id,
+      userId: photo.owner.id,
+      username: photo.owner.username,
+      receiptDate: "",
+      reportQueuedAt: Date.now()
+    }] };
+    await photoGuard.writeIndex(photo.persistence, photoGuard.PROTECTED_ROOMS.otchet.index, photoIndex);
+    const replay = photoCase === "same-message" ? photo.message : { ...photo.message, id: `photo-wrapper-${photoCase}` };
+    const result = await photoGuard.rejectDuplicateMessage(
+      replay, photo.read, photo.persistence, photo.modify, { info() {}, warn() {}, error() {} }, photo.http, photo.config, "photo"
+    );
+    const persisted = await photoGuard.readIndex(photo.read, photoGuard.PROTECTED_ROOMS.otchet.index);
+    assert.strictEqual(result, "processed", `photo ${photoCase}: shared duplicate path must accept the original post entry`);
+    assert.strictEqual(persisted.photos.length, 1, `photo ${photoCase}: no duplicate photo row`);
+    assert.strictEqual(persisted.photos[0].source, "post", `photo ${photoCase}: legacy post source is preserved`);
+    assert.strictEqual(photo.deletedMessages.length, 0, `photo ${photoCase}: original photo is not deleted as a duplicate`);
+    assert.strictEqual(photo.privateNotifications.length, 0, `photo ${photoCase}: no duplicate-photo notification`);
+  }
+
+  // W1 regression: malformed PAS data has no authority. The actual personal
+  // receipt route may retain a non-authoritative pre observation, but cannot
+  // publish acceptance or include it in the current financial total.
+  const malformedGuard = loadTrackedAppWithGuard().__testGuard;
+  const malformed = runtimeScenario(malformedGuard, "accepted", "malformed-pas");
+  malformed.setPasOutcome("malformed");
+  const malformedResult = await malformedGuard.processPersonalMediaV2(
+    malformed.message, malformed.read, malformed.persistence, malformed.modify,
+    { info() {}, warn() {}, error() {} }, malformed.http, malformed.config, "receipt"
+  );
+  await malformedGuard.flushReceiptCaseV1ForTests();
+  const malformedIndex = await receiptIndex(malformedGuard, malformed);
+  const malformedSummary = await malformedGuard.confirmedTransferSummaryForUser(
+    malformed.read, malformed.config, malformed.owner.id, malformed.requiredDate, [], undefined, malformed.message.room.id
+  );
+  assert.strictEqual(malformedResult.handled, true, "malformed PAS response is handled by the real receipt path without acceptance");
+  assert.strictEqual(malformed.pasCalls.length, 1, "malformed PAS response reaches the authority seam once");
+  assert.strictEqual(malformedIndex.photos.length, 1, "malformed PAS observation is retained for later review/retry");
+  assert.notStrictEqual(malformedIndex.photos[0].source, "confirmed", "malformed PAS cannot create confirmed projection");
+  assert.strictEqual(malformedSummary.count, 0, "malformed PAS cannot create current confirmed count");
+  assert.strictEqual(malformedSummary.total, 0, "malformed PAS cannot create current financial credit");
+  assert.ok(!malformed.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "malformed PAS cannot publish accepted-success UX");
+
+  // W1 A3: seed the durable archive_failed observation, then replay its real
+  // direct-room upload. Object Storage is an existing external boundary stub;
+  // PAS is the authority under test. Every non-allowing outcome must leave the
+  // repaired archive non-financial and must not produce accepted UI or credit.
+  for (const pasCase of [
+    ["AUTHORITY_UNAVAILABLE", "unavailable"],
+    ["REJECTED", { status: "REJECTED", canonicalPaymentId: null, reasonCode: "SYNTHETIC_REJECT" }],
+    ["CONFLICT", { status: "CONFLICT", canonicalPaymentId: null, reasonCode: "SYNTHETIC_CONFLICT" }]
+  ]) {
+    const [label, outcome] = pasCase;
+    const archiveGuard = loadTrackedAppWithGuard().__testGuard;
+    // Do not put the literal word "archive" in the direct-room slug: that
+    // would deliberately route the synthetic room into the archive-room
+    // safety exclusion before the A3 receipt path is reached.
+    const archive = runtimeScenario(archiveGuard, "accepted", `a3-${label.toLowerCase()}`);
+    archive.config.archiveEnabled = true;
+    archive.config.archiveBucket = "synthetic-receipts";
+    archive.config.archiveAccessKey = "synthetic-access-key";
+    archive.config.archiveSecretKey = "synthetic-secret-key";
+    archive.setPasOutcome(outcome);
+    const archiveExact = archiveGuard.exactHash(archive.sourceContent);
+    const archiveEntry = {
+      exact: archiveExact,
+      source: "archive_failed",
+      archiveStatus: "failed",
+      receiptDate: archive.requiredDate,
+      receiptAmount: 1200,
+      receiptIdentity: `txn:${archive.requiredDate}|12:00|1200`,
+      validationVersion: 10,
+      messageId: "previous-archive-failed-message",
+      uploadId: archive.message.file.id,
+      roomId: archive.message.room.id,
+      userId: archive.owner.id,
+      username: archive.owner.username
+    };
+    await archiveGuard.writeIndex(archive.persistence, archiveGuard.PROTECTED_ROOMS.kassa.index, { photos: [archiveEntry] });
+    const archiveLogs = [];
+    const archiveResult = await archiveGuard.processPersonalMediaV2(
+      archive.message, archive.read, archive.persistence, archive.modify,
+      { info(message) { archiveLogs.push(`INFO ${message}`); }, warn(message) { archiveLogs.push(`WARN ${message}`); }, error(message) { archiveLogs.push(`ERROR ${message}`); } }, archive.http, archive.config, "receipt"
+    );
+    await archiveGuard.flushReceiptCaseV1ForTests();
+    const archiveIndex = await receiptIndex(archiveGuard, archive);
+    const archivePersisted = archiveIndex.photos[0];
+    const archiveSummary = await archiveGuard.confirmedTransferSummaryForUser(
+      archive.read, archive.config, archive.owner.id, archive.requiredDate, [], undefined, archive.message.room.id
+    );
+    assert.strictEqual(archiveResult.handled, true, `A3 ${label}: archive-failed replay is handled by the real receipt path; logs=${archiveLogs.join(" | ")}`);
+    assert.strictEqual(archive.pasCalls.length, 1, `A3 ${label}: repaired observation reaches PAS; logs=${archiveLogs.join(" | ")}`);
+    assert.notStrictEqual(archivePersisted.source, "confirmed", `A3 ${label}: non-allowing PAS cannot confirm archive repair`);
+    assert.strictEqual(archiveSummary.count, 0, `A3 ${label}: no current confirmed count`);
+    assert.strictEqual(archiveSummary.total, 0, `A3 ${label}: no current financial credit`);
+    assert.ok(!archive.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), `A3 ${label}: no accepted-success UX`);
+  }
 
   // E. Symmetric three-upload identity registry over the same fallback path.
   // Registry-A is the receipt already confirmed above (1200 RUB). Registry-B
