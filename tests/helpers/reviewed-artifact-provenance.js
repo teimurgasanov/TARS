@@ -199,6 +199,56 @@ module.exports = async function testReviewedArtifactProvenance() {
     ]) assert.notStrictEqual(loadScope({ ...identity, prNumber: 50 }).result.status, 0,
       "loader must reject wrong HEAD, a non-merge commit, or an extra parent");
 
+    // Execute the workflow's deterministic BASE-to-MERGE registry classifier.
+    const classificationStep = workflowStep(guarded, "Classify exact scope-registry diff");
+    const classificationScript = classificationStep.split("        run: |\n")[1].trimEnd()
+      .split("\n").map((line) => line.slice(10)).join("\n");
+    function classificationCommit(name, files, parent = emptyBase) {
+      scopeGit("read-tree", emptyTree);
+      for (const [file, content] of Object.entries(files)) {
+        const fullPath = path.join(scopeFixture, file);
+        fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+        fs.writeFileSync(fullPath, content);
+        scopeGit("add", file);
+      }
+      return scopeGit("commit-tree", scopeGit("write-tree"), "-p", parent, "-m", name);
+    }
+    function classify({ name, baseSha = emptyBase, mergeSha, prNumber = 55 }) {
+      const output = path.join(temp, `classification-${name}.txt`);
+      const result = spawnSync("bash", ["-c", classificationScript], { cwd: scopeFixture, encoding: "utf8",
+        env: { ...process.env, REVIEW_BASE_SHA: baseSha, REVIEW_MERGE_SHA: mergeSha,
+          REVIEW_PR_NUMBER: String(prNumber), GITHUB_OUTPUT: output } });
+      const fields = Object.fromEntries((fs.existsSync(output) ? fs.readFileSync(output, "utf8") : "")
+        .trim().split("\n").filter(Boolean).map((line) => line.split("=", 2)));
+      return { result, fields };
+    }
+    const otherScope = classificationCommit("other scope", { ".github/review-scopes/pr-54.md": "future scope\n" });
+    const selfScope = classificationCommit("self scope", { ".github/review-scopes/pr-55.md": "self scope\n" });
+    const mixedScope = classificationCommit("mixed scope", {
+      ".github/review-scopes/pr-54.md": "future scope\n", "TarsReportApp.js": "runtime change\n"
+    });
+    const ordinaryChange = classificationCommit("ordinary change", { "README.md": "governance note\n" });
+    const multipleScopes = classificationCommit("multiple scopes", {
+      ".github/review-scopes/pr-54.md": "future scope\n", ".github/review-scopes/pr-56.md": "another scope\n"
+    });
+    for (const [name, mergeSha, relation, target] of [
+      ["other", otherScope, "OTHER_PR_METADATA", "54"],
+      ["self", selfScope, "SELF_TARGETING", "55"],
+      ["mixed", mixedScope, "MIXED", ""],
+      ["none", ordinaryChange, "NONE", ""],
+      ["multiple", multipleScopes, "MIXED", ""]
+    ]) {
+      const classified = classify({ name, mergeSha });
+      assert.strictEqual(classified.result.status, 0, `classifier must run: ${name}`);
+      assert.strictEqual(classified.fields.current_pr_number, "55", `trusted current PR: ${name}`);
+      assert.strictEqual(classified.fields.relation, relation, `relation: ${name}`);
+      assert.strictEqual(classified.fields.target_scope_pr_number, target, `target: ${name}`);
+    }
+    const deletedScopeBase = classificationCommit("base scope", { ".github/review-scopes/pr-54.md": "future scope\n" });
+    const deletedScope = classify({ name: "deleted", baseSha: deletedScopeBase, mergeSha: emptyBase });
+    assert.strictEqual(deletedScope.result.status, 0, "deleted scope classification must run");
+    assert.strictEqual(deletedScope.fields.relation, "MIXED", "deleted scope cannot be clean metadata");
+
     // Bind the real prompt command to the fixture, not a separately invented review command.
     const reviewPrompt = workflowStep(guarded, "Review PR diff").split("          prompt: |\n")[1]
       .split("          claude_args:")[0];
@@ -213,6 +263,20 @@ module.exports = async function testReviewedArtifactProvenance() {
     assert.strictEqual(scopeGit("diff", "--name-status", ...reviewArgs), surface);
     assert.match(reviewPrompt, /PR head SHA is identity\/parent evidence; do not use the head tree as a substitute for the merge candidate/);
     assert.doesNotMatch(reviewPrompt, /between those exact base\/head commits|PR diff against develop/);
+    assert.match(reviewPrompt, /DETERMINISTIC SCOPE-REGISTRY CONTEXT/,
+      "review policy must receive machine-computed scope-target context");
+    assert.match(reviewPrompt, /CURRENT_PR_NUMBER=\$\{\{ steps\.scope-target-classification\.outputs\.current_pr_number \}\}/,
+      "current PR number must come from the classification step");
+    assert.match(reviewPrompt, /SCOPE_REGISTRY_RELATION=\$\{\{ steps\.scope-target-classification\.outputs\.relation \}\}/,
+      "review policy must receive the deterministic relation");
+    assert.match(reviewPrompt, /do not infer self-targeting from future scope prose/,
+      "Claude must not reinterpret a deterministic relation from scope prose");
+    assert.match(reviewPrompt, /OTHER_PR_METADATA means the target number differs from CURRENT_PR_NUMBER and the exact diff is registry-only/,
+      "other-PR registry metadata must be distinguished from self-targeting");
+    assert.match(reviewPrompt, /grants zero current authority, does not auto-PASS/,
+      "other-PR metadata must remain inactive for the current PR");
+    assert.match(reviewPrompt, /MIXED means registry metadata must not mask product\/runtime\/PAS\/deploy changes/,
+      "mixed diffs must remain blocked without a base-owned scope");
     console.log("PASS: behind-base review surface BASE -> MERGE; BASE -> HEAD false deletion reproduced; exact two-parent identity retained");
 
     execFileSync(path.join(root, "build-tars.sh"), [], { cwd: root, stdio: "pipe" });
