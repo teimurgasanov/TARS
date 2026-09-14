@@ -122,6 +122,8 @@ jobs:
             REVIEW SCOPE LOADED FROM THE EXACT PR BASE COMMIT (never from PR head):
             ${{ steps.review-scope.outputs.text }}
 
+            SCOPE-REGISTRY BOOTSTRAP RULE: A diff limited to a regular `.github/review-scopes/pr-N.md` file for an OTHER PR (N differs from the current PR number) is CI/governance metadata, not a product/runtime behavioral change. It grants no authority in this PR and remains inactive until a separately reviewed governance PR merges it into a later base. A head-only scope file never authorizes the current PR. A self-targeting scope file (N equals the current PR number) cannot bootstrap authorization and remains unauthorized under the default scope. Any product/runtime/PAS/deploy change without an applicable scope already in the exact PR base remains blocked.
+
             Give your review normally, but the FINAL TWO LINES of your response MUST be exactly:
             FINAL_REASON: <one-line concise actionable reason, maximum 600 characters>
             FINAL_VERDICT: PASS
