@@ -213,6 +213,16 @@ module.exports = async function testReviewedArtifactProvenance() {
     assert.strictEqual(scopeGit("diff", "--name-status", ...reviewArgs), surface);
     assert.match(reviewPrompt, /PR head SHA is identity\/parent evidence; do not use the head tree as a substitute for the merge candidate/);
     assert.doesNotMatch(reviewPrompt, /between those exact base\/head commits|PR diff against develop/);
+    assert.match(reviewPrompt, /SCOPE-REGISTRY BOOTSTRAP RULE:/,
+      "review policy must classify an other-PR scope registry diff as governance metadata");
+    assert.match(reviewPrompt, /for an OTHER PR \(N differs from the current PR number\)/,
+      "review policy must distinguish a scope registry entry from current-PR authorization");
+    assert.match(reviewPrompt, /grants no authority in this PR and remains inactive until a separately reviewed governance PR merges it into a later base/,
+      "head-only registry metadata must remain inactive pending a separate merge");
+    assert.match(reviewPrompt, /self-targeting scope file \(N equals the current PR number\) cannot bootstrap authorization/,
+      "a PR must not authorize itself through its own head-only scope file");
+    assert.match(reviewPrompt, /product\/runtime\/PAS\/deploy change without an applicable scope already in the exact PR base remains blocked/,
+      "ordinary behavioral changes must remain blocked without base-owned authorization");
     console.log("PASS: behind-base review surface BASE -> MERGE; BASE -> HEAD false deletion reproduced; exact two-parent identity retained");
 
     execFileSync(path.join(root, "build-tars.sh"), [], { cwd: root, stdio: "pipe" });
