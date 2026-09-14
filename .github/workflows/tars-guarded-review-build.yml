@@ -109,6 +109,57 @@ jobs:
             printf '%s\n' "$scope"
             echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
+      - name: Classify exact scope-registry diff
+        id: scope-target-classification
+        shell: bash
+        env:
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_MERGE_SHA: ${{ github.sha }}
+          REVIEW_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$REVIEW_PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo 'Review classification blocked: invalid PR number'; exit 1; }
+          mapfile -d '' -t diff_fields < <(git diff --name-status -z --no-renames "$REVIEW_BASE_SHA" "$REVIEW_MERGE_SHA" --)
+          (( ${#diff_fields[@]} % 2 == 0 )) || { echo 'Review classification blocked: malformed changed-path surface'; exit 1; }
+
+          relation='NONE'
+          target=''
+          matching_scope_paths=0
+          suspicious_scope_path=0
+          changed_paths=$(( ${#diff_fields[@]} / 2 ))
+          for ((i = 0; i < ${#diff_fields[@]}; i += 2)); do
+            status="${diff_fields[i]}"
+            path="${diff_fields[i + 1]}"
+            if [[ "$status" == 'A' && "$path" =~ ^\.github/review-scopes/pr-([1-9][0-9]*)\.md$ ]]; then
+              candidate_target="${BASH_REMATCH[1]}"
+              mode="$(git ls-tree "$REVIEW_MERGE_SHA" -- "$path" | awk '{print $1}')"
+              if [[ "$mode" == '100644' ]]; then
+                target="$candidate_target"
+                ((matching_scope_paths += 1))
+                continue
+              fi
+            fi
+            if [[ "$path" == .github/review-scopes/pr-*.md ]]; then
+              suspicious_scope_path=1
+            fi
+          done
+
+          if (( matching_scope_paths == 1 && changed_paths == 1 && suspicious_scope_path == 0 )); then
+            if [[ "$target" == "$REVIEW_PR_NUMBER" ]]; then
+              relation='SELF_TARGETING'
+            else
+              relation='OTHER_PR_METADATA'
+            fi
+          elif (( matching_scope_paths > 0 || suspicious_scope_path > 0 )); then
+            relation='MIXED'
+            target=''
+          fi
+
+          {
+            echo "current_pr_number=$REVIEW_PR_NUMBER"
+            echo "relation=$relation"
+            echo "target_scope_pr_number=$target"
+          } >> "$GITHUB_OUTPUT"
       - name: Review PR diff
         id: claude
         uses: anthropics/claude-code-action@9cdae7f0d995e3ba7c33f226087fdf82a59cd520
@@ -122,7 +173,12 @@ jobs:
             REVIEW SCOPE LOADED FROM THE EXACT PR BASE COMMIT (never from PR head):
             ${{ steps.review-scope.outputs.text }}
 
-            SCOPE-REGISTRY BOOTSTRAP RULE: A diff limited to a regular `.github/review-scopes/pr-N.md` file for an OTHER PR (N differs from the current PR number) is CI/governance metadata, not a product/runtime behavioral change. It grants no authority in this PR and remains inactive until a separately reviewed governance PR merges it into a later base. A head-only scope file never authorizes the current PR. A self-targeting scope file (N equals the current PR number) cannot bootstrap authorization and remains unauthorized under the default scope. Any product/runtime/PAS/deploy change without an applicable scope already in the exact PR base remains blocked.
+            DETERMINISTIC SCOPE-REGISTRY CONTEXT (computed from the exact base-to-merge changed-path surface):
+            CURRENT_PR_NUMBER=${{ steps.scope-target-classification.outputs.current_pr_number }}
+            SCOPE_REGISTRY_RELATION=${{ steps.scope-target-classification.outputs.relation }}
+            TARGET_SCOPE_PR_NUMBER=${{ steps.scope-target-classification.outputs.target_scope_pr_number }}
+
+            Apply that immutable classification; do not infer self-targeting from future scope prose. SELF_TARGETING means the target filename number equals CURRENT_PR_NUMBER and cannot bootstrap authorization under the default scope. OTHER_PR_METADATA means the target number differs from CURRENT_PR_NUMBER and the exact diff is registry-only. It grants zero current authority, does not auto-PASS, and must still be reviewed for boundedness and safety as future governance metadata. MIXED means registry metadata must not mask product/runtime/PAS/deploy changes: absent an applicable scope already in the exact PR base, those changes remain blocked. A head-only scope file never authorizes the current PR.
 
             Give your review normally, but the FINAL TWO LINES of your response MUST be exactly:
             FINAL_REASON: <one-line concise actionable reason, maximum 600 characters>
