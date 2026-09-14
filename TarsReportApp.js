@@ -8395,9 +8395,14 @@ var require_upload_duplicate_guard = __commonJS({
               http
             );
             if (!archived || archived.archiveStatus !== "stored" || !archived.archiveKey) throw new Error("Rocket.Chat receipt archive did not confirm storage");
+            const preserveArchiveFailureAuthority = entry.source === "archive_failed";
             Object.assign(entry, archived);
-            entry.source = "confirmed";
-            entry.invalidReason = "";
+            if (preserveArchiveFailureAuthority) {
+              entry.source = "archive_failed";
+            } else {
+              entry.source = "confirmed";
+              entry.invalidReason = "";
+            }
             changed = true;
           }
           if (!entry.archiveKey || entry.archiveStatus !== "stored") continue;
@@ -10082,8 +10087,9 @@ var require_upload_duplicate_guard = __commonJS({
                   entry.uploadId = messageFileId;
                   changed = true;
                 }
-                if (entry.source === "pre" || entry.roomId !== message.room.id || senderId && !entry.userId) {
-                  entry.source = "confirmed";
+                const preservePreAuthority = entry.source === "pre";
+                if (preservePreAuthority || entry.roomId !== message.room.id || senderId && !entry.userId) {
+                  if (!preservePreAuthority) entry.source = "confirmed";
                   entry.roomId = message.room.id;
                   if (senderId && !entry.userId) entry.userId = senderId;
                   entry.username = roomMessage.sender && roomMessage.sender.username || entry.username || "";
@@ -10095,8 +10101,10 @@ var require_upload_duplicate_guard = __commonJS({
                   entry.archiveUploadId = "";
                   entry.archiveMessageId = "";
                   markReceiptArchivePending(entry, entry.uploadedAt || createdAt);
-                  entry.source = "confirmed";
-                  entry.invalidReason = "";
+                  if (!preservePreAuthority) {
+                    entry.source = "confirmed";
+                    entry.invalidReason = "";
+                  }
                   changed = true;
                 }
                 continue;

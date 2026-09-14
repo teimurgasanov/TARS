@@ -23,6 +23,7 @@ function runtimeScenario(guard, mode, suffix) {
   const sourceContent = Buffer.from(`personal-receipt-control-${mode}-${suffix}`);
   const sourceContents = new Map();
   const uploadFiles = new Map();
+  const roomMessages = [];
   const personalRoom = { id: `personal-${suffix}`, type: "d", slugifiedName: `tars-master-${suffix}` };
   const controlRoom = { id: "control-room", type: "p", slugifiedName: "cheki-kontrol", displayName: "Контроль чеков" };
   const owner = { id: `owner-${suffix}`, username: `master-${suffix}`, name: `Master ${suffix}` };
@@ -41,6 +42,7 @@ function runtimeScenario(guard, mode, suffix) {
     text: "",
     createdAt: new Date()
   };
+  const messagesById = new Map([[message.id, message]]);
   const config = {
     apiKey: consensusMode ? "test-yandex-key" : "",
     folderId: consensusMode ? "test-folder" : "",
@@ -253,12 +255,13 @@ function runtimeScenario(guard, mode, suffix) {
           if (roomId === controlRoom.id && latestControlUploadId) {
             return [{ id: `control-message-${latestControlUploadId}`, room: controlRoom, file: { _id: latestControlUploadId } }];
           }
+          if (roomId === personalRoom.id) return roomMessages;
           return [];
         }
       };
     },
     getMessageReader() {
-      return { async getById() { return undefined; } };
+      return { async getById(id) { return messagesById.get(id); } };
     }
   };
   const creator = {
@@ -355,6 +358,7 @@ function runtimeScenario(guard, mode, suffix) {
     deletedMessages,
     http,
     message,
+    messagesById,
     modify,
     owner,
     pasCalls,
@@ -366,6 +370,7 @@ function runtimeScenario(guard, mode, suffix) {
     read,
     receiptCalls: () => receiptCalls,
     records,
+    roomMessages,
     requiredDate,
     sourceContent,
     sourceContents,
@@ -609,6 +614,82 @@ async function receiptIndex(guard, scenario) {
     assert.strictEqual(archiveSummary.total, 0, `A3 ${label}: no current financial credit`);
     assert.ok(!archive.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), `A3 ${label}: no accepted-success UX`);
   }
+
+  // W1 housekeeping B1: the ordinary summary-repair path may fill missing
+  // receipt metadata, but an existing pre observation has no PAS authority and
+  // must stay non-financial. This calls sendTodayTransferSummary(), which calls
+  // the production repairTodayReceiptIndex() path.
+  const repairGuard = loadTrackedAppWithGuard().__testGuard;
+  const repair = runtimeScenario(repairGuard, "accepted", "housekeeping-pre");
+  const repairEntry = {
+    exact: repairGuard.exactHash(repair.sourceContent),
+    source: "pre",
+    validationVersion: 2,
+    receiptDate: repair.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${repair.requiredDate}|12:00|1200`,
+    messageId: repair.message.id,
+    uploadId: repair.message.file.id,
+    roomId: repair.message.room.id,
+    userId: repair.owner.id,
+    username: repair.owner.username
+  };
+  repair.roomMessages.push(repair.message);
+  await repairGuard.writeIndex(repair.persistence, repairGuard.PROTECTED_ROOMS.kassa.index, { photos: [repairEntry] });
+  await repairGuard.sendTodayTransferSummary(
+    { id: "summary-housekeeping-pre", room: repair.message.room, sender: repair.owner, text: "сумма переводов", createdAt: new Date() },
+    repair.read, repair.persistence, repair.modify, { info() {}, warn() {}, error() {} }, repair.http, repair.config
+  );
+  const repairIndex = await receiptIndex(repairGuard, repair);
+  const repairSummary = await repairGuard.confirmedTransferSummaryForUser(
+    repair.read, repair.config, repair.owner.id, repair.requiredDate, [], undefined, repair.message.room.id
+  );
+  assert.strictEqual(repairIndex.photos[0].source, "pre", "summary repair cannot promote a pre observation without PAS");
+  assert.strictEqual(repair.pasCalls.length, 0, "summary repair has no PAS authority context to promote a pre observation");
+  assert.strictEqual(repairSummary.count, 0, "summary repair pre observation cannot enter confirmed count");
+  assert.strictEqual(repairSummary.total, 0, "summary repair pre observation cannot create financial credit");
+
+  // W1 housekeeping B2: a successful retention archive is storage evidence,
+  // not PAS confirmation. Exercise the exported production cleanup path with
+  // an archive_failed receipt and an Object Storage boundary stub.
+  const cleanupGuard = loadTrackedAppWithGuard().__testGuard;
+  const cleanup = runtimeScenario(cleanupGuard, "accepted", "housekeeping-archive-failed");
+  cleanup.config.archiveEnabled = true;
+  cleanup.config.archiveBucket = "synthetic-receipts";
+  cleanup.config.archiveAccessKey = "synthetic-access-key";
+  cleanup.config.archiveSecretKey = "synthetic-secret-key";
+  cleanup.message.createdAt = new Date();
+  cleanup.messagesById.set(cleanup.message.id, cleanup.message);
+  const cleanupEntry = {
+    exact: cleanupGuard.exactHash(cleanup.sourceContent),
+    source: "archive_failed",
+    archiveStatus: "failed",
+    archiveDueAt: Date.now() - 1,
+    receiptDate: cleanup.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${cleanup.requiredDate}|12:00|1200`,
+    validationVersion: 10,
+    messageId: cleanup.message.id,
+    uploadId: cleanup.message.file.id,
+    roomId: cleanup.message.room.id,
+    userId: cleanup.owner.id,
+    username: cleanup.owner.username
+  };
+  await cleanupGuard.writeIndex(cleanup.persistence, cleanupGuard.PROTECTED_ROOMS.kassa.index, { photos: [cleanupEntry] });
+  await cleanupGuard.cleanupArchivedReceiptMessages(
+    cleanup.message.room, cleanup.read, cleanup.persistence, cleanup.modify,
+    { info() {}, warn() {}, error() {} }, cleanup.config, cleanup.http
+  );
+  const cleanupIndex = await receiptIndex(cleanupGuard, cleanup);
+  const cleanupSummary = await cleanupGuard.confirmedTransferSummaryForUser(
+    cleanup.read, cleanup.config, cleanup.owner.id, cleanup.requiredDate, [], undefined, cleanup.message.room.id
+  );
+  assert.strictEqual(cleanupIndex.photos[0].archiveStatus, "stored", "cleanup may preserve successful archive metadata");
+  assert.strictEqual(cleanupIndex.photos[0].source, "archive_failed", "archive success alone cannot confirm an archive_failed receipt");
+  assert.strictEqual(cleanup.pasCalls.length, 0, "archive cleanup has no PAS authority context to promote an archive_failed receipt");
+  assert.strictEqual(cleanupSummary.count, 0, "archive cleanup cannot create confirmed count");
+  assert.strictEqual(cleanupSummary.total, 0, "archive cleanup cannot create financial credit");
+  assert.ok(!cleanup.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "archive cleanup cannot publish accepted-success UX");
 
   // E. Symmetric three-upload identity registry over the same fallback path.
   // Registry-A is the receipt already confirmed above (1200 RUB). Registry-B
