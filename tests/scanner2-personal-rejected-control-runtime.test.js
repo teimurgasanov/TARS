@@ -649,6 +649,99 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(repairSummary.count, 0, "summary repair pre observation cannot enter confirmed count");
   assert.strictEqual(repairSummary.total, 0, "summary repair pre observation cannot create financial credit");
 
+  // W2 F1/F2: an existing legacy observation may receive ordinary room and
+  // archive-pending metadata repair, but housekeeping must preserve its source
+  // rather than restamping it as financial authority.
+  const legacyRepairGuard = loadTrackedAppWithGuard().__testGuard;
+  const legacyRepair = runtimeScenario(legacyRepairGuard, "accepted", "summary-legacy-repair");
+  const legacyRepairEntry = {
+    exact: legacyRepairGuard.exactHash(legacyRepair.sourceContent),
+    source: "legacy",
+    validationVersion: 2,
+    receiptDate: legacyRepair.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${legacyRepair.requiredDate}|12:00|1200`,
+    messageId: legacyRepair.message.id,
+    uploadId: legacyRepair.message.file.id,
+    roomId: "stale-room",
+    userId: legacyRepair.owner.id,
+    username: legacyRepair.owner.username
+  };
+  legacyRepair.roomMessages.push(legacyRepair.message);
+  await legacyRepairGuard.writeIndex(legacyRepair.persistence, legacyRepairGuard.PROTECTED_ROOMS.kassa.index, { photos: [legacyRepairEntry] });
+  const legacyRepairBaseline = await legacyRepairGuard.confirmedTransferSummaryForUser(
+    legacyRepair.read, legacyRepair.config, legacyRepair.owner.id, legacyRepair.requiredDate, [], undefined, legacyRepair.message.room.id
+  );
+  await legacyRepairGuard.sendTodayTransferSummary(
+    { id: "summary-legacy-repair", room: legacyRepair.message.room, sender: legacyRepair.owner, text: "сумма переводов", createdAt: new Date() },
+    legacyRepair.read, legacyRepair.persistence, legacyRepair.modify, { info() {}, warn() {}, error() {} }, legacyRepair.http, legacyRepair.config
+  );
+  const legacyRepairIndex = await receiptIndex(legacyRepairGuard, legacyRepair);
+  const legacyRepairSummary = await legacyRepairGuard.confirmedTransferSummaryForUser(
+    legacyRepair.read, legacyRepair.config, legacyRepair.owner.id, legacyRepair.requiredDate, [], undefined, legacyRepair.message.room.id
+  );
+  assert.strictEqual(legacyRepairIndex.photos[0].source, "legacy", "metadata/archive-pending repair must preserve a legacy source exactly");
+  assert.strictEqual(legacyRepairIndex.photos.length, 1, "metadata/archive-pending repair must not create a duplicate projection");
+  assert.strictEqual(legacyRepairIndex.photos[0].roomId, legacyRepair.message.room.id, "legacy metadata repair must retain its baseline room repair");
+  assert.strictEqual(legacyRepair.pasCalls.length, 0, "legacy summary housekeeping has no PAS authority");
+  assert.strictEqual(legacyRepairSummary.count, legacyRepairBaseline.count, "legacy summary repair cannot increase the pre-existing financial count");
+  assert.strictEqual(legacyRepairSummary.total, legacyRepairBaseline.total, "legacy summary repair cannot increase the pre-existing financial credit");
+  assert.ok(!legacyRepair.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ/.test(String(item.text || ""))), "legacy summary repair cannot publish accepted-success UX");
+
+  // W2 F3: a fresh date-valid image discovered only by summary repair is an
+  // observation for later authority handling, never a confirmed projection.
+  const freshRepairGuard = loadTrackedAppWithGuard().__testGuard;
+  const freshRepair = runtimeScenario(freshRepairGuard, "repair-accepted", "summary-fresh-observation");
+  freshRepair.roomMessages.push(freshRepair.message);
+  await freshRepairGuard.sendTodayTransferSummary(
+    { id: "summary-fresh-observation", room: freshRepair.message.room, sender: freshRepair.owner, text: "сумма переводов", createdAt: new Date() },
+    freshRepair.read, freshRepair.persistence, freshRepair.modify, { info() {}, warn() {}, error() {} }, freshRepair.http, freshRepair.config
+  );
+  const freshRepairIndex = await receiptIndex(freshRepairGuard, freshRepair);
+  const freshRepairSummary = await freshRepairGuard.confirmedTransferSummaryForUser(
+    freshRepair.read, freshRepair.config, freshRepair.owner.id, freshRepair.requiredDate, [], undefined, freshRepair.message.room.id
+  );
+  assert.strictEqual(freshRepair.receiptCalls() > 0, true, "fresh summary observation must reach date validation");
+  assert.strictEqual(freshRepairIndex.photos.length, 1, "fresh summary observation is retained");
+  assert.strictEqual(freshRepairIndex.photos[0].source, "pre", "fresh summary observation must be non-authoritative pre");
+  assert.strictEqual(freshRepair.pasCalls.length, 0, "fresh summary observation has no PAS authority");
+  assert.strictEqual(freshRepairSummary.count, 0, "fresh summary observation cannot enter confirmed count");
+  assert.strictEqual(freshRepairSummary.total, 0, "fresh summary observation cannot create financial credit");
+  assert.ok(!freshRepair.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ/.test(String(item.text || ""))), "fresh summary observation cannot publish accepted-success UX");
+
+  // W2 F3: an existing rejected observation is evidence, not an invitation for
+  // the weaker summary validator to rewrite its source.
+  const rejectedRepairGuard = loadTrackedAppWithGuard().__testGuard;
+  const rejectedRepair = runtimeScenario(rejectedRepairGuard, "repair-accepted", "summary-rejected-observation");
+  const rejectedRepairEntry = {
+    exact: rejectedRepairGuard.exactHash(rejectedRepair.sourceContent),
+    source: "rejected",
+    invalidReason: "synthetic prior rejection",
+    validationVersion: 2,
+    receiptDate: rejectedRepair.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${rejectedRepair.requiredDate}|12:00|1200`,
+    messageId: rejectedRepair.message.id,
+    uploadId: rejectedRepair.message.file.id,
+    roomId: rejectedRepair.message.room.id,
+    userId: rejectedRepair.owner.id,
+    username: rejectedRepair.owner.username
+  };
+  rejectedRepair.roomMessages.push(rejectedRepair.message);
+  await rejectedRepairGuard.writeIndex(rejectedRepair.persistence, rejectedRepairGuard.PROTECTED_ROOMS.kassa.index, { photos: [rejectedRepairEntry] });
+  await rejectedRepairGuard.sendTodayTransferSummary(
+    { id: "summary-rejected-observation", room: rejectedRepair.message.room, sender: rejectedRepair.owner, text: "сумма переводов", createdAt: new Date() },
+    rejectedRepair.read, rejectedRepair.persistence, rejectedRepair.modify, { info() {}, warn() {}, error() {} }, rejectedRepair.http, rejectedRepair.config
+  );
+  const rejectedRepairIndex = await receiptIndex(rejectedRepairGuard, rejectedRepair);
+  const rejectedRepairSummary = await rejectedRepairGuard.confirmedTransferSummaryForUser(
+    rejectedRepair.read, rejectedRepair.config, rejectedRepair.owner.id, rejectedRepair.requiredDate, [], undefined, rejectedRepair.message.room.id
+  );
+  assert.strictEqual(rejectedRepairIndex.photos[0].source, "rejected", "summary repair must preserve rejected evidence");
+  assert.strictEqual(rejectedRepair.pasCalls.length, 0, "rejected summary repair has no PAS authority");
+  assert.strictEqual(rejectedRepairSummary.count, 0, "rejected summary repair cannot enter confirmed count");
+  assert.strictEqual(rejectedRepairSummary.total, 0, "rejected summary repair cannot create financial credit");
+
   // W1 repair fallback: archive_failed intentionally misses the summary repair
   // fast gate, so this real sendTodayTransferSummary() scenario must execute
   // fresh receipt validation rather than passing by a skipped OCR path.
@@ -727,6 +820,49 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(cleanupSummary.total, 0, "archive cleanup cannot create financial credit");
   assert.ok(!cleanup.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "archive cleanup cannot publish accepted-success UX");
 
+  // W2 G1: successful storage is allowed to repair archive metadata for a
+  // reachable legacy receipt, but cannot reclassify it as confirmed.
+  const legacyCleanupGuard = loadTrackedAppWithGuard().__testGuard;
+  const legacyCleanup = runtimeScenario(legacyCleanupGuard, "accepted", "housekeeping-legacy-archive");
+  legacyCleanup.config.archiveEnabled = true;
+  legacyCleanup.config.archiveBucket = "synthetic-receipts";
+  legacyCleanup.config.archiveAccessKey = "synthetic-access-key";
+  legacyCleanup.config.archiveSecretKey = "synthetic-secret-key";
+  legacyCleanup.messagesById.set(legacyCleanup.message.id, legacyCleanup.message);
+  const legacyCleanupEntry = {
+    exact: legacyCleanupGuard.exactHash(legacyCleanup.sourceContent),
+    source: "legacy",
+    archiveStatus: "failed",
+    archiveDueAt: Date.now() - 1,
+    receiptDate: legacyCleanup.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${legacyCleanup.requiredDate}|12:00|1200`,
+    validationVersion: 10,
+    messageId: legacyCleanup.message.id,
+    uploadId: legacyCleanup.message.file.id,
+    roomId: legacyCleanup.message.room.id,
+    userId: legacyCleanup.owner.id,
+    username: legacyCleanup.owner.username
+  };
+  await legacyCleanupGuard.writeIndex(legacyCleanup.persistence, legacyCleanupGuard.PROTECTED_ROOMS.kassa.index, { photos: [legacyCleanupEntry] });
+  const legacyCleanupBaseline = await legacyCleanupGuard.confirmedTransferSummaryForUser(
+    legacyCleanup.read, legacyCleanup.config, legacyCleanup.owner.id, legacyCleanup.requiredDate, [], undefined, legacyCleanup.message.room.id
+  );
+  await legacyCleanupGuard.cleanupArchivedReceiptMessages(
+    legacyCleanup.message.room, legacyCleanup.read, legacyCleanup.persistence, legacyCleanup.modify,
+    { info() {}, warn() {}, error() {} }, legacyCleanup.config, legacyCleanup.http
+  );
+  const legacyCleanupIndex = await receiptIndex(legacyCleanupGuard, legacyCleanup);
+  const legacyCleanupSummary = await legacyCleanupGuard.confirmedTransferSummaryForUser(
+    legacyCleanup.read, legacyCleanup.config, legacyCleanup.owner.id, legacyCleanup.requiredDate, [], undefined, legacyCleanup.message.room.id
+  );
+  assert.strictEqual(legacyCleanupIndex.photos[0].archiveStatus, "stored", "legacy archive retry may store archive metadata");
+  assert.strictEqual(legacyCleanupIndex.photos[0].source, "legacy", "legacy archive retry must preserve source exactly");
+  assert.strictEqual(legacyCleanupIndex.photos.length, 1, "legacy archive retry must not create a duplicate projection");
+  assert.strictEqual(legacyCleanup.pasCalls.length, 0, "legacy archive cleanup has no PAS authority");
+  assert.strictEqual(legacyCleanupSummary.count, legacyCleanupBaseline.count, "legacy archive cleanup cannot increase the pre-existing financial count");
+  assert.strictEqual(legacyCleanupSummary.total, legacyCleanupBaseline.total, "legacy archive cleanup cannot increase the pre-existing financial credit");
+
   // W1 housekeeping B2 backfill: the first entry.messageId loop cannot resolve
   // this receipt. The matching room message is deliberately discoverable only
   // through getMessages() → exactHash() → findExactDuplicate() in the second
@@ -774,6 +910,55 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(backfillSummary.count, 0, "backfill archive cleanup cannot create confirmed count");
   assert.strictEqual(backfillSummary.total, 0, "backfill archive cleanup cannot create financial credit");
   assert.ok(!backfill.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "backfill archive cleanup cannot publish accepted-success UX");
+
+  // W2 G2: the real room-message/hash backfill may bind a legacy record to its
+  // source upload and complete storage, while preserving the legacy source.
+  const legacyBackfillGuard = loadTrackedAppWithGuard().__testGuard;
+  const legacyBackfill = runtimeScenario(legacyBackfillGuard, "accepted", "housekeeping-legacy-backfill");
+  legacyBackfill.config.archiveEnabled = true;
+  legacyBackfill.config.archiveBucket = "synthetic-receipts";
+  legacyBackfill.config.archiveAccessKey = "synthetic-access-key";
+  legacyBackfill.config.archiveSecretKey = "synthetic-secret-key";
+  const legacyBackfillMessage = {
+    ...legacyBackfill.message,
+    id: "room-message-legacy-backfill",
+    createdAt: new Date(Date.now() - 61 * 24 * 60 * 60 * 1000)
+  };
+  legacyBackfill.roomMessages.push(legacyBackfillMessage);
+  const legacyBackfillEntry = {
+    exact: legacyBackfillGuard.exactHash(legacyBackfill.sourceContent),
+    source: "legacy",
+    archiveStatus: "failed",
+    archiveDueAt: Date.now() - 1,
+    receiptDate: legacyBackfill.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${legacyBackfill.requiredDate}|12:00|1200`,
+    validationVersion: 10,
+    messageId: "missing-first-loop-legacy-message",
+    uploadId: legacyBackfill.message.file.id,
+    roomId: legacyBackfill.message.room.id,
+    userId: legacyBackfill.owner.id,
+    username: legacyBackfill.owner.username
+  };
+  await legacyBackfillGuard.writeIndex(legacyBackfill.persistence, legacyBackfillGuard.PROTECTED_ROOMS.kassa.index, { photos: [legacyBackfillEntry] });
+  const legacyBackfillBaseline = await legacyBackfillGuard.confirmedTransferSummaryForUser(
+    legacyBackfill.read, legacyBackfill.config, legacyBackfill.owner.id, legacyBackfill.requiredDate, [], undefined, legacyBackfill.message.room.id
+  );
+  await legacyBackfillGuard.cleanupArchivedReceiptMessages(
+    legacyBackfill.message.room, legacyBackfill.read, legacyBackfill.persistence, legacyBackfill.modify,
+    { info() {}, warn() {}, error() {} }, legacyBackfill.config, legacyBackfill.http
+  );
+  const legacyBackfillIndex = await receiptIndex(legacyBackfillGuard, legacyBackfill);
+  const legacyBackfillSummary = await legacyBackfillGuard.confirmedTransferSummaryForUser(
+    legacyBackfill.read, legacyBackfill.config, legacyBackfill.owner.id, legacyBackfill.requiredDate, [], undefined, legacyBackfill.message.room.id
+  );
+  assert.strictEqual(legacyBackfillIndex.photos[0].messageId, legacyBackfillMessage.id, "legacy hash backfill must bind the discovered source message");
+  assert.strictEqual(legacyBackfillIndex.photos[0].archiveStatus, "stored", "legacy hash backfill may complete archive storage");
+  assert.strictEqual(legacyBackfillIndex.photos[0].source, "legacy", "legacy hash backfill must preserve source exactly");
+  assert.strictEqual(legacyBackfillIndex.photos.length, 1, "legacy hash backfill must not create a duplicate projection");
+  assert.strictEqual(legacyBackfill.pasCalls.length, 0, "legacy hash backfill has no PAS authority");
+  assert.strictEqual(legacyBackfillSummary.count, legacyBackfillBaseline.count, "legacy hash backfill cannot increase the pre-existing financial count");
+  assert.strictEqual(legacyBackfillSummary.total, legacyBackfillBaseline.total, "legacy hash backfill cannot increase the pre-existing financial credit");
 
   // E. Symmetric three-upload identity registry over the same fallback path.
   // Registry-A is the receipt already confirmed above (1200 RUB). Registry-B
