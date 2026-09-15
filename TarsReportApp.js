@@ -5574,6 +5574,10 @@ var require_upload_duplicate_guard = __commonJS({
         if (!keys.length) continue;
         const position = keys.map((key) => positions[key]).find((candidate) => candidate !== void 0);
         if (position === void 0) {
+          // The process-local write cache is not a financial authority.  In
+          // particular, do not restore an intentionally omitted legacy
+          // confirmed observation that has no PAS canonical payment proof.
+          if (cached.source === "confirmed" && !receiptIndexEntryCanonicalPaymentKey(cached)) continue;
           const recentPre = cached.source === "pre" && now - Number(cached.uploadedAt || 0) < 30 * 60 * 1e3;
           if (cached.source !== "pre" || recentPre) {
             for (const key of keys) positions[key] = merged.length;
@@ -5584,7 +5588,9 @@ var require_upload_duplicate_guard = __commonJS({
         const incoming = merged[position];
         const cachedRank = receiptIndexEntryRank(cached);
         const incomingRank = receiptIndexEntryRank(incoming);
-        if (cachedRank > incomingRank || cachedRank === incomingRank && receiptIndexEntryRevision(cached) > receiptIndexEntryRevision(incoming)) {
+        const canonicalPaymentMatch = receiptIndexEntryCanonicalPaymentKey(cached) && receiptIndexEntryCanonicalPaymentKey(cached) === receiptIndexEntryCanonicalPaymentKey(incoming);
+        const cachedWins = canonicalPaymentMatch ? cachedRank > incomingRank || cachedRank === incomingRank && receiptIndexEntryRevision(cached) > receiptIndexEntryRevision(incoming) : receiptIndexEntryRevision(cached) > receiptIndexEntryRevision(incoming);
+        if (cachedWins) {
           merged[position] = { ...incoming, ...cached };
         }
         for (const key of receiptIndexEntryKeys(merged[position])) positions[key] = position;
@@ -9739,7 +9745,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (!userId && candidates.length && !transferEntryMatchesCandidates(entry, candidates)) continue;
         if (dateFromEntry(entry, config) !== workday) continue;
         if (countedReceiptEntries.some((counted) => sameReceiptMessageImage(counted, entry))) continue;
-        const key = receiptFinancialProjectionKey(entry);
+        const key = confirmedTransferProjectionKey(entry);
         if (key && seen[key]) continue;
         if (key) seen[key] = true;
         const amount = amountFromEntry(entry);
@@ -9754,7 +9760,7 @@ var require_upload_duplicate_guard = __commonJS({
       const currentReceipts = Array.isArray(currentValidatedReceipts) ? currentValidatedReceipts : currentValidatedReceipts ? [currentValidatedReceipts] : [];
       for (const currentValidatedReceipt of currentReceipts) {
         const currentMatchesUser = userId ? currentValidatedReceipt.userId === userId : !candidates.length || transferEntryMatchesCandidates(currentValidatedReceipt, candidates);
-        const currentKey = receiptFinancialProjectionKey(currentValidatedReceipt);
+        const currentKey = confirmedTransferProjectionKey(currentValidatedReceipt);
         const sameCountedImage = countedReceiptEntries.some((counted) => sameReceiptMessageImage(counted, currentValidatedReceipt));
         if (currentMatchesUser && dateFromEntry(currentValidatedReceipt, config) === workday && !sameCountedImage && (!currentKey || !seen[currentKey])) {
           if (currentKey) seen[currentKey] = true;
@@ -9788,6 +9794,9 @@ var require_upload_duplicate_guard = __commonJS({
     }
     function receiptFinancialProjectionKey(receipt) {
       return receiptIndexEntryCanonicalPaymentKey(receipt) || receiptLedgerEntryKey(receipt);
+    }
+    function confirmedTransferProjectionKey(receipt) {
+      return receiptIndexEntryCanonicalPaymentKey(receipt) || normalizedReceiptIdentityKey(receipt && receipt.receiptIdentity) || receiptLedgerEntryKey(receipt);
     }
     async function receiptLedgerSummaryForUser(entry, currentValidatedReceipts, read, persistence, config, sourceRoomId = "") {
       const userId = String(entry && entry.userId || "");

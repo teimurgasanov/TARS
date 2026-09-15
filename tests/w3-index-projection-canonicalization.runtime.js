@@ -12,6 +12,11 @@ const ledgerEnd = source.indexOf("let receiptSummaryQueue", ledgerStart);
 assert(ledgerStart >= 0 && ledgerEnd > ledgerStart, "P2 ledger block missing");
 const ledgerBlock = source.slice(ledgerStart, ledgerEnd);
 assert.strictEqual((ledgerBlock.match(/receiptFinancialProjectionKey\(receipt\)/g) || []).length, 2, "P2 index/current loops must use canonical financial projection identity");
+const transferStart = source.indexOf("async function confirmedTransferSummaryForUser");
+const transferEnd = source.indexOf("function masterTransferSummaryAssociation", transferStart);
+assert(transferStart >= 0 && transferEnd > transferStart, "P1 transfer block missing");
+const transferBlock = source.slice(transferStart, transferEnd);
+assert.strictEqual((transferBlock.match(/confirmedTransferProjectionKey\(/g) || []).length, 2, "P1 index/current loops must preserve their dedicated projection identity");
 
 const workday = "2026-09-15";
 const receipt = (overrides = {}) => ({
@@ -51,6 +56,14 @@ function readFor(photos) {
   assert.strictEqual(merged.length, 1, "H2 must merge observations carrying one canonical payment identity");
   assert.strictEqual(merged[0].pasCanonicalPaymentId, "payment-a");
 
+  const newerRejected = receipt({ source: "rejected", pasCanonicalPaymentId: "", exact: "legacy", updatedAt: 400 });
+  const staleConfirmed = receipt({ pasCanonicalPaymentId: "", exact: "legacy", updatedAt: 300 });
+  const nonAuthorityMerge = mergeConcurrentReceiptIndex([newerRejected], [staleConfirmed], Date.now());
+  assert.strictEqual(nonAuthorityMerge[0].source, "rejected", "newer rejected must not be overwritten by stale PAS-unknown confirmed");
+
+  const omittedLegacyConfirmed = receipt({ pasCanonicalPaymentId: "", exact: "omitted", updatedAt: 300 });
+  assert.deepStrictEqual(mergeConcurrentReceiptIndex([], [omittedLegacyConfirmed], Date.now()), [], "omitted PAS-unknown confirmed must not resurrect from the process-local cache");
+
   const read = readFor([first, samePaymentDifferentObservation]);
   const summary = await guard.confirmedTransferSummaryForUser(read, {}, "owner", workday, undefined, undefined, "room");
   assert.deepStrictEqual({ count: summary.count, total: summary.total }, { count: 1, total: 100 }, "P1 must count one canonical payment once");
@@ -62,6 +75,14 @@ function readFor(photos) {
   const nonAuthoritative = receipt({ source: "pre", exact: "p".repeat(64), uploadId: "upload-pre", pasCanonicalPaymentId: "payment-a" });
   const nonAuthoritativeSummary = await guard.confirmedTransferSummaryForUser(readFor([nonAuthoritative]), {}, "owner", workday, undefined, undefined, "room");
   assert.deepStrictEqual({ count: nonAuthoritativeSummary.count, total: nonAuthoritativeSummary.total }, { count: 0, total: 0 }, "pre cannot gain authority from canonical merge/projection mechanics");
+
+  const legacyIdentity = "txn:2026-09-15|10:00|100";
+  const legacyFirst = receipt({ pasCanonicalPaymentId: "", receiptIdentity: legacyIdentity, exact: "legacy-a", uploadId: "legacy-a" });
+  const legacySameIdentity = receipt({ pasCanonicalPaymentId: "", receiptIdentity: legacyIdentity, exact: "legacy-b", uploadId: "legacy-b" });
+  const legacySummary = await guard.confirmedTransferSummaryForUser(readFor([legacyFirst, legacySameIdentity]), {}, "owner", workday, undefined, undefined, "room");
+  assert.deepStrictEqual({ count: legacySummary.count, total: legacySummary.total }, { count: 1, total: 100 }, "P1 no-canonical receipts must retain receiptIdentity-first dedupe");
+  const legacyCurrentSummary = await guard.confirmedTransferSummaryForUser(readFor([]), {}, "owner", workday, undefined, [legacyFirst, legacySameIdentity], "room");
+  assert.deepStrictEqual({ count: legacyCurrentSummary.count, total: legacyCurrentSummary.total }, { count: 1, total: 100 }, "P1 current no-canonical receipts must retain receiptIdentity-first dedupe");
 
   console.log("PASS: W3 canonical payment identity bounds receipt merge and financial projection");
 })().catch((error) => {
