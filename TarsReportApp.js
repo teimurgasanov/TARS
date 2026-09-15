@@ -5540,6 +5540,13 @@ var require_upload_duplicate_guard = __commonJS({
       if (!entry) return "";
       return String(entry.exact || entry.uploadAttemptKey || entry.uploadId || entry.messageId || "");
     }
+    function receiptIndexEntryCanonicalPaymentKey(entry) {
+      const canonicalPaymentId = String(entry && entry.pasCanonicalPaymentId || "").trim();
+      return canonicalPaymentId ? `pas:${canonicalPaymentId}` : "";
+    }
+    function receiptIndexEntryKeys(entry) {
+      return [receiptIndexEntryKey(entry), receiptIndexEntryCanonicalPaymentKey(entry)].filter((key, index, keys) => key && keys.indexOf(key) === index);
+    }
     function receiptIndexEntryRank(entry) {
       if (!entry) return -1;
       if (entry.archiveStatus === "expired") return 6;
@@ -5560,17 +5567,16 @@ var require_upload_duplicate_guard = __commonJS({
       const merged = Array.isArray(current) ? current.slice() : [];
       const positions = {};
       for (let index = 0; index < merged.length; index += 1) {
-        const key = receiptIndexEntryKey(merged[index]);
-        if (key) positions[key] = index;
+        for (const key of receiptIndexEntryKeys(merged[index])) positions[key] = index;
       }
       for (const cached of Array.isArray(recent) ? recent : []) {
-        const key = receiptIndexEntryKey(cached);
-        if (!key) continue;
-        const position = positions[key];
+        const keys = receiptIndexEntryKeys(cached);
+        if (!keys.length) continue;
+        const position = keys.map((key) => positions[key]).find((candidate) => candidate !== void 0);
         if (position === void 0) {
           const recentPre = cached.source === "pre" && now - Number(cached.uploadedAt || 0) < 30 * 60 * 1e3;
           if (cached.source !== "pre" || recentPre) {
-            positions[key] = merged.length;
+            for (const key of keys) positions[key] = merged.length;
             merged.push(cached);
           }
           continue;
@@ -5581,6 +5587,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (cachedRank > incomingRank || cachedRank === incomingRank && receiptIndexEntryRevision(cached) > receiptIndexEntryRevision(incoming)) {
           merged[position] = { ...incoming, ...cached };
         }
+        for (const key of receiptIndexEntryKeys(merged[position])) positions[key] = position;
       }
       return merged;
     }
@@ -9732,7 +9739,7 @@ var require_upload_duplicate_guard = __commonJS({
         if (!userId && candidates.length && !transferEntryMatchesCandidates(entry, candidates)) continue;
         if (dateFromEntry(entry, config) !== workday) continue;
         if (countedReceiptEntries.some((counted) => sameReceiptMessageImage(counted, entry))) continue;
-        const key = normalizedReceiptIdentityKey(entry.receiptIdentity) || String(entry.exact || "");
+        const key = receiptFinancialProjectionKey(entry);
         if (key && seen[key]) continue;
         if (key) seen[key] = true;
         const amount = amountFromEntry(entry);
@@ -9747,7 +9754,7 @@ var require_upload_duplicate_guard = __commonJS({
       const currentReceipts = Array.isArray(currentValidatedReceipts) ? currentValidatedReceipts : currentValidatedReceipts ? [currentValidatedReceipts] : [];
       for (const currentValidatedReceipt of currentReceipts) {
         const currentMatchesUser = userId ? currentValidatedReceipt.userId === userId : !candidates.length || transferEntryMatchesCandidates(currentValidatedReceipt, candidates);
-        const currentKey = normalizedReceiptIdentityKey(currentValidatedReceipt.receiptIdentity) || String(currentValidatedReceipt.exact || "");
+        const currentKey = receiptFinancialProjectionKey(currentValidatedReceipt);
         const sameCountedImage = countedReceiptEntries.some((counted) => sameReceiptMessageImage(counted, currentValidatedReceipt));
         if (currentMatchesUser && dateFromEntry(currentValidatedReceipt, config) === workday && !sameCountedImage && (!currentKey || !seen[currentKey])) {
           if (currentKey) seen[currentKey] = true;
@@ -9779,6 +9786,9 @@ var require_upload_duplicate_guard = __commonJS({
       if (exact) return `exact:${exact}`;
       return normalizedReceiptIdentityKey(receipt && receipt.receiptIdentity) || String(receipt && (receipt.uploadId || receipt.messageId) || "");
     }
+    function receiptFinancialProjectionKey(receipt) {
+      return receiptIndexEntryCanonicalPaymentKey(receipt) || receiptLedgerEntryKey(receipt);
+    }
     async function receiptLedgerSummaryForUser(entry, currentValidatedReceipts, read, persistence, config, sourceRoomId = "") {
       const userId = String(entry && entry.userId || "");
       const targetDate = String(entry && entry.receiptDate || expectedReceiptDate(config));
@@ -9792,7 +9802,7 @@ var require_upload_duplicate_guard = __commonJS({
         const sameOwner = String(receipt.userId || "") === userId || sourceRoomId && String(receipt.roomId || "") === String(sourceRoomId);
         if (!sameOwner || dateFromEntry(receipt, config) !== targetDate) continue;
         if (accountedReceipts.some((accounted) => sameReceiptMessageImage(accounted, receipt))) continue;
-        const receiptKey = receiptLedgerEntryKey(receipt);
+        const receiptKey = receiptFinancialProjectionKey(receipt);
         if (!receiptKey || rows.has(receiptKey)) continue;
         const amount = amountFromEntry(receipt);
         if (amount === void 0) {
@@ -9812,7 +9822,7 @@ var require_upload_duplicate_guard = __commonJS({
         // Duplicate protection has already accepted this receipt. The ledger
         // must not merge two different accepted photos just because OCR
         // produced the same incomplete transaction text (common for Gazprom).
-        const receiptKey = receiptLedgerEntryKey(receipt);
+        const receiptKey = receiptFinancialProjectionKey(receipt);
         if (!receiptKey || rows.has(receiptKey)) continue;
         accountedReceipts.push(receipt);
         if (amount === void 0) {
