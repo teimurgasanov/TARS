@@ -25,6 +25,7 @@ assert(!cleanupBlock.includes('.splice('));
 assert(!cleanupBlock.includes('removeByAssociation'));
 assert(!cleanupBlock.includes('receiptAmount = 0'));
 assert(!cleanupBlock.includes('receiptIdentity = ""'));
+assert(!/\.source\s*=\s*["']confirmed["']/.test(cleanupBlock), 'dormant noon cleanup must not mint confirmed receipt authority');
 
 const receiptCleanupStart = source.indexOf('async function cleanupArchivedReceiptMessages');
 const receiptCleanupEnd = source.indexOf('async function cleanupExpiredReceiptArchive', receiptCleanupStart);

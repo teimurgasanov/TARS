@@ -8241,9 +8241,9 @@ var require_upload_duplicate_guard = __commonJS({
                     receiptIdentity: receiptEntry.receiptIdentity
                   }, exact, read, persistence, modify, config, logger);
                   if (!archived || archived.archiveStatus !== "stored" || !archived.archiveKey) throw new Error("Rocket.Chat receipt archive did not confirm storage");
+                  const sourceBeforeArchive = receiptEntry.source;
                   Object.assign(receiptEntry, archived);
-                  receiptEntry.source = "confirmed";
-                  receiptEntry.invalidReason = "";
+                  receiptEntry.source = sourceBeforeArchive;
                   receiptIndexChanged = true;
                 }
                 if (!receiptEntry.archiveKey || receiptEntry.archiveStatus !== "stored" || !await archiveUploadExists(receiptEntry, read)) {
@@ -8395,14 +8395,9 @@ var require_upload_duplicate_guard = __commonJS({
               http
             );
             if (!archived || archived.archiveStatus !== "stored" || !archived.archiveKey) throw new Error("Rocket.Chat receipt archive did not confirm storage");
-            const preserveArchiveFailureAuthority = entry.source === "archive_failed";
+            const sourceBeforeArchive = entry.source;
             Object.assign(entry, archived);
-            if (preserveArchiveFailureAuthority) {
-              entry.source = "archive_failed";
-            } else {
-              entry.source = "confirmed";
-              entry.invalidReason = "";
-            }
+            entry.source = sourceBeforeArchive;
             changed = true;
           }
           if (!entry.archiveKey || entry.archiveStatus !== "stored") continue;
@@ -8477,14 +8472,9 @@ var require_upload_duplicate_guard = __commonJS({
                   http
                 );
                 if (!archived || archived.archiveStatus !== "stored" || !archived.archiveKey) throw new Error("Rocket.Chat receipt archive did not confirm storage");
-                const preserveArchiveFailureAuthority = entry.source === "archive_failed";
+                const sourceBeforeArchive = entry.source;
                 Object.assign(entry, archived);
-                if (preserveArchiveFailureAuthority) {
-                  entry.source = "archive_failed";
-                } else {
-                  entry.source = "confirmed";
-                  entry.invalidReason = "";
-                }
+                entry.source = sourceBeforeArchive;
               }
               if (!entry.archiveKey || entry.archiveStatus !== "stored") continue;
               if (!RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED) continue;
@@ -10092,9 +10082,8 @@ var require_upload_duplicate_guard = __commonJS({
                   entry.uploadId = messageFileId;
                   changed = true;
                 }
-                const preservePreAuthority = entry.source === "pre";
-                if (preservePreAuthority || entry.roomId !== message.room.id || senderId && !entry.userId) {
-                  if (!preservePreAuthority) entry.source = "confirmed";
+                const sourceBeforeRepair = entry.source;
+                if (sourceBeforeRepair === "pre" || entry.roomId !== message.room.id || senderId && !entry.userId) {
                   entry.roomId = message.room.id;
                   if (senderId && !entry.userId) entry.userId = senderId;
                   entry.username = roomMessage.sender && roomMessage.sender.username || entry.username || "";
@@ -10106,10 +10095,6 @@ var require_upload_duplicate_guard = __commonJS({
                   entry.archiveUploadId = "";
                   entry.archiveMessageId = "";
                   markReceiptArchivePending(entry, entry.uploadedAt || createdAt);
-                  if (!preservePreAuthority) {
-                    entry.source = "confirmed";
-                    entry.invalidReason = "";
-                  }
                   changed = true;
                 }
                 continue;
@@ -10117,7 +10102,6 @@ var require_upload_duplicate_guard = __commonJS({
               const receiptCheck = await validateReceiptDate(file, content, http, config, logger);
               if (!receiptCheck.ok) {
                 if (entry) {
-                  entry.source = "rejected";
                   entry.invalidReason = receiptCheck.reason;
                   entry.validationVersion = 2;
                   entry.roomId = message.room.id;
@@ -10131,10 +10115,9 @@ var require_upload_duplicate_guard = __commonJS({
                 continue;
               }
               if (!entry) {
-                entry = { exact };
+                entry = { exact, source: "pre" };
                 index.photos.push(entry);
               }
-              const preserveArchiveFailureAuthority = entry.source === "archive_failed";
               entry.exact = exact;
               entry.visual = entry.visual || visualHash(file, content);
               entry.receiptIdentity = receiptCheck.receiptIdentity;
@@ -10143,7 +10126,6 @@ var require_upload_duplicate_guard = __commonJS({
               entry.receiptWarning = receiptCheck.receiptWarning || "";
               entry.validationVersion = 2;
               entry.invalidReason = "";
-              entry.source = preserveArchiveFailureAuthority ? "archive_failed" : "confirmed";
               entry.uploadedAt = createdAt;
               entry.userId = roomMessage.sender && roomMessage.sender.id || entry.userId || "";
               entry.username = roomMessage.sender && roomMessage.sender.username || entry.username || "";
