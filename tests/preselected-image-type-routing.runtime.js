@@ -105,6 +105,7 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
   const sent = [];
   const logs = [];
   const providerCalls = [];
+  const pasCalls = [];
   const read = {
     getPersistenceReader() { return { async readByAssociation(association) { return records.get(String(association && association.key || "")) || []; } }; },
     getMessageReader() { return { async getById() { return message; } }; },
@@ -149,6 +150,19 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
   const modify = { getCreator() { return creator; }, getDeleter() { return { async deleteMessage() {} }; } };
   const http = {
     async post(url, options) {
+      if (/127\.0\.0\.1:12345\/v1\/operation/.test(String(url))) {
+        const envelope = JSON.parse(String(options && options.content || "{}"));
+        pasCalls.push(envelope);
+        return {
+          statusCode: 200,
+          content: JSON.stringify({
+            protocol: envelope.protocol,
+            requestId: envelope.requestId,
+            operation: envelope.operation,
+            data: { status: "CONFIRMED", canonicalPaymentId: "pas-provider-routing-confirmed", reasonCode: null }
+          })
+        };
+      }
       if (/ai\.api\.cloud\.yandex\.net\/v1\/responses/.test(String(url))) {
         providerCalls.push("yandex_primary");
         if (runtimeOptions.yandexPrimaryStatus) return { statusCode: runtimeOptions.yandexPrimaryStatus, data: {} };
@@ -183,6 +197,8 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
     yandexAiStudioModel: "qwen3.6-35b-a3b",
     openaiApiKey: "test",
     openaiReceiptModel: "gpt-4.1-mini",
+    pasAuthorityUrl: "http://127.0.0.1:12345",
+    pasAuthorityToken: "pas_provider_routing_test_token_1234567890",
     timeZone: "Europe/Samara",
     cutoffHour: 0
   });
@@ -200,7 +216,7 @@ function runtime(primaryPayload = workPhotoPayload(), runtimeOptions = {}) {
   app.isReportRequestText = () => false;
   app.refreshPersonalReportButton = async () => false;
   app.refreshPreliminaryReportAnalysis = async () => false;
-  return { app, http, logs, message, modify, persistence, providerCalls, read, records, reportRoom, sent };
+  return { app, http, logs, message, modify, pasCalls, persistence, providerCalls, read, records, reportRoom, sent };
 }
 
 async function execute(state) {
@@ -316,6 +332,7 @@ async function execute(state) {
   const receiptIndex = receiptWithVisionUnavailable.records.get("receipt-duplicate-index-v1") || [];
   const acceptedReceipts = receiptIndex.flatMap((record) => Array.isArray(record && record.photos) ? record.photos : []).filter((entry) => entry && entry.source === "confirmed");
   assert.strictEqual(acceptedReceipts.length, 1, "a strict Yandex receipt must be accepted when OpenAI is unavailable");
+  assert.strictEqual(receiptWithVisionUnavailable.pasCalls.length, 1, "strict Yandex receipt confirmation must cross the PAS authority boundary");
   assert.strictEqual(acceptedReceipts[0].receiptDate, today.iso);
   assert.strictEqual(acceptedReceipts[0].receiptAmount, 1200);
 

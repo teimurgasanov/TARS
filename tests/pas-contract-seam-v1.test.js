@@ -2,6 +2,8 @@
 
 const assert = require("assert");
 const fs = require("fs");
+const path = require("path");
+const { execFileSync } = require("child_process");
 const {
   ConfirmPaymentMode,
   PaymentActorKind,
@@ -160,6 +162,7 @@ function effectRecorder() {
   assert.strictEqual(unavailableOutcome.result.status, PaymentAuthorityResultStatus.AUTHORITY_UNAVAILABLE);
   assert.deepStrictEqual(unavailableRecorder.calls, [], "authority exceptions must fail closed");
 
+  execFileSync(process.execPath, [path.join(__dirname, "w1-pas-auto-authority.runtime.js")], { cwd: path.resolve(__dirname, ".."), stdio: "inherit" });
   console.log("PASS: PAS v1 contract, manual provenance, deterministic fake and projection gate");
 })().catch((error) => {
   console.error(error);

@@ -23,6 +23,7 @@ function runtimeScenario(guard, mode, suffix) {
   const sourceContent = Buffer.from(`personal-receipt-control-${mode}-${suffix}`);
   const sourceContents = new Map();
   const uploadFiles = new Map();
+  const roomMessages = [];
   const personalRoom = { id: `personal-${suffix}`, type: "d", slugifiedName: `tars-master-${suffix}` };
   const controlRoom = { id: "control-room", type: "p", slugifiedName: "cheki-kontrol", displayName: "Контроль чеков" };
   const owner = { id: `owner-${suffix}`, username: `master-${suffix}`, name: `Master ${suffix}` };
@@ -41,6 +42,7 @@ function runtimeScenario(guard, mode, suffix) {
     text: "",
     createdAt: new Date()
   };
+  const messagesById = new Map([[message.id, message]]);
   const config = {
     apiKey: consensusMode ? "test-yandex-key" : "",
     folderId: consensusMode ? "test-folder" : "",
@@ -57,7 +59,9 @@ function runtimeScenario(guard, mode, suffix) {
     ownerUsername: "teimur",
     adminUsername: "shura",
     reviewRejectedReceipts: true,
-    archiveEnabled: false
+    archiveEnabled: false,
+    pasAuthorityUrl: "http://127.0.0.1:12345",
+    pasAuthorityToken: "synthetic_pas_token_1234567890abcdef"
   };
   const requiredDate = guard.expectedReceiptDate(config);
   const observedDate = mode === "rejected" || consensusMode ? previousCalendarDate(requiredDate) : requiredDate;
@@ -67,8 +71,24 @@ function runtimeScenario(guard, mode, suffix) {
   let lastRequestedUploadId = messageFile.id;
   const amountOverrides = new Map();
   const providerCalls = [];
+  const pasCalls = [];
+  let pasOutcome = { status: "CONFIRMED", canonicalPaymentId: `pas-${suffix}`, reasonCode: null };
   const http = {
+    async put(url, options) {
+      if (String(url).includes("storage.yandexcloud.net")) {
+        return { statusCode: 200, content: "" };
+      }
+      throw new Error(`unexpected PUT ${url}`);
+    },
     async post(url, options) {
+      if (String(url).includes("127.0.0.1:12345/v1/operation")) {
+        const envelope = JSON.parse(String(options && options.content || "{}"));
+        pasCalls.push(envelope.payload);
+        if (pasOutcome === "malformed") return { statusCode: 200, content: "{}" };
+        if (pasOutcome === "unavailable") return { statusCode: 503, content: "" };
+        const outcome = pasOutcome.status === "CONFIRMED" ? { ...pasOutcome, canonicalPaymentId: `${pasOutcome.canonicalPaymentId}-${envelope.payload.payment.amount.value.minorUnits}` } : pasOutcome;
+        return { statusCode: 200, content: JSON.stringify({ protocol: envelope.protocol, requestId: envelope.requestId, operation: envelope.operation, data: outcome }) };
+      }
       if (String(url).includes("ocr.api.cloud.yandex.net")) {
         yandexCalls += 1;
         const model = String(options && options.data && options.data.model || "unknown");
@@ -132,7 +152,7 @@ function runtimeScenario(guard, mode, suffix) {
           ambiguity_reason: mode === "unknown" ? "unreadable" : null
         });
       }
-      if (receiptCalls === 1 || mode === "unknown") {
+      if (receiptCalls === 1 && mode !== "repair-accepted" || mode === "unknown") {
         return openAiResponse({
           is_receipt: false,
           has_readable_text: mode !== "unknown",
@@ -235,12 +255,13 @@ function runtimeScenario(guard, mode, suffix) {
           if (roomId === controlRoom.id && latestControlUploadId) {
             return [{ id: `control-message-${latestControlUploadId}`, room: controlRoom, file: { _id: latestControlUploadId } }];
           }
+          if (roomId === personalRoom.id) return roomMessages;
           return [];
         }
       };
     },
     getMessageReader() {
-      return { async getById() { return undefined; } };
+      return { async getById(id) { return messagesById.get(id); } };
     }
   };
   const creator = {
@@ -337,8 +358,11 @@ function runtimeScenario(guard, mode, suffix) {
     deletedMessages,
     http,
     message,
+    messagesById,
     modify,
     owner,
+    pasCalls,
+    setPasOutcome(value) { pasOutcome = value; },
     persistence,
     privateNotifications,
     providerCalls,
@@ -346,6 +370,7 @@ function runtimeScenario(guard, mode, suffix) {
     read,
     receiptCalls: () => receiptCalls,
     records,
+    roomMessages,
     requiredDate,
     sourceContent,
     sourceContents,
@@ -479,6 +504,276 @@ async function receiptIndex(guard, scenario) {
   const acceptedDetails = accepted.publishedMessages.find((item) => /^✅ ЧЕК ПРИНЯТ/.test(String(item.text || "")));
   assert.ok(acceptedDetails, "accepted receipt must publish its result");
   assert.strictEqual(acceptedDetails.threadId, accepted.message.id, "accepted result must be attached to the corresponding receipt image");
+
+  // W1 regression: this is the shared rejectDuplicateMessage photo fast path,
+  // not a copy of its same-message/same-upload predicate. A normal, already
+  // posted direct-room work photo must remain reusable when Rocket.Chat gives
+  // us the original message again, or a wrapper with the same upload.
+  for (const photoCase of ["same-message", "same-upload"]) {
+    const photoGuard = loadTrackedAppWithGuard().__testGuard;
+    const photo = runtimeScenario(photoGuard, "unknown", `photo-post-${photoCase}`);
+    const photoIndex = { photos: [{
+      exact: photoGuard.exactHash(photo.sourceContent),
+      visual: photoGuard.visualHash(photo.message.file, photo.sourceContent),
+      source: "post",
+      messageId: photoCase === "same-message" ? photo.message.id : "earlier-photo-message",
+      uploadId: photo.message.file.id,
+      roomId: photo.message.room.id,
+      userId: photo.owner.id,
+      username: photo.owner.username,
+      receiptDate: "",
+      reportQueuedAt: Date.now()
+    }] };
+    await photoGuard.writeIndex(photo.persistence, photoGuard.PROTECTED_ROOMS.otchet.index, photoIndex);
+    const replay = photoCase === "same-message" ? photo.message : { ...photo.message, id: `photo-wrapper-${photoCase}` };
+    const result = await photoGuard.rejectDuplicateMessage(
+      replay, photo.read, photo.persistence, photo.modify, { info() {}, warn() {}, error() {} }, photo.http, photo.config, "photo"
+    );
+    const persisted = await photoGuard.readIndex(photo.read, photoGuard.PROTECTED_ROOMS.otchet.index);
+    assert.strictEqual(result, "processed", `photo ${photoCase}: shared duplicate path must accept the original post entry`);
+    assert.strictEqual(persisted.photos.length, 1, `photo ${photoCase}: no duplicate photo row`);
+    assert.strictEqual(persisted.photos[0].source, "post", `photo ${photoCase}: legacy post source is preserved`);
+    assert.strictEqual(photo.deletedMessages.length, 0, `photo ${photoCase}: original photo is not deleted as a duplicate`);
+    assert.strictEqual(photo.privateNotifications.length, 0, `photo ${photoCase}: no duplicate-photo notification`);
+  }
+
+  // W1 regression: malformed PAS data has no authority. The actual personal
+  // receipt route may retain a non-authoritative pre observation, but cannot
+  // publish acceptance or include it in the current financial total.
+  const malformedGuard = loadTrackedAppWithGuard().__testGuard;
+  const malformed = runtimeScenario(malformedGuard, "accepted", "malformed-pas");
+  malformed.setPasOutcome("malformed");
+  const malformedResult = await malformedGuard.processPersonalMediaV2(
+    malformed.message, malformed.read, malformed.persistence, malformed.modify,
+    { info() {}, warn() {}, error() {} }, malformed.http, malformed.config, "receipt"
+  );
+  await malformedGuard.flushReceiptCaseV1ForTests();
+  const malformedIndex = await receiptIndex(malformedGuard, malformed);
+  const malformedSummary = await malformedGuard.confirmedTransferSummaryForUser(
+    malformed.read, malformed.config, malformed.owner.id, malformed.requiredDate, [], undefined, malformed.message.room.id
+  );
+  assert.strictEqual(malformedResult.handled, true, "malformed PAS response is handled by the real receipt path without acceptance");
+  assert.strictEqual(malformed.pasCalls.length, 1, "malformed PAS response reaches the authority seam once");
+  assert.strictEqual(malformedIndex.photos.length, 1, "malformed PAS observation is retained for later review/retry");
+  assert.notStrictEqual(malformedIndex.photos[0].source, "confirmed", "malformed PAS cannot create confirmed projection");
+  assert.strictEqual(malformedSummary.count, 0, "malformed PAS cannot create current confirmed count");
+  assert.strictEqual(malformedSummary.total, 0, "malformed PAS cannot create current financial credit");
+  assert.ok(!malformed.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "malformed PAS cannot publish accepted-success UX");
+
+  // W1 A3: seed the durable archive_failed observation, then replay its real
+  // direct-room upload. Object Storage is an existing external boundary stub;
+  // PAS is the authority under test. Every non-allowing outcome must leave the
+  // repaired archive non-financial and must not produce accepted UI or credit.
+  for (const pasCase of [
+    ["AUTHORITY_UNAVAILABLE", "unavailable"],
+    ["REJECTED", { status: "REJECTED", canonicalPaymentId: null, reasonCode: "SYNTHETIC_REJECT" }],
+    ["CONFLICT", { status: "CONFLICT", canonicalPaymentId: null, reasonCode: "SYNTHETIC_CONFLICT" }]
+  ]) {
+    const [label, outcome] = pasCase;
+    const archiveGuard = loadTrackedAppWithGuard().__testGuard;
+    // Do not put the literal word "archive" in the direct-room slug: that
+    // would deliberately route the synthetic room into the archive-room
+    // safety exclusion before the A3 receipt path is reached.
+    const archive = runtimeScenario(archiveGuard, "accepted", `a3-${label.toLowerCase()}`);
+    archive.config.archiveEnabled = true;
+    archive.config.archiveBucket = "synthetic-receipts";
+    archive.config.archiveAccessKey = "synthetic-access-key";
+    archive.config.archiveSecretKey = "synthetic-secret-key";
+    archive.setPasOutcome(outcome);
+    const archiveExact = archiveGuard.exactHash(archive.sourceContent);
+    const archiveEntry = {
+      exact: archiveExact,
+      source: "archive_failed",
+      archiveStatus: "failed",
+      receiptDate: archive.requiredDate,
+      receiptAmount: 1200,
+      receiptIdentity: `txn:${archive.requiredDate}|12:00|1200`,
+      validationVersion: 10,
+      messageId: "previous-archive-failed-message",
+      uploadId: archive.message.file.id,
+      roomId: archive.message.room.id,
+      userId: archive.owner.id,
+      username: archive.owner.username
+    };
+    await archiveGuard.writeIndex(archive.persistence, archiveGuard.PROTECTED_ROOMS.kassa.index, { photos: [archiveEntry] });
+    const archiveLogs = [];
+    const archiveResult = await archiveGuard.processPersonalMediaV2(
+      archive.message, archive.read, archive.persistence, archive.modify,
+      { info(message) { archiveLogs.push(`INFO ${message}`); }, warn(message) { archiveLogs.push(`WARN ${message}`); }, error(message) { archiveLogs.push(`ERROR ${message}`); } }, archive.http, archive.config, "receipt"
+    );
+    await archiveGuard.flushReceiptCaseV1ForTests();
+    const archiveIndex = await receiptIndex(archiveGuard, archive);
+    const archivePersisted = archiveIndex.photos[0];
+    const archiveSummary = await archiveGuard.confirmedTransferSummaryForUser(
+      archive.read, archive.config, archive.owner.id, archive.requiredDate, [], undefined, archive.message.room.id
+    );
+    assert.strictEqual(archiveResult.handled, true, `A3 ${label}: archive-failed replay is handled by the real receipt path; logs=${archiveLogs.join(" | ")}`);
+    assert.strictEqual(archive.pasCalls.length, 1, `A3 ${label}: repaired observation reaches PAS; logs=${archiveLogs.join(" | ")}`);
+    assert.notStrictEqual(archivePersisted.source, "confirmed", `A3 ${label}: non-allowing PAS cannot confirm archive repair`);
+    assert.strictEqual(archiveSummary.count, 0, `A3 ${label}: no current confirmed count`);
+    assert.strictEqual(archiveSummary.total, 0, `A3 ${label}: no current financial credit`);
+    assert.ok(!archive.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), `A3 ${label}: no accepted-success UX`);
+  }
+
+  // W1 housekeeping B1: the ordinary summary-repair path may fill missing
+  // receipt metadata, but an existing pre observation has no PAS authority and
+  // must stay non-financial. This calls sendTodayTransferSummary(), which calls
+  // the production repairTodayReceiptIndex() path.
+  const repairGuard = loadTrackedAppWithGuard().__testGuard;
+  const repair = runtimeScenario(repairGuard, "accepted", "housekeeping-pre");
+  const repairEntry = {
+    exact: repairGuard.exactHash(repair.sourceContent),
+    source: "pre",
+    validationVersion: 2,
+    receiptDate: repair.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${repair.requiredDate}|12:00|1200`,
+    messageId: repair.message.id,
+    uploadId: repair.message.file.id,
+    roomId: repair.message.room.id,
+    userId: repair.owner.id,
+    username: repair.owner.username
+  };
+  repair.roomMessages.push(repair.message);
+  await repairGuard.writeIndex(repair.persistence, repairGuard.PROTECTED_ROOMS.kassa.index, { photos: [repairEntry] });
+  await repairGuard.sendTodayTransferSummary(
+    { id: "summary-housekeeping-pre", room: repair.message.room, sender: repair.owner, text: "сумма переводов", createdAt: new Date() },
+    repair.read, repair.persistence, repair.modify, { info() {}, warn() {}, error() {} }, repair.http, repair.config
+  );
+  const repairIndex = await receiptIndex(repairGuard, repair);
+  const repairSummary = await repairGuard.confirmedTransferSummaryForUser(
+    repair.read, repair.config, repair.owner.id, repair.requiredDate, [], undefined, repair.message.room.id
+  );
+  assert.strictEqual(repairIndex.photos[0].source, "pre", "summary repair cannot promote a pre observation without PAS");
+  assert.strictEqual(repair.pasCalls.length, 0, "summary repair has no PAS authority context to promote a pre observation");
+  assert.strictEqual(repairSummary.count, 0, "summary repair pre observation cannot enter confirmed count");
+  assert.strictEqual(repairSummary.total, 0, "summary repair pre observation cannot create financial credit");
+
+  // W1 repair fallback: archive_failed intentionally misses the summary repair
+  // fast gate, so this real sendTodayTransferSummary() scenario must execute
+  // fresh receipt validation rather than passing by a skipped OCR path.
+  const archiveRepairGuard = loadTrackedAppWithGuard().__testGuard;
+  const archiveRepair = runtimeScenario(archiveRepairGuard, "repair-accepted", "summary-archive-failed-ocr");
+  const archiveRepairEntry = {
+    exact: archiveRepairGuard.exactHash(archiveRepair.sourceContent),
+    source: "archive_failed",
+    archiveStatus: "failed",
+    validationVersion: 10,
+    receiptDate: archiveRepair.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${archiveRepair.requiredDate}|12:00|1200`,
+    messageId: archiveRepair.message.id,
+    uploadId: archiveRepair.message.file.id,
+    roomId: archiveRepair.message.room.id,
+    userId: archiveRepair.owner.id,
+    username: archiveRepair.owner.username
+  };
+  archiveRepair.roomMessages.push(archiveRepair.message);
+  await archiveRepairGuard.writeIndex(archiveRepair.persistence, archiveRepairGuard.PROTECTED_ROOMS.kassa.index, { photos: [archiveRepairEntry] });
+  await archiveRepairGuard.sendTodayTransferSummary(
+    { id: "summary-archive-failed-ocr", room: archiveRepair.message.room, sender: archiveRepair.owner, text: "сумма переводов", createdAt: new Date() },
+    archiveRepair.read, archiveRepair.persistence, archiveRepair.modify, { info() {}, warn() {}, error() {} }, archiveRepair.http, archiveRepair.config
+  );
+  const archiveRepairIndex = await receiptIndex(archiveRepairGuard, archiveRepair);
+  const archiveRepairSummary = await archiveRepairGuard.confirmedTransferSummaryForUser(
+    archiveRepair.read, archiveRepair.config, archiveRepair.owner.id, archiveRepair.requiredDate, [], undefined, archiveRepair.message.room.id
+  );
+  assert.ok(archiveRepair.receiptCalls() > 0, "archive_failed summary repair must reach fresh OCR revalidation");
+  assert.strictEqual(archiveRepairIndex.photos[0].source, "archive_failed", "fresh OCR repair cannot confirm archive_failed without PAS");
+  assert.strictEqual(archiveRepair.pasCalls.length, 0, "summary OCR repair has no PAS authority context");
+  assert.strictEqual(archiveRepairSummary.count, 0, "summary OCR repair cannot create confirmed count");
+  assert.strictEqual(archiveRepairSummary.total, 0, "summary OCR repair cannot create financial credit");
+  assert.ok(!archiveRepair.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "summary OCR repair cannot publish accepted-success UX");
+
+  // W1 housekeeping B2: a successful retention archive is storage evidence,
+  // not PAS confirmation. Exercise the exported production cleanup path with
+  // an archive_failed receipt and an Object Storage boundary stub.
+  const cleanupGuard = loadTrackedAppWithGuard().__testGuard;
+  const cleanup = runtimeScenario(cleanupGuard, "accepted", "housekeeping-archive-failed");
+  cleanup.config.archiveEnabled = true;
+  cleanup.config.archiveBucket = "synthetic-receipts";
+  cleanup.config.archiveAccessKey = "synthetic-access-key";
+  cleanup.config.archiveSecretKey = "synthetic-secret-key";
+  cleanup.message.createdAt = new Date();
+  cleanup.messagesById.set(cleanup.message.id, cleanup.message);
+  const cleanupEntry = {
+    exact: cleanupGuard.exactHash(cleanup.sourceContent),
+    source: "archive_failed",
+    archiveStatus: "failed",
+    archiveDueAt: Date.now() - 1,
+    receiptDate: cleanup.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${cleanup.requiredDate}|12:00|1200`,
+    validationVersion: 10,
+    messageId: cleanup.message.id,
+    uploadId: cleanup.message.file.id,
+    roomId: cleanup.message.room.id,
+    userId: cleanup.owner.id,
+    username: cleanup.owner.username
+  };
+  await cleanupGuard.writeIndex(cleanup.persistence, cleanupGuard.PROTECTED_ROOMS.kassa.index, { photos: [cleanupEntry] });
+  await cleanupGuard.cleanupArchivedReceiptMessages(
+    cleanup.message.room, cleanup.read, cleanup.persistence, cleanup.modify,
+    { info() {}, warn() {}, error() {} }, cleanup.config, cleanup.http
+  );
+  const cleanupIndex = await receiptIndex(cleanupGuard, cleanup);
+  const cleanupSummary = await cleanupGuard.confirmedTransferSummaryForUser(
+    cleanup.read, cleanup.config, cleanup.owner.id, cleanup.requiredDate, [], undefined, cleanup.message.room.id
+  );
+  assert.strictEqual(cleanupIndex.photos[0].archiveStatus, "stored", "cleanup may preserve successful archive metadata");
+  assert.strictEqual(cleanupIndex.photos[0].source, "archive_failed", "archive success alone cannot confirm an archive_failed receipt");
+  assert.strictEqual(cleanup.pasCalls.length, 0, "archive cleanup has no PAS authority context to promote an archive_failed receipt");
+  assert.strictEqual(cleanupSummary.count, 0, "archive cleanup cannot create confirmed count");
+  assert.strictEqual(cleanupSummary.total, 0, "archive cleanup cannot create financial credit");
+  assert.ok(!cleanup.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "archive cleanup cannot publish accepted-success UX");
+
+  // W1 housekeeping B2 backfill: the first entry.messageId loop cannot resolve
+  // this receipt. The matching room message is deliberately discoverable only
+  // through getMessages() → exactHash() → findExactDuplicate() in the second
+  // cleanup backfill loop.
+  const backfillGuard = loadTrackedAppWithGuard().__testGuard;
+  const backfill = runtimeScenario(backfillGuard, "accepted", "housekeeping-archive-backfill");
+  backfill.config.archiveEnabled = true;
+  backfill.config.archiveBucket = "synthetic-receipts";
+  backfill.config.archiveAccessKey = "synthetic-access-key";
+  backfill.config.archiveSecretKey = "synthetic-secret-key";
+  const backfillMessage = {
+    ...backfill.message,
+    id: "room-message-archive-backfill",
+    createdAt: new Date(Date.now() - 61 * 24 * 60 * 60 * 1000)
+  };
+  backfill.roomMessages.push(backfillMessage);
+  const backfillEntry = {
+    exact: backfillGuard.exactHash(backfill.sourceContent),
+    source: "archive_failed",
+    archiveStatus: "failed",
+    archiveDueAt: Date.now() - 1,
+    receiptDate: backfill.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${backfill.requiredDate}|12:00|1200`,
+    validationVersion: 10,
+    messageId: "missing-first-loop-message",
+    uploadId: backfill.message.file.id,
+    roomId: backfill.message.room.id,
+    userId: backfill.owner.id,
+    username: backfill.owner.username
+  };
+  await backfillGuard.writeIndex(backfill.persistence, backfillGuard.PROTECTED_ROOMS.kassa.index, { photos: [backfillEntry] });
+  await backfillGuard.cleanupArchivedReceiptMessages(
+    backfill.message.room, backfill.read, backfill.persistence, backfill.modify,
+    { info() {}, warn() {}, error() {} }, backfill.config, backfill.http
+  );
+  const backfillIndex = await receiptIndex(backfillGuard, backfill);
+  const backfillSummary = await backfillGuard.confirmedTransferSummaryForUser(
+    backfill.read, backfill.config, backfill.owner.id, backfill.requiredDate, [], undefined, backfill.message.room.id
+  );
+  assert.strictEqual(backfillIndex.photos[0].messageId, backfillMessage.id, "room-message hash backfill must associate the discovered source message");
+  assert.strictEqual(backfillIndex.photos[0].archiveStatus, "stored", "backfill loop must complete the archive retry");
+  assert.strictEqual(backfillIndex.photos[0].source, "archive_failed", "backfill archive success alone cannot confirm an archive_failed receipt");
+  assert.strictEqual(backfill.pasCalls.length, 0, "backfill housekeeping must not contact PAS");
+  assert.strictEqual(backfillSummary.count, 0, "backfill archive cleanup cannot create confirmed count");
+  assert.strictEqual(backfillSummary.total, 0, "backfill archive cleanup cannot create financial credit");
+  assert.ok(!backfill.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "backfill archive cleanup cannot publish accepted-success UX");
 
   // E. Symmetric three-upload identity registry over the same fallback path.
   // Registry-A is the receipt already confirmed above (1200 RUB). Registry-B
