@@ -8477,9 +8477,14 @@ var require_upload_duplicate_guard = __commonJS({
                   http
                 );
                 if (!archived || archived.archiveStatus !== "stored" || !archived.archiveKey) throw new Error("Rocket.Chat receipt archive did not confirm storage");
+                const preserveArchiveFailureAuthority = entry.source === "archive_failed";
                 Object.assign(entry, archived);
-                entry.source = "confirmed";
-                entry.invalidReason = "";
+                if (preserveArchiveFailureAuthority) {
+                  entry.source = "archive_failed";
+                } else {
+                  entry.source = "confirmed";
+                  entry.invalidReason = "";
+                }
               }
               if (!entry.archiveKey || entry.archiveStatus !== "stored") continue;
               if (!RECEIPT_SOURCE_CHAT_CLEANUP_ENABLED) continue;

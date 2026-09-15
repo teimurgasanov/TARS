@@ -691,6 +691,54 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(cleanupSummary.total, 0, "archive cleanup cannot create financial credit");
   assert.ok(!cleanup.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "archive cleanup cannot publish accepted-success UX");
 
+  // W1 housekeeping B2 backfill: the first entry.messageId loop cannot resolve
+  // this receipt. The matching room message is deliberately discoverable only
+  // through getMessages() → exactHash() → findExactDuplicate() in the second
+  // cleanup backfill loop.
+  const backfillGuard = loadTrackedAppWithGuard().__testGuard;
+  const backfill = runtimeScenario(backfillGuard, "accepted", "housekeeping-archive-backfill");
+  backfill.config.archiveEnabled = true;
+  backfill.config.archiveBucket = "synthetic-receipts";
+  backfill.config.archiveAccessKey = "synthetic-access-key";
+  backfill.config.archiveSecretKey = "synthetic-secret-key";
+  const backfillMessage = {
+    ...backfill.message,
+    id: "room-message-archive-backfill",
+    createdAt: new Date(Date.now() - 61 * 24 * 60 * 60 * 1000)
+  };
+  backfill.roomMessages.push(backfillMessage);
+  const backfillEntry = {
+    exact: backfillGuard.exactHash(backfill.sourceContent),
+    source: "archive_failed",
+    archiveStatus: "failed",
+    archiveDueAt: Date.now() - 1,
+    receiptDate: backfill.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${backfill.requiredDate}|12:00|1200`,
+    validationVersion: 10,
+    messageId: "missing-first-loop-message",
+    uploadId: backfill.message.file.id,
+    roomId: backfill.message.room.id,
+    userId: backfill.owner.id,
+    username: backfill.owner.username
+  };
+  await backfillGuard.writeIndex(backfill.persistence, backfillGuard.PROTECTED_ROOMS.kassa.index, { photos: [backfillEntry] });
+  await backfillGuard.cleanupArchivedReceiptMessages(
+    backfill.message.room, backfill.read, backfill.persistence, backfill.modify,
+    { info() {}, warn() {}, error() {} }, backfill.config, backfill.http
+  );
+  const backfillIndex = await receiptIndex(backfillGuard, backfill);
+  const backfillSummary = await backfillGuard.confirmedTransferSummaryForUser(
+    backfill.read, backfill.config, backfill.owner.id, backfill.requiredDate, [], undefined, backfill.message.room.id
+  );
+  assert.strictEqual(backfillIndex.photos[0].messageId, backfillMessage.id, "room-message hash backfill must associate the discovered source message");
+  assert.strictEqual(backfillIndex.photos[0].archiveStatus, "stored", "backfill loop must complete the archive retry");
+  assert.strictEqual(backfillIndex.photos[0].source, "archive_failed", "backfill archive success alone cannot confirm an archive_failed receipt");
+  assert.strictEqual(backfill.pasCalls.length, 0, "backfill housekeeping must not contact PAS");
+  assert.strictEqual(backfillSummary.count, 0, "backfill archive cleanup cannot create confirmed count");
+  assert.strictEqual(backfillSummary.total, 0, "backfill archive cleanup cannot create financial credit");
+  assert.ok(!backfill.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "backfill archive cleanup cannot publish accepted-success UX");
+
   // E. Symmetric three-upload identity registry over the same fallback path.
   // Registry-A is the receipt already confirmed above (1200 RUB). Registry-B
   // is a distinct upload of the SAME payment (same strictly extracted stable
