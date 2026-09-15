@@ -152,7 +152,7 @@ function runtimeScenario(guard, mode, suffix) {
           ambiguity_reason: mode === "unknown" ? "unreadable" : null
         });
       }
-      if (receiptCalls === 1 || mode === "unknown") {
+      if (receiptCalls === 1 && mode !== "repair-accepted" || mode === "unknown") {
         return openAiResponse({
           is_receipt: false,
           has_readable_text: mode !== "unknown",
@@ -648,6 +648,42 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(repair.pasCalls.length, 0, "summary repair has no PAS authority context to promote a pre observation");
   assert.strictEqual(repairSummary.count, 0, "summary repair pre observation cannot enter confirmed count");
   assert.strictEqual(repairSummary.total, 0, "summary repair pre observation cannot create financial credit");
+
+  // W1 repair fallback: archive_failed intentionally misses the summary repair
+  // fast gate, so this real sendTodayTransferSummary() scenario must execute
+  // fresh receipt validation rather than passing by a skipped OCR path.
+  const archiveRepairGuard = loadTrackedAppWithGuard().__testGuard;
+  const archiveRepair = runtimeScenario(archiveRepairGuard, "repair-accepted", "summary-archive-failed-ocr");
+  const archiveRepairEntry = {
+    exact: archiveRepairGuard.exactHash(archiveRepair.sourceContent),
+    source: "archive_failed",
+    archiveStatus: "failed",
+    validationVersion: 10,
+    receiptDate: archiveRepair.requiredDate,
+    receiptAmount: 1200,
+    receiptIdentity: `txn:${archiveRepair.requiredDate}|12:00|1200`,
+    messageId: archiveRepair.message.id,
+    uploadId: archiveRepair.message.file.id,
+    roomId: archiveRepair.message.room.id,
+    userId: archiveRepair.owner.id,
+    username: archiveRepair.owner.username
+  };
+  archiveRepair.roomMessages.push(archiveRepair.message);
+  await archiveRepairGuard.writeIndex(archiveRepair.persistence, archiveRepairGuard.PROTECTED_ROOMS.kassa.index, { photos: [archiveRepairEntry] });
+  await archiveRepairGuard.sendTodayTransferSummary(
+    { id: "summary-archive-failed-ocr", room: archiveRepair.message.room, sender: archiveRepair.owner, text: "сумма переводов", createdAt: new Date() },
+    archiveRepair.read, archiveRepair.persistence, archiveRepair.modify, { info() {}, warn() {}, error() {} }, archiveRepair.http, archiveRepair.config
+  );
+  const archiveRepairIndex = await receiptIndex(archiveRepairGuard, archiveRepair);
+  const archiveRepairSummary = await archiveRepairGuard.confirmedTransferSummaryForUser(
+    archiveRepair.read, archiveRepair.config, archiveRepair.owner.id, archiveRepair.requiredDate, [], undefined, archiveRepair.message.room.id
+  );
+  assert.ok(archiveRepair.receiptCalls() > 0, "archive_failed summary repair must reach fresh OCR revalidation");
+  assert.strictEqual(archiveRepairIndex.photos[0].source, "archive_failed", "fresh OCR repair cannot confirm archive_failed without PAS");
+  assert.strictEqual(archiveRepair.pasCalls.length, 0, "summary OCR repair has no PAS authority context");
+  assert.strictEqual(archiveRepairSummary.count, 0, "summary OCR repair cannot create confirmed count");
+  assert.strictEqual(archiveRepairSummary.total, 0, "summary OCR repair cannot create financial credit");
+  assert.ok(!archiveRepair.publishedMessages.some((item) => /✅ Чек|✅ ЧЕК ПРИНЯТ|🧾 ИТОГО/.test(String(item.text || ""))), "summary OCR repair cannot publish accepted-success UX");
 
   // W1 housekeeping B2: a successful retention archive is storage evidence,
   // not PAS confirmation. Exercise the exported production cleanup path with

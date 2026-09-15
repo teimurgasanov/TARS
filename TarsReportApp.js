@@ -10134,6 +10134,7 @@ var require_upload_duplicate_guard = __commonJS({
                 entry = { exact };
                 index.photos.push(entry);
               }
+              const preserveArchiveFailureAuthority = entry.source === "archive_failed";
               entry.exact = exact;
               entry.visual = entry.visual || visualHash(file, content);
               entry.receiptIdentity = receiptCheck.receiptIdentity;
@@ -10142,7 +10143,7 @@ var require_upload_duplicate_guard = __commonJS({
               entry.receiptWarning = receiptCheck.receiptWarning || "";
               entry.validationVersion = 2;
               entry.invalidReason = "";
-              entry.source = "confirmed";
+              entry.source = preserveArchiveFailureAuthority ? "archive_failed" : "confirmed";
               entry.uploadedAt = createdAt;
               entry.userId = roomMessage.sender && roomMessage.sender.id || entry.userId || "";
               entry.username = roomMessage.sender && roomMessage.sender.username || entry.username || "";
