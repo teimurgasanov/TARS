@@ -1139,6 +1139,22 @@ async function receiptIndex(guard, scenario) {
   assert.strictEqual(afterCSummary.count, 2, "overblock oracle (financial invariant): registry-C must be counted in the running total");
   assert.strictEqual(afterCSummary.total, 2500, "overblock oracle (financial invariant): registry-C must add its own 1300 RUB to the running total");
 
+  // WP-024: the real daily broadcast path must use PAS canonical identity
+  // before legacy receiptIdentity/exact fallback, without deleting either row.
+  const todayGuard = loadTrackedAppWithGuard().__testGuard;
+  const today = runtimeScenario(todayGuard, "accepted", "today-canonical-dedupe");
+  const todayRows = ["a", "b"].map((suffix) => ({
+    exact: todayGuard.exactHash(`${today.sourceContent}-${suffix}`), source: "confirmed",
+    receiptDate: today.requiredDate, receiptAmount: 100, receiptIdentity: `txn:${today.requiredDate}|${suffix}|100`,
+    pasCanonicalPaymentId: "today-payment", roomId: today.message.room.id, userId: today.owner.id
+  }));
+  await todayGuard.writeIndex(today.persistence, todayGuard.PROTECTED_ROOMS.kassa.index, { photos: todayRows });
+  await todayGuard.sendTodayTransferSummary({ id: "today-canonical", room: today.message.room, sender: today.owner, text: "сумма переводов", createdAt: new Date() }, today.read, today.persistence, today.modify, { info() {}, warn() {}, error() {} }, today.http, today.config);
+  const todayText = today.publishedMessages.at(-1).text;
+  assert.match(todayText, /Чеков: \*1\*/, "daily summary counts one canonical payment once");
+  assert.match(todayText, /Сумма: \*100 ₽\*/, "daily summary totals one canonical payment once");
+  assert.strictEqual((await receiptIndex(todayGuard, today)).photos.length, 2, "canonical daily dedupe preserves both observations");
+
   console.log("PASS: personal fallback keeps rejected receipts private without affecting unknown images or accepted totals");
 })().catch((error) => {
   console.error(error && error.stack || error);

@@ -10197,7 +10197,7 @@ var require_upload_duplicate_guard = __commonJS({
         const accountingRoomId = entry.resultRoomId || entry.roomId;
         if (accountingRoomId && message.room && accountingRoomId !== message.room.id) continue;
         if (dateFromEntry(entry, config) !== targetDate) continue;
-        const key = normalizedReceiptIdentityKey(entry.receiptIdentity) || String(entry.exact || "");
+        const key = receiptIndexEntryCanonicalPaymentKey(entry) || normalizedReceiptIdentityKey(entry.receiptIdentity) || String(entry.exact || "");
         if (key && seen[key]) continue;
         if (key) seen[key] = true;
         const amount = amountFromEntry(entry);
