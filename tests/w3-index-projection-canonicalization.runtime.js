@@ -56,6 +56,18 @@ function readFor(photos) {
   assert.strictEqual(merged.length, 1, "H2 must merge observations carrying one canonical payment identity");
   assert.strictEqual(merged[0].pasCanonicalPaymentId, "payment-a");
 
+  const confirmedCurrent = receipt({ exact: "confirmed-current", uploadId: "confirmed-current", updatedAt: 100 });
+  const duplicateRecent = receipt({ source: "duplicate", exact: "duplicate-recent", uploadId: "duplicate-recent", updatedAt: 200 });
+  const preserveDuplicateObservation = mergeConcurrentReceiptIndex([confirmedCurrent], [duplicateRecent], Date.now());
+  assert.strictEqual(preserveDuplicateObservation.length, 2, "canonical-only alias must not drop a distinct duplicate observation");
+  assert(preserveDuplicateObservation.some((entry) => entry.exact === "duplicate-recent"), "cached duplicate remains independently addressable");
+
+  const duplicateCurrent = receipt({ source: "duplicate", exact: "duplicate-current", uploadId: "duplicate-current", updatedAt: 100 });
+  const confirmedRecent = receipt({ exact: "confirmed-recent", uploadId: "confirmed-recent", updatedAt: 200 });
+  const preserveConfirmedObservation = mergeConcurrentReceiptIndex([duplicateCurrent], [confirmedRecent], Date.now());
+  assert.strictEqual(preserveConfirmedObservation.length, 2, "canonical-only alias must not drop a distinct confirmed observation");
+  assert(preserveConfirmedObservation.some((entry) => entry.exact === "confirmed-recent"), "cached confirmed remains independently addressable");
+
   const newerRejected = receipt({ source: "rejected", pasCanonicalPaymentId: "", exact: "legacy", updatedAt: 400 });
   const staleConfirmed = receipt({ pasCanonicalPaymentId: "", exact: "legacy", updatedAt: 300 });
   const nonAuthorityMerge = mergeConcurrentReceiptIndex([newerRejected], [staleConfirmed], Date.now());

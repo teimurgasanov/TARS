@@ -5572,7 +5572,16 @@ var require_upload_duplicate_guard = __commonJS({
       for (const cached of Array.isArray(recent) ? recent : []) {
         const keys = receiptIndexEntryKeys(cached);
         if (!keys.length) continue;
-        const position = keys.map((key) => positions[key]).find((candidate) => candidate !== void 0);
+        const localKey = receiptIndexEntryKey(cached);
+        const canonicalKey = receiptIndexEntryCanonicalPaymentKey(cached);
+        const localPosition = localKey ? positions[localKey] : void 0;
+        const canonicalPosition = canonicalKey ? positions[canonicalKey] : void 0;
+        // Canonical identity constrains financial projection, but it cannot
+        // erase a distinct local observation from the write cache.  Keep the
+        // established confirmed/confirmed consolidation; otherwise only a
+        // matching local observation may select an existing row.
+        const canonicalIncoming = canonicalPosition === void 0 ? void 0 : merged[canonicalPosition];
+        const position = localPosition !== void 0 ? localPosition : canonicalPosition !== void 0 && cached.source === "confirmed" && canonicalIncoming && canonicalIncoming.source === "confirmed" ? canonicalPosition : void 0;
         if (position === void 0) {
           // The process-local write cache is not a financial authority.  In
           // particular, do not restore an intentionally omitted legacy
